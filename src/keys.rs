@@ -2,11 +2,37 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// Reaches `/v1/*` only
+    Client,
+    /// Also reaches `/api/*`: providers, keys and the CLM install
+    #[default]
+    Admin,
+}
+
+impl Role {
+    pub fn allows(self, needed: Role) -> bool {
+        self == Role::Admin || needed == Role::Client
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Client => "client",
+            Role::Admin => "admin",
+        }
+    }
+}
+
 /// A jengine access key as stored: only its SHA-256 is kept, the key itself is shown once at creation.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredKey {
     pub id: String,
     pub name: String,
+    /// Keys saved before roles existed load as admin, the access they had.
+    #[serde(default)]
+    pub role: Role,
     /// The first characters of the key, enough to recognise it in a list.
     pub prefix: String,
     pub sha256: String,
@@ -18,6 +44,10 @@ pub struct StoredKey {
 impl StoredKey {
     pub fn expired(&self, now: u64) -> bool {
         self.expires_at.is_some_and(|t| t <= now)
+    }
+
+    pub fn active_admin(&self, now: u64) -> bool {
+        self.role == Role::Admin && !self.expired(now)
     }
 }
 
@@ -48,11 +78,13 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Creates a key with 256 bits from the OS random generator. Returns the key to show once and the record to store.
-pub fn generate(name: &str, expires_at: Option<u64>) -> (String, StoredKey) {
+/// Ids carry 128 bits, so a key holder cannot guess the ids of other keys and revoke them.
+pub fn generate(name: &str, role: Role, expires_at: Option<u64>) -> (String, StoredKey) {
     let key = format!("jgn_{}", random_hex(32));
     let record = StoredKey {
-        id: random_hex(4),
+        id: random_hex(16),
         name: name.to_owned(),
+        role,
         prefix: key[..12].to_owned(),
         sha256: sha256(&key),
         created_at: now(),
@@ -61,25 +93,31 @@ pub fn generate(name: &str, expires_at: Option<u64>) -> (String, StoredKey) {
     (key, record)
 }
 
-/// Whether the `Authorization` header carries a static key or a stored key that has not expired.
+/// The role of the static key or unexpired stored key in the `Authorization` header. Static keys are admin keys.
 pub fn verify(
     header: Option<&str>,
     static_keys: &[String],
     stored: &[StoredKey],
     now: u64,
-) -> bool {
-    let Some(given) = header.and_then(|h| h.strip_prefix("Bearer ")) else {
-        return false;
-    };
+) -> Option<Role> {
+    let given = header?.strip_prefix("Bearer ")?;
     let digest = sha256(given);
     // Every key is checked without stopping at the first match, so timing does not reveal which one matched.
     let static_ok = static_keys
         .iter()
         .fold(false, |ok, k| ok | same(given.as_bytes(), k.as_bytes()));
-    let stored_ok = stored.iter().fold(false, |ok, k| {
-        ok | (same(digest.as_bytes(), k.sha256.as_bytes()) & !k.expired(now))
+    let stored_role = stored.iter().fold(None, |role, k| {
+        if same(digest.as_bytes(), k.sha256.as_bytes()) & !k.expired(now) {
+            Some(k.role)
+        } else {
+            role
+        }
     });
-    static_ok | stored_ok
+    if static_ok {
+        Some(Role::Admin)
+    } else {
+        stored_role
+    }
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date.
@@ -125,21 +163,34 @@ mod tests {
 
     #[test]
     fn verifies_static_and_stored_keys() {
-        let (key, mut record) = generate("ci", None);
+        let (key, mut record) = generate("ci", Role::Client, None);
         assert!(key.starts_with("jgn_") && key.len() == 68);
+        assert_eq!(record.id.len(), 32);
         let header = format!("Bearer {key}");
         let now = now();
-        assert!(verify(Some(&header), &[], &[record.clone()], now));
-        assert!(!verify(
-            Some("Bearer jgn_wrong"),
-            &[],
-            &[record.clone()],
-            now
-        ));
-        assert!(!verify(Some(&key), &[], &[record.clone()], now));
+        assert_eq!(
+            verify(Some(&header), &[], &[record.clone()], now),
+            Some(Role::Client)
+        );
+        assert!(verify(Some("Bearer jgn_wrong"), &[], &[record.clone()], now).is_none());
+        assert!(verify(Some(&key), &[], &[record.clone()], now).is_none());
         record.expires_at = Some(now);
-        assert!(!verify(Some(&header), &[], &[record], now));
-        assert!(verify(Some("Bearer s3cret"), &["s3cret".into()], &[], now));
+        assert!(verify(Some(&header), &[], &[record], now).is_none());
+        assert_eq!(
+            verify(Some("Bearer s3cret"), &["s3cret".into()], &[], now),
+            Some(Role::Admin)
+        );
+    }
+
+    #[test]
+    fn admin_reaches_everything_and_client_only_the_api() {
+        assert!(Role::Admin.allows(Role::Admin) && Role::Admin.allows(Role::Client));
+        assert!(Role::Client.allows(Role::Client) && !Role::Client.allows(Role::Admin));
+        let old: StoredKey = serde_json::from_str(
+            r#"{"id":"3f9a1c2e","name":"ci","prefix":"jgn_","sha256":"","created_at":0,"expires_at":null}"#,
+        )
+        .unwrap();
+        assert!(old.role == Role::Admin);
     }
 
     #[test]

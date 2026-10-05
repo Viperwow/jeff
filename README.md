@@ -159,14 +159,23 @@ Without keys jengine accepts every request. Keep it that way only on your own ma
 
 Once one key exists, every `/v1` and `/api` request on both ports needs `Authorization: Bearer <key>`. Requests without a valid key get `401`. After 20 failures in a minute, the address gets `429` until the minute ends.
 
+Each key has a role:
+
+| Role | Reaches |
+|---|---|
+| `client` | `/v1`: decisions and models |
+| `admin` | `/v1` and `/api`: providers, keys and the CLM install, so the admin page too |
+
+A client key on `/api` gets `403`. The first key must be an admin key, and the last admin key cannot be revoked while client keys remain, so the admin page never locks itself out.
+
 Manage keys on the **Access keys** page or from the terminal:
 
 ```sh
-jengine keys create --name claude-agent             # valid 30 days
+jengine keys create --name ops --role admin --expires never
+jengine keys create --name claude-agent             # a client key, valid 30 days
 jengine keys create --name ci --expires 2027-01-31  # through the end of that day, UTC
-jengine keys create --name batch --expires never
 jengine keys list
-jengine keys revoke 3f9a1c2e
+jengine keys revoke 3f9a1c2e0b7d4a6f9e8c1b2a3d4e5f60
 ```
 
 `create` prints the key once. jengine stores only its SHA-256 hash, so a lost key cannot be recovered: create a new one.
@@ -175,7 +184,7 @@ A running server picks up changes from the terminal on the next request.
 
 The admin page sends a key too. The first key you create on that page is remembered by your browser, so the page keeps working after the lock turns on.
 
-Keys that never expire can also come from the environment. Each must have at least 32 characters:
+Keys that never expire can also come from the environment. They are admin keys, and each must have at least 32 characters:
 
 ```sh
 JENGINE_API_KEY="$(openssl rand -hex 32)" jengine
@@ -199,11 +208,16 @@ The same settings come from the environment:
 | `--config` | `JENGINE_CONFIG` | `~/.jengine/jengine.json` |
 | `--api-key` | `JENGINE_API_KEY` | none; separate several keys with commas |
 | `--allowed-host` | `JENGINE_ALLOWED_HOSTS` | none; separate several names with commas |
+| `--allow-private-providers` | `JENGINE_ALLOW_PRIVATE_PROVIDERS` | off; lets providers use addresses such as `10.0.0.0/8` and `192.168.0.0/16` |
 | | `JENGINE_HOME` | `~/.jengine`; holds the config and the CLM compose file |
+
+jengine does not start on a broken config, so a damaged file cannot silently drop the access keys. Fix or remove the file.
+
+Providers may use loopback and public addresses. Private networks need `--allow-private-providers`. Link-local and cloud metadata addresses such as `169.254.169.254` are always refused, and jengine does not follow redirects from providers. Changing a provider URL drops its saved key, so enter the key again for the new URL.
 
 Before you open a port to a network:
 
-- **Create a key.** Without one, anyone who reaches the port can use your providers.
+- **Create a key.** jengine refuses to listen on a non-loopback address while no key exists.
 - **Put TLS in front.** jengine speaks plain HTTP. Run it behind a reverse proxy such as Caddy or nginx, and set HSTS there.
 - **Keep the admin page private.** It edits providers and keys and starts Docker. Bind it to `127.0.0.1` and reach it through an SSH tunnel (`ssh -L 8081:127.0.0.1:8081 server`), or turn it off with `--no-ui`.
 - **Name the proxy.** The admin page answers only to `localhost` and IP addresses. Behind a proxy with a domain name, add `--allowed-host admin.example.com`.
@@ -217,7 +231,7 @@ jengine serve [flags]       run the API and the admin page
 jengine install clm         install and start local CLM in Docker
 jengine remove clm          stop and remove the CLM containers; the weights stay
 jengine keys list           list keys without showing them
-jengine keys create --name NAME [--expires 30d|YYYY-MM-DD|never]
+jengine keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|never]
 jengine keys revoke ID
 ```
 

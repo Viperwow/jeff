@@ -3,7 +3,7 @@ mod keys;
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Path, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State},
     http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -79,17 +79,18 @@ impl Default for Config {
     }
 }
 
-fn load_config(path: &str) -> Config {
+/// A missing file gives the defaults. A broken one is an error: falling back would drop every access key and
+/// open jengine to anyone.
+fn load_config(path: &str) -> Result<Config, String> {
     match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("{path}: {e}; starting with the default providers");
-            Config::default()
-        }),
-        Err(_) => Config::default(),
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) => Err(format!("{path}: {e}")),
     }
 }
 
-/// Writes the config readable by its owner only: it holds provider keys and access-key hashes.
+/// Writes the config readable by its owner only: it holds provider keys and access-key hashes. The text goes to a
+/// temporary file first, so a crash mid-write cannot leave a truncated config behind.
 fn save_config(path: &str, config: &Config) -> Result<(), String> {
     let text = serde_json::to_string_pretty(config).unwrap();
     let mut options = fs::OpenOptions::new();
@@ -102,11 +103,17 @@ fn save_config(path: &str, config: &Config) -> Result<(), String> {
     {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    std::io::Write::write_all(
-        &mut options.open(path).map_err(|e| format!("{path}: {e}"))?,
-        text.as_bytes(),
-    )
-    .map_err(|e| format!("{path}: {e}"))
+    let tmp = format!("{path}.tmp");
+    let write = || -> std::io::Result<()> {
+        let mut file = options.open(&tmp)?;
+        std::io::Write::write_all(&mut file, text.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)
+    };
+    write().map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("{path}: {e}")
+    })
 }
 
 fn modified(path: &str) -> Option<SystemTime> {
@@ -130,6 +137,10 @@ struct App {
     allowed_hosts: Vec<String>,
     /// Failed key checks per client address in the current window: (count, window start).
     failures: Mutex<HashMap<IpAddr, (u32, u64)>>,
+    /// A listener is on a non-loopback address: keys stay required even after the last one is revoked.
+    exposed: bool,
+    /// Providers may sit in private networks such as 10.0.0.0/8.
+    allow_private: bool,
 }
 
 /// Failed key checks one address may make per window before it gets 429 until the window ends.
@@ -139,6 +150,8 @@ const FAILURE_WINDOW_SECS: u64 = 60;
 const MAX_UPSTREAM_BYTES: usize = 16 * 1024 * 1024;
 /// Shortest `--api-key` accepted; generated keys carry 256 bits.
 const MIN_STATIC_KEY_LEN: usize = 32;
+/// The largest request body jengine accepts.
+const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
 async fn read_capped(mut resp: reqwest::Response) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
@@ -157,25 +170,101 @@ async fn read_capped(mut resp: reqwest::Response) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
-fn is_loopback_url(url: &str) -> bool {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let host = rest.split(['/', '?']).next().unwrap_or_default();
-    let host = match host.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or_default(),
-        None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+fn is_loopback_url(url: &reqwest::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Where a provider may point. Loopback stays open for local models. Link-local addresses, which hold cloud
+/// metadata endpoints, are always refused; private networks need `--allow-private-providers`.
+fn check_ip(ip: IpAddr, allow_private: bool) -> Result<(), String> {
+    let ip = ip.to_canonical();
+    let (forbidden, private) = match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            (
+                v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast() || v4.is_multicast(),
+                v4.is_private() || (a == 100 && (b & 0xc0) == 64),
+            )
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            (
+                (first & 0xffc0) == 0xfe80
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || v6 == std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254),
+                (first & 0xfe00) == 0xfc00,
+            )
+        }
     };
-    host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    if forbidden {
+        Err(format!("{ip} is a link-local or metadata address"))
+    } else if private && !allow_private {
+        Err(format!(
+            "{ip} is in a private network; start jengine with --allow-private-providers"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn parse_provider_url(url: &str, allow_private: bool) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("URL '{url}': {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("URL must start with http:// or https://".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("put the provider key in the key field, not in the URL".into());
+    }
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => check_ip(ip.into(), allow_private)?,
+        Some(url::Host::Ipv6(ip)) => check_ip(ip.into(), allow_private)?,
+        Some(url::Host::Domain(_)) => {}
+        None => return Err("URL has no host".into()),
+    }
+    Ok(parsed)
+}
+
+/// Resolves provider host names and refuses addresses `check_ip` rejects, so a name cannot point jengine at
+/// metadata endpoints, even if its DNS record changes after the provider was saved.
+struct GuardedResolver {
+    allow_private: bool,
+}
+
+impl reqwest::dns::Resolve for GuardedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let allow_private = self.allow_private;
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            if let Some(e) = addrs
+                .iter()
+                .find_map(|a| check_ip(a.ip(), allow_private).err())
+            {
+                return Err(format!("{host}: {e}").into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 impl App {
+    /// A broken file keeps the config in memory, so the access keys stay in force until the file is fixed.
     async fn refresh_from_disk(&self) {
         let now = modified(&self.config_path);
-        let mut seen = *self.config_mtime.lock().unwrap();
+        let seen = *self.config_mtime.lock().unwrap();
         if now.is_some() && now != seen {
-            *self.config.write().await = load_config(&self.config_path);
-            seen = now;
-            *self.config_mtime.lock().unwrap() = seen;
+            match load_config(&self.config_path) {
+                Ok(config) => *self.config.write().await = config,
+                Err(e) => eprintln!("{e}; keeping the config loaded before"),
+            }
+            *self.config_mtime.lock().unwrap() = now;
         }
     }
 
@@ -186,7 +275,13 @@ impl App {
     }
 
     async fn auth_required(&self) -> bool {
-        !self.static_keys.is_empty() || !self.config.read().await.keys.is_empty()
+        self.exposed || !self.static_keys.is_empty() || !self.config.read().await.keys.is_empty()
+    }
+
+    /// Whether some key can still reach `/api`, so the admin page does not lock itself out.
+    fn has_admin(&self, keys: &[keys::StoredKey]) -> bool {
+        let now = keys::now();
+        !self.static_keys.is_empty() || keys.iter().any(|k| k.active_admin(now))
     }
 }
 
@@ -417,12 +512,32 @@ fn public(config: &Config) -> Value {
     json!({ "default_model": config.default_model, "providers": providers })
 }
 
-/// With any jengine key set, even an expired one, every API and management request must carry a valid key.
+async fn require_client(
+    state: State<Arc<App>>,
+    peer: ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    require_key(state, peer, req, next, keys::Role::Client).await
+}
+
+async fn require_admin(
+    state: State<Arc<App>>,
+    peer: ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    require_key(state, peer, req, next, keys::Role::Admin).await
+}
+
+/// With any jengine key set, even an expired one, every API and management request must carry a valid key, and
+/// management requests an admin key.
 async fn require_key(
     State(app): State<Arc<App>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
+    needed: keys::Role,
 ) -> Response {
     app.refresh_from_disk().await;
     if app.auth_required().await {
@@ -444,8 +559,16 @@ async fn require_key(
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
-        let ok = keys::verify(auth, &app.static_keys, &app.config.read().await.keys, now);
-        if !ok {
+        let role = keys::verify(auth, &app.static_keys, &app.config.read().await.keys, now);
+        if let Some(role) = role
+            && !role.allows(needed)
+        {
+            return error(
+                StatusCode::FORBIDDEN,
+                "this is a client key; managing jengine needs an admin key",
+            );
+        }
+        if role.is_none() {
             let mut failures = app.failures.lock().unwrap();
             // Old windows are dropped once the map grows, so a flood of addresses cannot exhaust memory.
             if failures.len() > 10_000 {
@@ -534,7 +657,7 @@ async fn security_headers(req: Request, next: Next) -> Response {
 }
 
 fn key_view(k: &keys::StoredKey) -> Value {
-    json!({ "id": k.id, "name": k.name, "prefix": k.prefix, "created_at": k.created_at, "expires_at": k.expires_at })
+    json!({ "id": k.id, "name": k.name, "role": k.role, "prefix": k.prefix, "created_at": k.created_at, "expires_at": k.expires_at })
 }
 
 async fn list_keys(State(app): State<Arc<App>>) -> Json<Value> {
@@ -547,6 +670,7 @@ async fn list_keys(State(app): State<Arc<App>>) -> Json<Value> {
 #[derive(Deserialize)]
 struct KeyInput {
     name: String,
+    role: keys::Role,
     /// Unix seconds; `null` never expires.
     expires_at: Option<u64>,
 }
@@ -559,8 +683,14 @@ async fn create_key(State(app): State<Arc<App>>, Json(input): Json<KeyInput>) ->
     if input.expires_at.is_some_and(|t| t <= keys::now()) {
         return error(StatusCode::BAD_REQUEST, "expiry must be in the future");
     }
-    let (key, record) = keys::generate(name, input.expires_at);
     let mut config = app.config.write().await;
+    if input.role == keys::Role::Client && !app.has_admin(&config.keys) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "create an admin key first, or this page loses access once the first key exists",
+        );
+    }
+    let (key, record) = keys::generate(name, input.role, input.expires_at);
     let mut next = config.clone();
     next.keys.push(record.clone());
     if let Err(e) = app.save(&next).await {
@@ -579,6 +709,12 @@ async fn revoke_key(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
     if next.keys.len() == config.keys.len() {
         return error(StatusCode::NOT_FOUND, format!("no key with id '{id}'"));
     }
+    if !next.keys.is_empty() && app.has_admin(&config.keys) && !app.has_admin(&next.keys) {
+        return error(
+            StatusCode::CONFLICT,
+            "this is the last admin key; create another admin key or revoke the client keys first",
+        );
+    }
     if let Err(e) = app.save(&next).await {
         return error(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
@@ -595,7 +731,7 @@ struct ProviderInput {
     id: String,
     name: String,
     url: String,
-    /// Absent keeps the stored key for this id, "" clears it.
+    /// Absent keeps the stored key for this id while its URL stays the same, "" clears it.
     key: Option<String>,
     #[serde(default)]
     models: Vec<String>,
@@ -609,7 +745,11 @@ struct ConfigInput {
     providers: Vec<ProviderInput>,
 }
 
-fn build_config(current: &Config, input: ConfigInput) -> Result<Config, String> {
+fn build_config(
+    current: &Config,
+    input: ConfigInput,
+    allow_private: bool,
+) -> Result<Config, String> {
     let mut providers = Vec::new();
     for p in input.providers {
         let id = p.id.trim().to_owned();
@@ -624,18 +764,17 @@ fn build_config(current: &Config, input: ConfigInput) -> Result<Config, String> 
             return Err(format!("provider id '{id}' is used twice"));
         }
         let url = p.url.trim().to_owned();
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(format!("{id}: URL must start with http:// or https://"));
-        }
+        let parsed = parse_provider_url(&url, allow_private).map_err(|e| format!("{id}: {e}"))?;
+        // A saved key follows its provider only to the URL it was entered for, so it cannot be redirected.
         let key = match p.key {
             Some(k) => Some(k.trim().to_owned()).filter(|k| !k.is_empty()),
             None => current
                 .providers
                 .iter()
-                .find(|q| q.id == id)
+                .find(|q| q.id == id && q.url == url)
                 .and_then(|q| q.key.clone()),
         };
-        if key.is_some() && url.starts_with("http://") && !is_loopback_url(&url) {
+        if key.is_some() && parsed.scheme() == "http" && !is_loopback_url(&parsed) {
             return Err(format!(
                 "{id}: use https:// so the provider key is not sent in clear text"
             ));
@@ -672,12 +811,34 @@ fn build_config(current: &Config, input: ConfigInput) -> Result<Config, String> 
     })
 }
 
+/// Resolves provider host names at save time, so a refused address is reported here rather than as an
+/// unreachable provider later. Names that do not resolve yet are saved; the resolver checks them on every request.
+async fn check_provider_hosts(providers: &[Provider], allow_private: bool) -> Result<(), String> {
+    for p in providers {
+        let Some(host) = reqwest::Url::parse(&p.url)
+            .ok()
+            .and_then(|u| u.domain().map(str::to_owned))
+        else {
+            continue;
+        };
+        if let Ok(addrs) = tokio::net::lookup_host((host.as_str(), 0)).await {
+            for a in addrs {
+                check_ip(a.ip(), allow_private).map_err(|e| format!("{}: {host}: {e}", p.id))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>) -> Response {
     let mut config = app.config.write().await;
-    let next = match build_config(&config, input) {
+    let next = match build_config(&config, input, app.allow_private) {
         Ok(c) => c,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
+    if let Err(e) = check_provider_hosts(&next.providers, app.allow_private).await {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
     if let Err(e) = app.save(&next).await {
         return error(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
@@ -801,6 +962,9 @@ enum KeysAction {
         /// Who or what uses the key, for example "ci" or "claude-agent"
         #[arg(long)]
         name: String,
+        /// `client` reaches /v1 only; `admin` also manages providers and keys through /api and the admin page
+        #[arg(long, value_enum, default_value_t = keys::Role::Client)]
+        role: keys::Role,
         /// `never`, a number of days such as `30d`, or a date `YYYY-MM-DD` (valid through the end of that day, UTC)
         #[arg(long, default_value = "30d")]
         expires: String,
@@ -851,6 +1015,10 @@ struct ServeArgs {
         value_delimiter = ','
     )]
     allowed_hosts: Vec<String>,
+    /// Let providers use private network addresses such as 10.0.0.0/8 and 192.168.0.0/16. Loopback is always
+    /// allowed, link-local and cloud metadata addresses never are
+    #[arg(long, env = "JENGINE_ALLOW_PRIVATE_PROVIDERS")]
+    allow_private_providers: bool,
 }
 
 fn parse_addr(s: &str) -> Result<String, String> {
@@ -887,11 +1055,11 @@ fn config_file(arg: Option<String>) -> String {
 }
 
 fn run_keys(action: KeysAction, path: &str) {
-    let mut config = load_config(path);
     let fail = |e: String| -> ! {
         eprintln!("{e}");
         std::process::exit(1)
     };
+    let mut config = load_config(path).unwrap_or_else(|e| fail(e));
     let date = |t: Option<u64>| t.map_or("never".to_owned(), |t| format!("{} (unix)", t));
     match action {
         KeysAction::List => {
@@ -902,21 +1070,26 @@ fn run_keys(action: KeysAction, path: &str) {
             for k in &config.keys {
                 let state = if k.expired(now) { "expired" } else { "active" };
                 println!(
-                    "{}  {:<24} {}…  expires {}  {state}",
+                    "{}  {:<24} {:<6} {}…  expires {}  {state}",
                     k.id,
                     k.name,
+                    k.role.as_str(),
                     k.prefix,
                     date(k.expires_at)
                 );
             }
         }
-        KeysAction::Create { name, expires } => {
+        KeysAction::Create {
+            name,
+            role,
+            expires,
+        } => {
             let name = name.trim().to_owned();
             if name.is_empty() || name.chars().count() > 64 {
                 fail("name must be 1 to 64 characters".into());
             }
             let expires_at = keys::parse_expiry(&expires, keys::now()).unwrap_or_else(|e| fail(e));
-            let (key, record) = keys::generate(&name, expires_at);
+            let (key, record) = keys::generate(&name, role, expires_at);
             config.keys.push(record.clone());
             save_config(path, &config).unwrap_or_else(|e| fail(e));
             println!("{key}");
@@ -924,6 +1097,12 @@ fn run_keys(action: KeysAction, path: &str) {
                 "id {}; this key is shown only once, store it now",
                 record.id
             );
+            let now = keys::now();
+            if !config.keys.iter().any(|k| k.active_admin(now)) {
+                eprintln!(
+                    "note: no admin key yet; the admin page needs one: jengine keys create --name NAME --role admin"
+                );
+            }
         }
         KeysAction::Revoke { id } => {
             let before = config.keys.len();
@@ -954,7 +1133,11 @@ fn run_install(action: install::Action) {
 
 async fn serve(args: ServeArgs) {
     let config_path = config_file(args.config.clone());
-    let config = load_config(&config_path);
+    let config = load_config(&config_path).unwrap_or_else(|e| {
+        fail_with(&format!(
+            "{e}\nfix or remove the file; jengine does not start on a broken config"
+        ))
+    });
     if let Some(short) = args
         .api_keys
         .iter()
@@ -966,10 +1149,19 @@ async fn serve(args: ServeArgs) {
             &short[..short.len().min(4)]
         ));
     }
+    let allow_private = args.allow_private_providers;
+    // A provider that redirects could send the provider key on to a host jengine never checked.
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(GuardedResolver { allow_private })
         .build()
         .expect("HTTP client");
+    let loopback = |addr: &str| {
+        addr.parse::<SocketAddr>()
+            .is_ok_and(|a| a.ip().is_loopback())
+    };
+    let exposed = !loopback(&args.api) || (!args.no_ui && !loopback(&args.ui));
     let app = Arc::new(App {
         http,
         config: RwLock::new(config),
@@ -991,14 +1183,28 @@ async fn serve(args: ServeArgs) {
             .filter(|h| !h.is_empty())
             .collect(),
         failures: Mutex::new(HashMap::new()),
+        exposed,
+        allow_private,
     });
+    if exposed && app.static_keys.is_empty() && app.config.read().await.keys.is_empty() {
+        let addr = if loopback(&args.api) {
+            &args.ui
+        } else {
+            &args.api
+        };
+        fail_with(&format!(
+            "refusing to listen on {addr} without an access key: anyone who reaches it could use the stored \
+             provider keys.\ncreate one first with `jengine keys create --name NAME --role admin`, or pass --api-key"
+        ));
+    }
 
     // /health stays open for liveness probes; it reveals nothing about providers.
     let api = Router::new()
         .route("/v1/systemone", post(systemone))
         .route("/v1/models", get(models))
-        .route_layer(middleware::from_fn_with_state(app.clone(), require_key))
-        .route("/health", get(health));
+        .route_layer(middleware::from_fn_with_state(app.clone(), require_client))
+        .route("/health", get(health))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
     // The UI calls the same /v1 routes on its own origin, so it works whether or not the API port is reachable from the browser.
     let api_addr = args.api.clone();
     let manage = Router::new()
@@ -1007,7 +1213,8 @@ async fn serve(args: ServeArgs) {
         .route("/api/clm/{action}", post(clm_action))
         .route("/api/keys", get(list_keys).post(create_key))
         .route("/api/keys/{id}", delete(revoke_key))
-        .route_layer(middleware::from_fn_with_state(app.clone(), require_key));
+        .route_layer(middleware::from_fn_with_state(app.clone(), require_admin))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
     let info_app = app.clone();
     let ui = api
         .clone()
@@ -1048,13 +1255,6 @@ async fn serve(args: ServeArgs) {
         .await
         .unwrap_or_else(|e| fail(&args.api, e));
     println!("jengine API on http://{}", args.api);
-    let public = !args.api.starts_with("127.") && !args.api.starts_with("[::1]");
-    if public && !app.auth_required().await {
-        eprintln!(
-            "warning: the API listens on {} without --api-key; anyone who reaches it can use the stored provider keys",
-            args.api
-        );
-    }
     let api_server = axum::serve(
         api_listener,
         api.with_state(app.clone())
@@ -1092,11 +1292,44 @@ mod tests {
 
     #[test]
     fn detects_loopback_urls() {
-        assert!(is_loopback_url("http://127.0.0.1:8700"));
-        assert!(is_loopback_url("http://localhost:8000/x"));
-        assert!(is_loopback_url("http://[::1]:9000"));
-        assert!(!is_loopback_url("http://10.0.0.5:8000"));
-        assert!(!is_loopback_url("http://api.example.com"));
+        let loopback = |u: &str| is_loopback_url(&reqwest::Url::parse(u).unwrap());
+        assert!(loopback("http://127.0.0.1:8700"));
+        assert!(loopback("http://localhost:8000/x"));
+        assert!(loopback("http://[::1]:9000"));
+        assert!(!loopback("http://10.0.0.5:8000"));
+        assert!(!loopback("http://api.example.com"));
+        assert!(!loopback("http://127.0.0.1.example.com"));
+    }
+
+    #[test]
+    fn guards_provider_addresses() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(check_ip(ip("127.0.0.1"), false).is_ok());
+        assert!(check_ip(ip("::1"), false).is_ok());
+        assert!(check_ip(ip("93.184.216.34"), false).is_ok());
+        for refused in [
+            "169.254.169.254",
+            "fe80::1",
+            "fd00:ec2::254",
+            "0.0.0.0",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(check_ip(ip(refused), true).is_err(), "{refused}");
+        }
+        for private in [
+            "10.0.0.5",
+            "192.168.1.2",
+            "172.16.0.1",
+            "100.64.0.1",
+            "fd12::1",
+        ] {
+            assert!(check_ip(ip(private), false).is_err(), "{private}");
+            assert!(check_ip(ip(private), true).is_ok(), "{private}");
+        }
+        assert!(parse_provider_url("http://169.254.169.254/latest", true).is_err());
+        assert!(parse_provider_url("https://user:pw@api.example.com", false).is_err());
+        assert!(parse_provider_url("ftp://api.example.com", false).is_err());
+        assert!(parse_provider_url("https://api.example.com/v1", false).is_ok());
     }
 
     #[test]
@@ -1137,19 +1370,18 @@ mod tests {
                 installer: None,
             }],
         };
-        assert_eq!(
-            build_config(&current, input(None)).unwrap().providers[0]
+        let key_of = |input| {
+            build_config(&current, input, false).unwrap().providers[0]
                 .key
-                .as_deref(),
-            Some("secret")
-        );
-        assert!(
-            build_config(&current, input(Some(" "))).unwrap().providers[0]
-                .key
-                .is_none()
-        );
+                .clone()
+        };
+        assert_eq!(key_of(input(None)).as_deref(), Some("secret"));
+        assert!(key_of(input(Some(" "))).is_none());
+        let mut moved = input(None);
+        moved.providers[0].url = "https://attacker.example".into();
+        assert!(key_of(moved).is_none());
         let mut bad = input(None);
         bad.default_model = "clm/clm-latest".into();
-        assert!(build_config(&current, bad).is_err());
+        assert!(build_config(&current, bad, false).is_err());
     }
 }

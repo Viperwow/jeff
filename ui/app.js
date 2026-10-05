@@ -251,19 +251,33 @@ function stepIcon(kind, progress) {
 /** Shows the current step next to the buttons and every step under "All steps". Returns whether all are done. */
 function renderSteps(card, t) {
   const steps = t.steps || [];
-  const started = t.state === "running" || t.state === "error" || steps.slice(1).some((s) => s.done);
-  const active = steps.findIndex((s) => !s.done);
-  const ready = steps.length > 0 && active === -1;
-  const kindOf = (s, i) => s.done ? "done" : i !== active ? "pending" : t.state === "error" ? "error" : s.progress > 0 ? "ring" : "spin";
-
+  const running = t.state === "running";
   const current = $(".p-current", card);
+  if (running && card.dataset.action === "remove") {
+    current.hidden = false;
+    $(".p-task", card).hidden = true;
+    $(".p-details", card).hidden = true;
+    current.replaceChildren(stepIcon("spin"), el("span", "shrink-0 font-medium", "Uninstalling"), el("span", "note min-w-0", t.step || "Removing the CLM containers…"));
+    return false;
+  }
+  const started = running || t.state === "error" || steps.slice(1).some((s) => s.done);
+  let active = steps.findIndex((s) => !s.done);
+  // A reinstall recreates running containers, so every step still reads done until compose stops them.
+  const restarting = running && steps.length > 0 && active === -1;
+  if (restarting) active = Math.max(0, steps.findIndex((s) => s.id === "containers"));
+  const ready = steps.length > 0 && active === -1;
+  const isDone = (s, i) => s.done && !(restarting && i >= active);
+  const kindOf = (s, i) => i === active
+    ? (t.state === "error" ? "error" : s.progress > 0 && !s.done ? "ring" : "spin")
+    : isDone(s, i) ? "done" : "pending";
+
   current.hidden = !started || ready;
   $(".p-task", card).hidden = started && !ready && t.state !== "error";
-  if (started && !ready) {
+  if (started && !ready && steps.length) {
     const s = steps[active];
     const kind = kindOf(s, active);
     const total = steps.reduce((sum, x) => sum + x.weight, 0);
-    const doneWeight = steps.reduce((sum, x) => sum + x.weight * (x.done ? 1 : x.progress || 0), 0);
+    const doneWeight = steps.reduce((sum, x, i) => sum + x.weight * (isDone(x, i) ? 1 : restarting ? 0 : x.progress || 0), 0);
     const overall = doneWeight / total;
     const head = el("span", "shrink-0 font-medium tabular-nums", t.state === "error" ? "Install failed" : `Installing ${Math.floor(overall * 100)}%`);
     const now = el("span", "note min-w-0", `Step ${active + 1} of ${steps.length}: ${s.label}`);
@@ -287,14 +301,34 @@ async function clmTask(card, action) {
   const buttons = [$(".p-install-btn", card), $(".p-remove-btn", card)];
   if (action) {
     if (action === "remove" && !confirm("Stop and remove the CLM containers? Downloaded weights are kept.")) return;
+    // Shown and locked before the request, so the click registers at once and cannot start a second action.
+    for (const b of buttons) b.disabled = true;
+    card.dataset.action = action;
+    renderSteps(card, { steps: card.clmSteps, state: "running", step: action === "remove" ? "Removing the CLM containers…" : "" });
     try { await api(`/api/clm/${action}`, { method: "POST" }); }
-    catch (e) { say(out, e.message, "err"); return; }
+    catch (e) {
+      for (const b of buttons) b.disabled = false;
+      delete card.dataset.action;
+      renderSteps(card, { steps: card.clmSteps, state: "idle" });
+      say(out, e.message, "err");
+      return;
+    }
   }
   const t = (await api("/api/clm")).body;
-  for (const b of buttons) b.disabled = t.state === "running";
+  if (t.state !== "running") delete card.dataset.action;
+  card.clmSteps = t.steps;
   const ready = renderSteps(card, t);
   const containersUp = (t.steps || []).find((s) => s.id === "containers")?.done;
-  buttons[0].textContent = containersUp ? "Reinstall" : "Install";
+  // Reinstall stays locked while the model downloads, loads and warms up: restarting would begin that again.
+  const busy = t.state === "running" || (containersUp && !ready);
+  buttons[0].disabled = busy;
+  buttons[1].disabled = t.state === "running";
+  buttons[0].title = busy && t.state !== "running" ? "CLM is still starting. Uninstall stops it." : "";
+  // Kept while busy: a reinstall stops the containers for a moment, which would flip the label to Install.
+  if (!busy || !card.dataset.labelSet) {
+    buttons[0].textContent = containersUp ? "Reinstall" : "Install";
+    card.dataset.labelSet = "1";
+  }
   if (t.state === "error") say(out, t.error, "err");
   else if (ready) say(out, "CLM is installed and ready.", "ok");
   else if (t.state === "running") say(out, t.step || "Working…");
@@ -334,6 +368,15 @@ function syncExpiry() {
     : date ? `Valid through ${shortDate(endOfDay(date))}.` : "Pick a date.", "");
 }
 
+function syncRole() {
+  say($("#key-role-note"), $("#key-role").value === "admin"
+    ? "Calls the API and manages jengine on this page."
+    : "Calls /v1 only: decisions and models.", "");
+}
+
+$("#key-role").addEventListener("change", syncRole);
+syncRole();
+
 $("#key-date").min = dateValue(0);
 $("#key-date").value = dateValue(30);
 $("#key-date").addEventListener("input", syncExpiry);
@@ -348,12 +391,12 @@ $("#key-form").onsubmit = async (e) => {
     const { body } = await api("/api/keys", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: $("#key-name").value, expires_at: never ? null : endOfDay(expiryDate()) }),
+      body: JSON.stringify({ name: $("#key-name").value, role: $("#key-role").value, expires_at: never ? null : endOfDay(expiryDate()) }),
     });
     $("#key-value").value = body.key;
     $("#key-created").hidden = false;
     // The first key locks jengine; keep it here so this page does not lock its own operator out.
-    const kept = !store.get("key");
+    const kept = !store.get("key") && body.role === "admin";
     if (kept) store.set("key", body.key);
     $("#key-saved-note").textContent = kept ? "This browser now uses this key for the admin page." : "";
     $("#key-name").value = "";
@@ -370,7 +413,7 @@ $("#key-copy").onclick = () => navigator.clipboard.writeText($("#key-value").val
 function keyRow(k, now, last) {
   const li = el("li", "flex flex-wrap items-center gap-x-4 gap-y-1 py-3");
   const main = el("div", "min-w-0 flex-1");
-  main.append(el("div", "font-medium", k.name), el("div", "note font-mono", `${k.prefix}…`));
+  main.append(el("div", "font-medium", k.name), el("div", "note font-mono", `${k.prefix}… · ${k.role}`));
   const expired = k.expires_at !== null && k.expires_at <= now;
   const when = el("div", "note text-right tabular-nums");
   when.append(el("div", "", `Created ${shortDate(k.created_at)}`));
@@ -401,6 +444,11 @@ async function loadKeys() {
   const now = Math.floor(Date.now() / 1000);
   const count = body.keys.length + body.static_keys;
   $("#key-list").replaceChildren(...body.keys.map((k) => keyRow(k, now, count === 1)));
+  // Until an admin key exists, a client key would lock this page out, so the server accepts only admin keys.
+  const hasAdmin = body.static_keys > 0 || body.keys.some((k) => k.role === "admin" && (k.expires_at === null || k.expires_at > now));
+  $("#key-role").querySelector('option[value="client"]').disabled = !hasAdmin;
+  if (!hasAdmin) $("#key-role").value = "admin";
+  syncRole();
   if (!body.keys.length) $("#key-list").append(el("li", "note py-3", "No keys yet. Without keys, jengine accepts every request."));
   $("#key-static").hidden = !body.static_keys;
   $("#key-static").textContent = `Plus ${body.static_keys} key${body.static_keys === 1 ? "" : "s"} from --api-key or JENGINE_API_KEY. Those never expire and are changed where jengine is started.`;

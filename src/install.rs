@@ -124,7 +124,8 @@ impl Action {
 
     fn compose_args(self) -> &'static [&'static str] {
         match self {
-            Self::Install => &["up", "-d"],
+            // Without --force-recreate, Reinstall on running containers would do nothing.
+            Self::Install => &["up", "-d", "--force-recreate"],
             // Volumes stay, so a reinstall does not download the 16 GB of weights again.
             Self::Remove => &["down"],
         }

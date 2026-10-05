@@ -4,17 +4,17 @@
 
 Found in a read-only audit against the OWASP API Security Top 10 (2023).
 
-- [ ] **Key roles.** A `client` key reaches `/v1/*` only. An `admin` key also reaches `/api/*`: providers, keys and the CLM install.
-- [ ] **Provider key on URL change.** Changing a provider URL drops its saved key, so the key cannot be redirected to another host.
-- [ ] **SSRF guard.** Do not follow redirects from providers.
-- [ ] **SSRF guard.** Refuse link-local and cloud-metadata addresses (`169.254.0.0/16`, `fd00:ec2::254`).
-- [ ] **SSRF guard.** Allow private networks only with an explicit flag.
-- [ ] **SSRF guard.** Parse provider URLs with a real URL parser.
-- [ ] **Safe binding.** Refuse to listen on a non-loopback address while no access key exists, for the API and the admin page alike.
-- [ ] **Config writes.** Write the config atomically: a temporary file, then a rename.
-- [ ] **Config errors.** Refuse to start on a broken config instead of falling back to the defaults.
-- [ ] **Key ids.** Make key ids 128-bit, so a valid key holder cannot guess and revoke other keys.
-- [ ] **Request size.** Set an explicit request body limit.
+- [x] **Key roles.** A `client` key reaches `/v1/*` only. An `admin` key also reaches `/api/*`: providers, keys and the CLM install.
+- [x] **Provider key on URL change.** Changing a provider URL drops its saved key, so the key cannot be redirected to another host.
+- [x] **SSRF guard.** Do not follow redirects from providers.
+- [x] **SSRF guard.** Refuse link-local and cloud-metadata addresses (`169.254.0.0/16`, `fd00:ec2::254`).
+- [x] **SSRF guard.** Allow private networks only with an explicit flag.
+- [x] **SSRF guard.** Parse provider URLs with a real URL parser.
+- [x] **Safe binding.** Refuse to listen on a non-loopback address while no access key exists, for the API and the admin page alike.
+- [x] **Config writes.** Write the config atomically: a temporary file, then a rename.
+- [x] **Config errors.** Refuse to start on a broken config instead of falling back to the defaults.
+- [x] **Key ids.** Make key ids 128-bit, so a valid key holder cannot guess and revoke other keys.
+- [x] **Request size.** Set an explicit request body limit.
 - [ ] **Public info.** Limit the unauthenticated `/api/info` to what the admin page needs.
 
 ## Security, later

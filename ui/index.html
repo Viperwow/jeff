@@ -114,11 +114,19 @@
 
       <form id="key-form" class="card space-y-4">
         <h2 class="text-base font-semibold">New key</h2>
-        <div class="grid gap-4 sm:grid-cols-2">
+        <div class="grid gap-4 sm:grid-cols-3">
           <label class="block space-y-1">
             <span class="block font-medium">Name</span>
             <input id="key-name" class="control" maxlength="64" placeholder="ci, claude-agent, search-team" required>
             <span class="note block">Who or what uses the key.</span>
+          </label>
+          <label class="block space-y-1">
+            <span class="block font-medium">Access</span>
+            <select id="key-role" class="control">
+              <option value="client" selected>Client</option>
+              <option value="admin">Admin</option>
+            </select>
+            <span id="key-role-note" class="note block"></span>
           </label>
           <div class="block">
             <label for="key-exp" class="mb-1 block font-medium">Expires</label>
