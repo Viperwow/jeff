@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jengine</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="bg-neutral-50 text-sm text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100">
+<div class="flex min-h-screen max-md:flex-col">
+  <nav class="flex w-48 shrink-0 flex-col gap-1 border-r border-neutral-200 p-3 max-md:w-auto max-md:flex-row max-md:items-center max-md:border-r-0 max-md:border-b dark:border-neutral-800">
+    <div class="px-2 pb-4 text-base font-semibold tracking-tight max-md:pr-4 max-md:pb-0">jengine</div>
+    <a class="tab" href="#playground">Playground</a>
+    <a class="tab" href="#providers">Providers</a>
+    <a class="tab" href="#keys">Access keys</a>
+  </nav>
+
+  <main class="min-w-0 flex-1">
+    <p id="auth-error" role="alert" class="m-6 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-red-800 max-sm:m-4 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200" hidden></p>
+    <!-- Playground -->
+    <div id="page-playground" class="grid lg:h-screen lg:grid-cols-2">
+      <section class="flex min-w-0 flex-col gap-5 border-neutral-200 p-6 lg:overflow-y-auto lg:border-r max-sm:p-4 dark:border-neutral-800">
+        <header>
+          <h1 class="text-2xl font-semibold tracking-tight">Playground</h1>
+          <p class="mt-1 text-neutral-600 dark:text-neutral-400">Ask any Jev-compatible model through one endpoint.</p>
+        </header>
+
+        <label class="block space-y-1">
+          <span class="block font-medium">Model</span>
+          <select id="pg-model" class="control"></select>
+        </label>
+
+        <label class="block space-y-1">
+          <span class="flex items-baseline justify-between font-medium">State <span id="pg-count" class="note font-normal tabular-nums"></span></span>
+          <textarea id="pg-state" class="control font-mono text-xs leading-relaxed" rows="5"></textarea>
+        </label>
+
+        <div class="space-y-3">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 class="text-base font-semibold">Questions</h2>
+            <span class="note">One call answers all of them against the same state.</span>
+          </div>
+          <div id="pg-questions" class="space-y-3"></div>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="btn" data-add="noul">Add yes/no</button>
+            <button type="button" class="btn" data-add="choice">Add choice</button>
+            <button type="button" class="btn" data-add="score">Add score</button>
+          </div>
+        </div>
+
+        <div class="sticky bottom-0 -mx-6 mt-auto flex items-center gap-3 border-t border-neutral-200 bg-neutral-50 px-6 py-4 max-sm:-mx-4 max-sm:px-4 dark:border-neutral-800 dark:bg-neutral-950">
+          <button id="pg-run" type="button" class="btn btn-primary">Run</button>
+          <span class="note">Ctrl + Enter</span>
+          <span id="pg-status" class="note ml-auto text-right" aria-live="polite"></span>
+        </div>
+      </section>
+
+      <section class="flex min-w-0 flex-col gap-4 p-6 lg:overflow-y-auto max-sm:p-4">
+        <div class="flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800" role="tablist">
+          <button type="button" class="view-tab" data-view="answer" role="tab">Answer</button>
+          <button type="button" class="view-tab" data-view="json" role="tab">JSON</button>
+          <button type="button" class="view-tab" data-view="curl" role="tab">curl</button>
+        </div>
+        <div id="pg-meta" class="flex flex-wrap gap-2"></div>
+        <div id="view-answer" class="space-y-3">
+          <p class="note py-12 text-center">Run the questions to see each answer here.</p>
+        </div>
+        <pre id="view-json" class="card overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap" hidden></pre>
+        <div id="view-curl" class="space-y-2" hidden>
+          <pre id="curl-text" class="card overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap"></pre>
+          <button id="curl-copy" type="button" class="btn">Copy</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- Providers -->
+    <div id="page-providers" class="mx-auto max-w-4xl space-y-4 p-8 max-sm:p-4" hidden>
+      <header class="mb-6">
+        <h1 class="text-2xl font-semibold tracking-tight">Providers</h1>
+        <p class="mt-1 text-neutral-600 dark:text-neutral-400">Any server with <code class="font-mono text-[13px]">POST /v1/systemone</code>. Address a model as <code class="font-mono text-[13px]">provider/model</code>.</p>
+      </header>
+
+      <section class="card space-y-3">
+        <div>
+          <h2 class="text-base font-semibold">Default model</h2>
+          <p class="note">What a request gets when it sends no <code>model</code>. Lists the models of the providers below.</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <select id="default-model" class="control" aria-label="Default model"></select>
+          <button id="refresh" type="button" class="btn">Refresh</button>
+        </div>
+      </section>
+
+      <div id="provider-list" class="space-y-4"></div>
+
+      <section class="card flex flex-wrap items-center gap-3">
+        <h2 class="text-base font-semibold">Add provider</h2>
+        <select id="preset" class="control w-auto flex-1" aria-label="Provider preset"></select>
+        <button id="add-provider" type="button" class="btn">Add</button>
+      </section>
+
+      <div class="flex items-center gap-3 pt-2">
+        <button id="save" type="button" class="btn btn-primary">Save</button>
+        <span id="save-status" class="note" aria-live="polite"></span>
+      </div>
+    </div>
+
+    <!-- Access keys -->
+    <div id="page-keys" class="mx-auto max-w-4xl space-y-4 p-8 max-sm:p-4" hidden>
+      <header class="mb-6">
+        <h1 class="text-2xl font-semibold tracking-tight">Access keys</h1>
+        <p class="mt-1 text-neutral-600 dark:text-neutral-400">Clients send a key as <code class="font-mono text-[13px]">Authorization: Bearer &lt;key&gt;</code>. Once any key exists, jengine refuses every request without a valid one.</p>
+      </header>
+
+      <form id="key-form" class="card space-y-4">
+        <h2 class="text-base font-semibold">New key</h2>
+        <div class="grid gap-4 sm:grid-cols-2">
+          <label class="block space-y-1">
+            <span class="block font-medium">Name</span>
+            <input id="key-name" class="control" maxlength="64" placeholder="ci, claude-agent, search-team" required>
+            <span class="note block">Who or what uses the key.</span>
+          </label>
+          <div class="block">
+            <label for="key-exp" class="mb-1 block font-medium">Expires</label>
+            <div class="flex gap-2">
+              <select id="key-exp" class="control">
+                <option value="7">In 7 days</option>
+                <option value="30" selected>In 30 days</option>
+                <option value="90">In 90 days</option>
+                <option value="365">In 1 year</option>
+                <option value="date">On a date…</option>
+                <option value="never">Never</option>
+              </select>
+              <input id="key-date" type="date" class="control w-auto" aria-label="Expiry date" hidden>
+            </div>
+            <span id="key-exp-note" class="note mt-1 block"></span>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <button type="submit" class="btn btn-primary">Create key</button>
+          <span id="key-status" class="note" aria-live="polite"></span>
+        </div>
+      </form>
+
+      <section id="key-created" class="space-y-3 rounded-lg border border-green-300 bg-green-50 p-5 text-green-950 dark:border-green-800 dark:bg-green-950/40 dark:text-green-100" hidden>
+        <p class="font-medium">Copy this key now. jengine keeps only its hash and cannot show it again.</p>
+        <div class="flex gap-2">
+          <input id="key-value" class="control font-mono" readonly aria-label="New key">
+          <button id="key-copy" type="button" class="btn">Copy</button>
+        </div>
+        <p id="key-saved-note" class="text-xs text-green-900 dark:text-green-200"></p>
+      </section>
+
+      <section class="card space-y-3">
+        <h2 class="text-base font-semibold">Keys</h2>
+        <p id="key-static" class="note" hidden></p>
+        <ul id="key-list" class="divide-y divide-neutral-200 dark:divide-neutral-800"></ul>
+      </section>
+    </div>
+  </main>
+</div>
+
+<template id="tpl-provider">
+  <section class="card space-y-4">
+    <div class="flex flex-wrap items-start gap-3">
+      <div class="min-w-0 flex-1">
+        <h2 class="flex flex-wrap items-center gap-x-3 text-base font-semibold"><span class="p-title"></span><span class="status note inline-flex items-center gap-1.5 font-normal before:size-2 before:rounded-full before:bg-current empty:hidden"></span></h2>
+        <p class="p-hint note"></p>
+      </div>
+      <button type="button" class="p-delete btn btn-danger min-w-0">Remove provider</button>
+    </div>
+    <div class="grid gap-3 sm:grid-cols-2">
+      <label class="block space-y-1"><span class="block font-medium">Name</span><input class="control p-name"></label>
+      <label class="block space-y-1"><span class="block font-medium">ID</span><input class="control p-id font-mono" spellcheck="false"><span class="note block">Model prefix: <span class="p-id-echo font-mono"></span>/model</span></label>
+      <label class="block space-y-1"><span class="block font-medium">URL</span><input class="control p-url" spellcheck="false"></label>
+      <label class="block space-y-1"><span class="block font-medium">API key</span><input class="control p-key" type="password" autocomplete="off"><span class="p-key-hint note block min-h-4"></span></label>
+      <label class="block space-y-1 sm:col-span-2"><span class="block font-medium">Models</span><input class="control p-models font-mono" spellcheck="false"><span class="note block">Comma-separated. Used when the provider does not list its own models.</span></label>
+    </div>
+    <div class="p-install space-y-3 border-t border-neutral-200 pt-4 dark:border-neutral-800" hidden>
+      <div class="flex flex-wrap items-center gap-3">
+        <button type="button" class="p-install-btn btn">Install</button>
+        <button type="button" class="p-remove-btn btn">Uninstall</button>
+        <span class="p-current flex min-w-0 items-center gap-2 max-sm:basis-full" aria-live="polite" hidden></span>
+        <span class="p-task note min-w-0 flex-1 basis-64" aria-live="polite">Runs CLM in Docker: a Qwen3-8B FP8 encoder on the GPU plus clm-serve. Needs Docker Desktop and an NVIDIA GPU; downloads about 25 GB once.</span>
+      </div>
+      <details class="p-details group" hidden>
+        <summary class="note inline-flex cursor-pointer list-none items-center gap-1 select-none hover:text-neutral-900 dark:hover:text-neutral-100">
+          <svg viewBox="0 0 20 20" class="size-3.5 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5l5 5-5 5"/></svg>
+          All steps
+        </summary>
+        <ol class="p-steps mt-2 space-y-1 pl-1"></ol>
+      </details>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-question">
+  <div class="q card space-y-3 p-4">
+    <div class="flex items-center gap-2">
+      <span class="q-badge badge"></span>
+      <input class="q-key control font-mono" placeholder="key" spellcheck="false" aria-label="Question key">
+      <select class="q-type control w-auto" aria-label="Question type">
+        <option value="noul">yes/no</option>
+        <option value="choice">choice</option>
+        <option value="score">score</option>
+      </select>
+      <button type="button" class="q-del icon-btn" aria-label="Remove question" title="Remove question"></button>
+    </div>
+    <input class="q-instr control" placeholder="Instructions, for example: Is the customer asking for a refund?" aria-label="Instructions">
+    <div class="q-rows space-y-2"></div>
+    <div class="flex flex-wrap items-center gap-3">
+      <button type="button" class="q-add btn min-w-0"></button>
+      <span class="q-help note min-w-0 flex-1"></span>
+    </div>
+  </div>
+</template>
+
+<script src="/app.js"></script>
+</body>
+</html>

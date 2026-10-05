@@ -1,0 +1,18 @@
+[package]
+name = "jengine"
+version = "0.1.0"
+edition = "2024"
+description = "One API for typed decisions, in front of every Jev-compatible model"
+license = "MIT"
+repository = "https://github.com/Viperwow/jengine"
+
+[dependencies]
+axum = "0.8.9"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures-util = { version = "0.3.34", default-features = false }
+getrandom = "0.4.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tokio = { version = "1.53.2", features = ["full"] }

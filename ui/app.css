@@ -1,0 +1,77 @@
+@import "tailwindcss";
+@source "./index.html";
+@source "./app.js";
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+    accent-color: var(--color-neutral-900);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      accent-color: var(--color-neutral-100);
+    }
+  }
+  ::selection {
+    @apply bg-sky-200 text-sky-950 dark:bg-sky-800 dark:text-sky-50;
+  }
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-sky-500;
+  }
+  * {
+    scrollbar-color: var(--color-neutral-300) transparent;
+  }
+  @media (prefers-color-scheme: dark) {
+    * {
+      scrollbar-color: var(--color-neutral-700) transparent;
+    }
+  }
+}
+
+@layer components {
+  .control {
+    @apply w-full rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-neutral-900 placeholder:text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:placeholder:text-neutral-400;
+  }
+  .btn {
+    @apply inline-flex min-w-24 shrink-0 cursor-pointer items-center justify-center rounded-md border border-neutral-300 px-3 py-1.5 font-medium enabled:hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-neutral-700 dark:enabled:hover:bg-neutral-800;
+  }
+  .btn-danger {
+    @apply gap-2 text-red-600 dark:text-red-300;
+  }
+  .btn-danger[data-confirm="true"] {
+    @apply border-red-800 bg-red-800 text-white enabled:hover:bg-red-800 dark:border-red-800 dark:bg-red-800 dark:text-white dark:enabled:hover:bg-red-800;
+  }
+  .btn-primary {
+    @apply border-neutral-900 bg-neutral-900 text-white enabled:hover:bg-neutral-700 dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900 dark:enabled:hover:bg-neutral-300;
+  }
+  .card {
+    @apply rounded-lg border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900/40;
+  }
+  .note {
+    @apply text-xs text-neutral-600 data-[tone=ok]:text-green-700 data-[tone=err]:text-red-700 dark:text-neutral-400 dark:data-[tone=ok]:text-green-400 dark:data-[tone=err]:text-red-400;
+  }
+  .view-tab {
+    @apply -mb-px cursor-pointer border-b-2 border-transparent px-3 py-2 font-medium text-neutral-600 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100;
+  }
+  .view-tab[aria-selected="true"] {
+    @apply border-sky-600 text-sky-800 dark:border-sky-400 dark:text-sky-200;
+  }
+  .badge {
+    @apply shrink-0 rounded px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase data-[type=noul]:bg-violet-100 data-[type=noul]:text-violet-800 data-[type=choice]:bg-sky-100 data-[type=choice]:text-sky-800 data-[type=score]:bg-amber-100 data-[type=score]:text-amber-900 dark:data-[type=noul]:bg-violet-950 dark:data-[type=noul]:text-violet-200 dark:data-[type=choice]:bg-sky-950 dark:data-[type=choice]:text-sky-200 dark:data-[type=score]:bg-amber-950 dark:data-[type=score]:text-amber-200;
+  }
+  .bar {
+    @apply border-neutral-200 bg-neutral-50 data-[chosen=true]:border-sky-300 dark:border-neutral-800 dark:bg-neutral-900 dark:data-[chosen=true]:border-sky-800;
+  }
+  .bar-fill {
+    @apply bg-neutral-200/70 dark:bg-neutral-800;
+  }
+  .bar[data-chosen="true"] .bar-fill {
+    @apply bg-sky-200/80 dark:bg-sky-900/70;
+  }
+  .icon-btn {
+    @apply inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100;
+  }
+  .tab {
+    @apply rounded-md px-2 py-1.5 hover:bg-neutral-200/60 aria-[current=page]:bg-neutral-200 aria-[current=page]:font-medium dark:hover:bg-neutral-800/60 dark:aria-[current=page]:bg-neutral-800;
+  }
+}
