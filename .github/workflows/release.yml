@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 
-# A cancelled run could leave a new vX.Y.Z release without its binaries.
+# A cancelled run leaves the new vX.Y.Z release a draft; re-run its failed jobs to publish it.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -90,10 +90,12 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Attach to the release
+      # semantic-release leaves the release a draft, so it goes public only with every binary attached.
+      - name: Attach to the release and publish it
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
           sha256sum * > SHA256SUMS
-          gh release upload ${{ needs.version.outputs.tag }} * --repo ${{ github.repository }}
+          gh release upload ${{ needs.version.outputs.tag }} * --repo ${{ github.repository }} --clobber
+          gh release edit ${{ needs.version.outputs.tag }} --draft=false --latest --repo ${{ github.repository }}

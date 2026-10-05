@@ -140,7 +140,9 @@ pub fn parse_expiry(s: &str, now: u64) -> Result<Option<u64>, String> {
         let days: u64 = days
             .parse()
             .map_err(|_| format!("'{s}': expected a number of days such as 30d"))?;
-        now + days * 86_400
+        days.checked_mul(86_400)
+            .and_then(|secs| now.checked_add(secs))
+            .ok_or_else(|| format!("'{s}': too many days"))?
     } else {
         let parts: Vec<i64> = s.split('-').map(|p| p.parse().unwrap_or(-1)).collect();
         let [y, m, d] = parts[..] else {
@@ -202,5 +204,6 @@ mod tests {
         assert!(parse_expiry("2025-10-04", now).is_err());
         assert!(parse_expiry("2025-13-01", now).is_err());
         assert!(parse_expiry("soon", now).is_err());
+        assert!(parse_expiry("999999999999999d", now).is_err());
     }
 }

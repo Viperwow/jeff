@@ -27,6 +27,7 @@ Found in a read-only audit against the OWASP API Security Top 10 (2023).
 ## Distribution
 
 - [x] **Prebuilt binaries.** Every release carries binaries for Linux, macOS and Windows.
+- [ ] **1.0.** Remove the `"breaking": true` → `minor` rule from `package.json`: it holds only while versions are 0.x.
 - [ ] **Installers.** One-line shell and PowerShell installers, and a Homebrew tap.
 - [ ] **npm.** `npx jengine`: an npm package that fetches the matching prebuilt binary.
 - [ ] **PyPI.** `uvx jengine`: a PyPI wheel built with maturin in `bin` mode.

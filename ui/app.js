@@ -314,7 +314,14 @@ async function clmTask(card, action) {
       return;
     }
   }
-  const t = (await api("/api/clm")).body;
+  let t;
+  try { t = (await api("/api/clm")).body; }
+  catch (e) {
+    // One failed status read must not stop the polling and leave the buttons locked.
+    say(out, `Could not read the CLM status: ${e.message}. Retrying…`, "err");
+    setTimeout(() => clmTask(card), 2000);
+    return;
+  }
   if (t.state !== "running") delete card.dataset.action;
   card.clmSteps = t.steps;
   const ready = renderSteps(card, t);

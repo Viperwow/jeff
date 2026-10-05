@@ -187,7 +187,12 @@ fn check_ip(ip: IpAddr, allow_private: bool) -> Result<(), String> {
         IpAddr::V4(v4) => {
             let [a, b, ..] = v4.octets();
             (
-                v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast() || v4.is_multicast(),
+                // 100.100.100.200 is the Alibaba Cloud metadata endpoint, inside the private 100.64.0.0/10.
+                v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.is_multicast()
+                    || v4 == std::net::Ipv4Addr::new(100, 100, 100, 200),
                 v4.is_private() || (a == 100 && (b & 0xc0) == 64),
             )
         }
@@ -821,7 +826,8 @@ async fn check_provider_hosts(providers: &[Provider], allow_private: bool) -> Re
         else {
             continue;
         };
-        if let Ok(addrs) = tokio::net::lookup_host((host.as_str(), 0)).await {
+        let lookup = tokio::net::lookup_host((host.as_str(), 0));
+        if let Ok(Ok(addrs)) = tokio::time::timeout(Duration::from_secs(5), lookup).await {
             for a in addrs {
                 check_ip(a.ip(), allow_private).map_err(|e| format!("{}: {host}: {e}", p.id))?;
             }
@@ -831,14 +837,20 @@ async fn check_provider_hosts(providers: &[Provider], allow_private: bool) -> Re
 }
 
 async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>) -> Response {
-    let mut config = app.config.write().await;
-    let next = match build_config(&config, input, app.allow_private) {
+    // The DNS checks run without the lock, so a slow resolver does not stall every request meanwhile.
+    let snapshot = app.config.read().await.clone();
+    let next = match build_config(&snapshot, input, app.allow_private) {
         Ok(c) => c,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     if let Err(e) = check_provider_hosts(&next.providers, app.allow_private).await {
         return error(StatusCode::BAD_REQUEST, e);
     }
+    let mut config = app.config.write().await;
+    let next = Config {
+        keys: config.keys.clone(),
+        ..next
+    };
     if let Err(e) = app.save(&next).await {
         return error(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
@@ -1060,6 +1072,13 @@ fn run_keys(action: KeysAction, path: &str) {
         std::process::exit(1)
     };
     let mut config = load_config(path).unwrap_or_else(|e| fail(e));
+    // The same rules as the admin page, so the CLI cannot lock that page out. A key in JENGINE_API_KEY is an
+    // admin key for a server started from this environment.
+    let static_admin = env::var("JENGINE_API_KEY").is_ok_and(|v| !v.trim().is_empty());
+    let has_admin = |stored: &[keys::StoredKey]| {
+        let now = keys::now();
+        static_admin || stored.iter().any(|k| k.active_admin(now))
+    };
     let date = |t: Option<u64>| t.map_or("never".to_owned(), |t| format!("{} (unix)", t));
     match action {
         KeysAction::List => {
@@ -1089,6 +1108,13 @@ fn run_keys(action: KeysAction, path: &str) {
                 fail("name must be 1 to 64 characters".into());
             }
             let expires_at = keys::parse_expiry(&expires, keys::now()).unwrap_or_else(|e| fail(e));
+            if role == keys::Role::Client && !has_admin(&config.keys) {
+                fail(
+                    "create an admin key first, or the admin page loses access: \
+                     jengine keys create --name NAME --role admin"
+                        .into(),
+                );
+            }
             let (key, record) = keys::generate(&name, role, expires_at);
             config.keys.push(record.clone());
             save_config(path, &config).unwrap_or_else(|e| fail(e));
@@ -1097,18 +1123,18 @@ fn run_keys(action: KeysAction, path: &str) {
                 "id {}; this key is shown only once, store it now",
                 record.id
             );
-            let now = keys::now();
-            if !config.keys.iter().any(|k| k.active_admin(now)) {
-                eprintln!(
-                    "note: no admin key yet; the admin page needs one: jengine keys create --name NAME --role admin"
-                );
-            }
         }
         KeysAction::Revoke { id } => {
-            let before = config.keys.len();
+            let before = config.keys.clone();
             config.keys.retain(|k| k.id != id);
-            if config.keys.len() == before {
+            if config.keys.len() == before.len() {
                 fail(format!("no key with id '{id}'"));
+            }
+            if !config.keys.is_empty() && has_admin(&before) && !has_admin(&config.keys) {
+                fail(
+                    "this is the last admin key; create another admin key or revoke the client keys first"
+                        .into(),
+                );
             }
             save_config(path, &config).unwrap_or_else(|e| fail(e));
             println!("revoked {id}");
@@ -1313,6 +1339,7 @@ mod tests {
             "fd00:ec2::254",
             "0.0.0.0",
             "::ffff:169.254.169.254",
+            "100.100.100.200",
         ] {
             assert!(check_ip(ip(refused), true).is_err(), "{refused}");
         }
