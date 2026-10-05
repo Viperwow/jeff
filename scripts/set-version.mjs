@@ -11,4 +11,4 @@ function edit(path, pattern, replacement) {
 }
 
 edit("Cargo.toml", /(\[package\][^[]*?\nversion = )"[^"]*"/, `$1"${version}"`);
-edit("Cargo.lock", /(name = "jengine"\r?\nversion = )"[^"]*"/, `$1"${version}"`);
+edit("Cargo.lock", /(name = "jeff"\r?\nversion = )"[^"]*"/, `$1"${version}"`);

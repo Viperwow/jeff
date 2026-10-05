@@ -9,7 +9,7 @@ const CLM_PORT: u16 = 8700;
 
 /// Our own clm container already holding the port is fine: `up -d` leaves it running.
 pub fn clm_running() -> bool {
-    running("jengine-clm-clm")
+    running("jeff-clm-clm")
 }
 
 /// Qwen3-8B safetensors, summed from the Hugging Face file list.
@@ -59,18 +59,18 @@ pub fn clm_steps(loaded: bool, warm: bool) -> Vec<serde_json::Value> {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success());
-    let encoder_up = docker && running("jengine-clm-encoder");
-    let clm_up = docker && running("jengine-clm-clm");
+    let encoder_up = docker && running("jeff-clm-encoder");
+    let clm_up = docker && running("jeff-clm-clm");
     let weights = if encoder_up {
         bytes_in(
-            "jengine-clm-encoder-1",
+            "jeff-clm-encoder-1",
             "/root/.cache/huggingface/hub/models--Qwen--Qwen3-8B",
         )
     } else {
         0
     };
     let head = if clm_up {
-        bytes_in("jengine-clm-clm-1", "/data")
+        bytes_in("jeff-clm-clm-1", "/data")
     } else {
         0
     };
@@ -88,15 +88,15 @@ pub fn clm_steps(loaded: bool, warm: bool) -> Vec<serde_json::Value> {
     ]
 }
 
-/// Where jengine keeps its config and compose files: `JENGINE_HOME`, else `~/.jengine`.
+/// Where jeff keeps its config and compose files: `JEFF_HOME`, else `~/.jeff`.
 pub fn home() -> PathBuf {
-    if let Ok(dir) = env::var("JENGINE_HOME") {
+    if let Ok(dir) = env::var("JEFF_HOME") {
         return dir.into();
     }
     let user = env::var("USERPROFILE")
         .or_else(|_| env::var("HOME"))
         .unwrap_or_else(|_| ".".into());
-    PathBuf::from(user).join(".jengine")
+    PathBuf::from(user).join(".jeff")
 }
 
 fn clm_compose_file() -> Result<PathBuf, String> {

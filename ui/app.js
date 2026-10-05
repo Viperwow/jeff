@@ -25,8 +25,8 @@ function el(tag, cls, text) {
 }
 
 const store = {
-  get(k) { try { return JSON.parse(localStorage.getItem("jengine." + k)); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem("jengine." + k, JSON.stringify(v)); } catch {} },
+  get(k) { try { return JSON.parse(localStorage.getItem("jeff." + k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem("jeff." + k, JSON.stringify(v)); } catch {} },
 };
 
 function authHeaders(headers = {}) {
@@ -38,7 +38,7 @@ async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: authHeaders(opts.headers) });
   const body = await r.json().catch(() => ({}));
   $("#auth-error").hidden = r.status !== 401;
-  if (r.status === 401) $("#auth-error").textContent = body.error || "jengine rejected the access key.";
+  if (r.status === 401) $("#auth-error").textContent = body.error || "jeff rejected the access key.";
   if (!r.ok) throw new Error(body.error || body.detail?.message || body.detail || `HTTP ${r.status}`);
   return { body, headers: r.headers };
 }
@@ -377,7 +377,7 @@ function syncExpiry() {
 
 function syncRole() {
   say($("#key-role-note"), $("#key-role").value === "admin"
-    ? "Calls the API and manages jengine on this page."
+    ? "Calls the API and manages jeff on this page."
     : "Calls /v1 only: decisions and models.", "");
 }
 
@@ -402,7 +402,7 @@ $("#key-form").onsubmit = async (e) => {
     });
     $("#key-value").value = body.key;
     $("#key-created").hidden = false;
-    // The first key locks jengine; keep it here so this page does not lock its own operator out.
+    // The first key locks jeff; keep it here so this page does not lock its own operator out.
     const kept = !store.get("key") && body.role === "admin";
     if (kept) store.set("key", body.key);
     $("#key-saved-note").textContent = kept ? "This browser now uses this key for the admin page." : "";
@@ -430,7 +430,7 @@ function keyRow(k, now, last) {
   when.append(exp);
   const revoke = el("button", "btn btn-danger", "Revoke");
   revoke.type = "button";
-  revoke.title = last ? "Last key: jengine will accept requests without a key." : "Clients using this key stop working at once.";
+  revoke.title = last ? "Last key: jeff will accept requests without a key." : "Clients using this key stop working at once.";
   confirmClick(revoke, "Confirm revoke", async () => {
     try {
       await api(`/api/keys/${encodeURIComponent(k.id)}`, { method: "DELETE" });
@@ -456,9 +456,9 @@ async function loadKeys() {
   $("#key-role").querySelector('option[value="client"]').disabled = !hasAdmin;
   if (!hasAdmin) $("#key-role").value = "admin";
   syncRole();
-  if (!body.keys.length) $("#key-list").append(el("li", "note py-3", "No keys yet. Without keys, jengine accepts every request."));
+  if (!body.keys.length) $("#key-list").append(el("li", "note py-3", "No keys yet. Without keys, jeff accepts every request."));
   $("#key-static").hidden = !body.static_keys;
-  $("#key-static").textContent = `Plus ${body.static_keys} key${body.static_keys === 1 ? "" : "s"} from --api-key or JENGINE_API_KEY. Those never expire and are changed where jengine is started.`;
+  $("#key-static").textContent = `Plus ${body.static_keys} key${body.static_keys === 1 ? "" : "s"} from --api-key or JEFF_API_KEY. Those never expire and are changed where jeff is started.`;
 }
 
 /* ---------- question builder ---------- */
@@ -681,7 +681,7 @@ function apiOrigin() {
 
 function curlFor(body) {
   const json = JSON.stringify(body, null, 2).replace(/'/g, "'\\''");
-  const auth = info?.api_key_set ? `  -H "authorization: Bearer $JENGINE_API_KEY" \\\n` : "";
+  const auth = info?.api_key_set ? `  -H "authorization: Bearer $JEFF_API_KEY" \\\n` : "";
   return `curl ${apiOrigin()}/v1/systemone \\\n${auth}  -H 'content-type: application/json' \\\n  -d '${json}'`;
 }
 
@@ -714,10 +714,10 @@ async function run() {
     const ms = Math.round(performance.now() - t0);
     last = out;
     $("#pg-meta").replaceChildren(
-      chip("provider", headers.get("x-jengine-provider") || "?"),
+      chip("provider", headers.get("x-jeff-provider") || "?"),
       chip("model", out.model || body.model),
       chip("round trip", `${ms} ms`),
-      ...(headers.get("x-jengine-upstream-ms") ? [chip("upstream", `${headers.get("x-jengine-upstream-ms")} ms`)] : []),
+      ...(headers.get("x-jeff-upstream-ms") ? [chip("upstream", `${headers.get("x-jeff-upstream-ms")} ms`)] : []),
       ...Object.entries(out.usage || {}).map(([k, v]) => chip(k.replaceAll("_", " "), String(v))),
     );
     const answers = out.answers || {};

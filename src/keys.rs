@@ -25,7 +25,7 @@ impl Role {
     }
 }
 
-/// A jengine access key as stored: only its SHA-256 is kept, the key itself is shown once at creation.
+/// A jeff access key as stored: only its SHA-256 is kept, the key itself is shown once at creation.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredKey {
     pub id: String,
@@ -80,7 +80,7 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 /// Creates a key with 256 bits from the OS random generator. Returns the key to show once and the record to store.
 /// Ids carry 128 bits, so a key holder cannot guess the ids of other keys and revoke them.
 pub fn generate(name: &str, role: Role, expires_at: Option<u64>) -> (String, StoredKey) {
-    let key = format!("jgn_{}", random_hex(32));
+    let key = format!("jeff_{}", random_hex(32));
     let record = StoredKey {
         id: random_hex(16),
         name: name.to_owned(),
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn verifies_static_and_stored_keys() {
         let (key, mut record) = generate("ci", Role::Client, None);
-        assert!(key.starts_with("jgn_") && key.len() == 68);
+        assert!(key.starts_with("jeff_") && key.len() == 69);
         assert_eq!(record.id.len(), 32);
         let header = format!("Bearer {key}");
         let now = now();
@@ -174,7 +174,7 @@ mod tests {
             verify(Some(&header), &[], &[record.clone()], now),
             Some(Role::Client)
         );
-        assert!(verify(Some("Bearer jgn_wrong"), &[], &[record.clone()], now).is_none());
+        assert!(verify(Some("Bearer jeff_wrong"), &[], &[record.clone()], now).is_none());
         assert!(verify(Some(&key), &[], &[record.clone()], now).is_none());
         record.expires_at = Some(now);
         assert!(verify(Some(&header), &[], &[record], now).is_none());
@@ -189,7 +189,7 @@ mod tests {
         assert!(Role::Admin.allows(Role::Admin) && Role::Admin.allows(Role::Client));
         assert!(Role::Client.allows(Role::Client) && !Role::Client.allows(Role::Admin));
         let old: StoredKey = serde_json::from_str(
-            r#"{"id":"3f9a1c2e","name":"ci","prefix":"jgn_","sha256":"","created_at":0,"expires_at":null}"#,
+            r#"{"id":"3f9a1c2e","name":"ci","prefix":"jeff_","sha256":"","created_at":0,"expires_at":null}"#,
         )
         .unwrap();
         assert!(old.role == Role::Admin);

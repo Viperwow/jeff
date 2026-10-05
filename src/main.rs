@@ -36,7 +36,7 @@ struct Provider {
     /// Shown when the provider has no `GET /v1/models`.
     #[serde(default)]
     models: Vec<String>,
-    /// Names a local stack jengine can install, such as "clm".
+    /// Names a local stack jeff can install, such as "clm".
     #[serde(default)]
     installer: Option<String>,
 }
@@ -45,7 +45,7 @@ struct Provider {
 struct Config {
     default_model: String,
     providers: Vec<Provider>,
-    /// jengine access keys, hashed.
+    /// jeff access keys, hashed.
     #[serde(default)]
     keys: Vec<keys::StoredKey>,
 }
@@ -55,7 +55,7 @@ impl Default for Config {
         let env_or = |var: &str, default: &str| env::var(var).unwrap_or_else(|_| default.into());
         let key = |var: &str| env::var(var).ok().filter(|k| !k.is_empty());
         Config {
-            default_model: env_or("JENGINE_DEFAULT_MODEL", "clm/clm-latest"),
+            default_model: env_or("JEFF_DEFAULT_MODEL", "clm/clm-latest"),
             providers: vec![
                 Provider {
                     id: "clm".into(),
@@ -80,7 +80,7 @@ impl Default for Config {
 }
 
 /// A missing file gives the defaults. A broken one is an error: falling back would drop every access key and
-/// open jengine to anyone.
+/// open jeff to anyone.
 fn load_config(path: &str) -> Result<Config, String> {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {e}")),
@@ -129,9 +129,9 @@ struct App {
     clm_task: Mutex<Value>,
     /// 0 cold, 1 warming, 2 warm: whether clm-serve has answered its first, slow request.
     clm_warm: AtomicU8,
-    /// Keys from `--api-key` / `JENGINE_API_KEY`; they never expire and are managed outside the UI.
+    /// Keys from `--api-key` / `JEFF_API_KEY`; they never expire and are managed outside the UI.
     static_keys: Vec<String>,
-    /// When the config file was last read, so keys created or revoked by `jengine keys` apply without a restart.
+    /// When the config file was last read, so keys created or revoked by `jeff keys` apply without a restart.
     config_mtime: Mutex<Option<SystemTime>>,
     /// Host names the UI answers to besides localhost and IP literals.
     allowed_hosts: Vec<String>,
@@ -146,11 +146,11 @@ struct App {
 /// Failed key checks one address may make per window before it gets 429 until the window ends.
 const MAX_FAILURES: u32 = 20;
 const FAILURE_WINDOW_SECS: u64 = 60;
-/// The largest provider response jengine relays; typed answers are a few kilobytes.
+/// The largest provider response jeff relays; typed answers are a few kilobytes.
 const MAX_UPSTREAM_BYTES: usize = 16 * 1024 * 1024;
 /// Shortest `--api-key` accepted; generated keys carry 256 bits.
 const MIN_STATIC_KEY_LEN: usize = 32;
-/// The largest request body jengine accepts.
+/// The largest request body jeff accepts.
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
 async fn read_capped(mut resp: reqwest::Response) -> Result<Vec<u8>, String> {
@@ -211,7 +211,7 @@ fn check_ip(ip: IpAddr, allow_private: bool) -> Result<(), String> {
         Err(format!("{ip} is a link-local or metadata address"))
     } else if private && !allow_private {
         Err(format!(
-            "{ip} is in a private network; start jengine with --allow-private-providers"
+            "{ip} is in a private network; start jeff with --allow-private-providers"
         ))
     } else {
         Ok(())
@@ -235,7 +235,7 @@ fn parse_provider_url(url: &str, allow_private: bool) -> Result<reqwest::Url, St
     Ok(parsed)
 }
 
-/// Resolves provider host names and refuses addresses `check_ip` rejects, so a name cannot point jengine at
+/// Resolves provider host names and refuses addresses `check_ip` rejects, so a name cannot point jeff at
 /// metadata endpoints, even if its DNS record changes after the provider was saved.
 struct GuardedResolver {
     allow_private: bool,
@@ -383,10 +383,10 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
                 (status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response();
             let headers = res.headers_mut();
             if let Ok(v) = HeaderValue::from_str(&p.id) {
-                headers.insert("x-jengine-provider", v);
+                headers.insert("x-jeff-provider", v);
             }
             headers.insert(
-                "x-jengine-upstream-ms",
+                "x-jeff-upstream-ms",
                 HeaderValue::from(t0.elapsed().as_millis() as u64),
             );
             res
@@ -535,7 +535,7 @@ async fn require_admin(
     require_key(state, peer, req, next, keys::Role::Admin).await
 }
 
-/// With any jengine key set, even an expired one, every API and management request must carry a valid key, and
+/// With any jeff key set, even an expired one, every API and management request must carry a valid key, and
 /// management requests an admin key.
 async fn require_key(
     State(app): State<Arc<App>>,
@@ -570,7 +570,7 @@ async fn require_key(
         {
             return error(
                 StatusCode::FORBIDDEN,
-                "this is a client key; managing jengine needs an admin key",
+                "this is a client key; managing jeff needs an admin key",
             );
         }
         if role.is_none() {
@@ -592,7 +592,7 @@ async fn require_key(
             );
             return error(
                 StatusCode::UNAUTHORIZED,
-                "a valid jengine API key is required: Authorization: Bearer <key>",
+                "a valid jeff API key is required: Authorization: Bearer <key>",
             );
         }
     }
@@ -621,7 +621,7 @@ async fn check_host(State(app): State<Arc<App>>, req: Request, next: Next) -> Re
     if !ok {
         return error(
             StatusCode::MISDIRECTED_REQUEST,
-            format!("host '{name}' is not allowed; start jengine with --allowed-host {name}"),
+            format!("host '{name}' is not allowed; start jeff with --allowed-host {name}"),
         );
     }
     // A page on any site can send a plain POST to 127.0.0.1 without a CORS preflight; browsers mark it
@@ -939,9 +939,9 @@ async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
 
-/// Router for Jev-compatible System One models: one API in front of local and cloud providers.
+/// A classifier built on Jev-compatible System One models: one API in front of local and cloud providers.
 #[derive(Parser)]
-#[command(name = "jengine", version)]
+#[command(name = "jeff", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -955,12 +955,12 @@ enum Command {
     Install { stack: Stack },
     /// Stop and remove a local provider's containers; downloaded weights are kept
     Remove { stack: Stack },
-    /// Manage jengine access keys in the config file; a running server picks changes up on the next request
+    /// Manage jeff access keys in the config file; a running server picks changes up on the next request
     Keys {
         #[command(subcommand)]
         action: KeysAction,
-        /// The config file [default: ~/.jengine/jengine.json]
-        #[arg(long, env = "JENGINE_CONFIG", global = true)]
+        /// The config file [default: ~/.jeff/jeff.json]
+        #[arg(long, env = "JEFF_CONFIG", global = true)]
         config: Option<String>,
     },
 }
@@ -1000,22 +1000,22 @@ enum Stack {
 #[derive(Args)]
 struct ServeArgs {
     /// Where the API listens: /v1/systemone, /v1/models and /health. ADDR:PORT, or a bare PORT on 127.0.0.1
-    #[arg(long, env = "JENGINE_API_ADDR", default_value = "127.0.0.1:8080", value_parser = parse_addr)]
+    #[arg(long, env = "JEFF_API_ADDR", default_value = "127.0.0.1:8080", value_parser = parse_addr)]
     api: String,
     /// Where the web UI listens. It also manages providers, so keep it off public interfaces
-    #[arg(long, env = "JENGINE_UI_ADDR", default_value = "127.0.0.1:8081", value_parser = parse_addr)]
+    #[arg(long, env = "JEFF_UI_ADDR", default_value = "127.0.0.1:8081", value_parser = parse_addr)]
     ui: String,
     /// Serve the API only
     #[arg(long)]
     no_ui: bool,
-    /// Providers and access keys, created on the first save [default: ~/.jengine/jengine.json]
-    #[arg(long, env = "JENGINE_CONFIG")]
+    /// Providers and access keys, created on the first save [default: ~/.jeff/jeff.json]
+    #[arg(long, env = "JEFF_CONFIG")]
     config: Option<String>,
     /// A key that never expires; repeat the flag or comma-separate the env var for several. With any key here or in
     /// the config, every /v1 and /api request on both ports must send `Authorization: Bearer <key>`
     #[arg(
         long = "api-key",
-        env = "JENGINE_API_KEY",
+        env = "JEFF_API_KEY",
         hide_env_values = true,
         value_delimiter = ','
     )]
@@ -1023,13 +1023,13 @@ struct ServeArgs {
     /// A host name the UI answers to besides localhost and IP addresses, such as the name of a reverse proxy
     #[arg(
         long = "allowed-host",
-        env = "JENGINE_ALLOWED_HOSTS",
+        env = "JEFF_ALLOWED_HOSTS",
         value_delimiter = ','
     )]
     allowed_hosts: Vec<String>,
     /// Let providers use private network addresses such as 10.0.0.0/8 and 192.168.0.0/16. Loopback is always
     /// allowed, link-local and cloud metadata addresses never are
-    #[arg(long, env = "JENGINE_ALLOW_PRIVATE_PROVIDERS")]
+    #[arg(long, env = "JEFF_ALLOW_PRIVATE_PROVIDERS")]
     allow_private_providers: bool,
 }
 
@@ -1046,7 +1046,7 @@ fn parse_addr(s: &str) -> Result<String, String> {
 async fn main() {
     let cli = Cli::parse();
     let args = match cli.command {
-        None => ServeDefaults::parse_from(["jengine"]).args,
+        None => ServeDefaults::parse_from(["jeff"]).args,
         Some(Command::Serve(args)) => args,
         Some(Command::Install { stack: Stack::Clm }) => {
             return run_install(install::Action::Install);
@@ -1060,7 +1060,7 @@ async fn main() {
 fn config_file(arg: Option<String>) -> String {
     arg.unwrap_or_else(|| {
         install::home()
-            .join("jengine.json")
+            .join("jeff.json")
             .to_string_lossy()
             .into_owned()
     })
@@ -1072,9 +1072,9 @@ fn run_keys(action: KeysAction, path: &str) {
         std::process::exit(1)
     };
     let mut config = load_config(path).unwrap_or_else(|e| fail(e));
-    // The same rules as the admin page, so the CLI cannot lock that page out. A key in JENGINE_API_KEY is an
+    // The same rules as the admin page, so the CLI cannot lock that page out. A key in JEFF_API_KEY is an
     // admin key for a server started from this environment.
-    let static_admin = env::var("JENGINE_API_KEY").is_ok_and(|v| !v.trim().is_empty());
+    let static_admin = env::var("JEFF_API_KEY").is_ok_and(|v| !v.trim().is_empty());
     let has_admin = |stored: &[keys::StoredKey]| {
         let now = keys::now();
         static_admin || stored.iter().any(|k| k.active_admin(now))
@@ -1111,7 +1111,7 @@ fn run_keys(action: KeysAction, path: &str) {
             if role == keys::Role::Client && !has_admin(&config.keys) {
                 fail(
                     "create an admin key first, or the admin page loses access: \
-                     jengine keys create --name NAME --role admin"
+                     jeff keys create --name NAME --role admin"
                         .into(),
                 );
             }
@@ -1161,7 +1161,7 @@ async fn serve(args: ServeArgs) {
     let config_path = config_file(args.config.clone());
     let config = load_config(&config_path).unwrap_or_else(|e| {
         fail_with(&format!(
-            "{e}\nfix or remove the file; jengine does not start on a broken config"
+            "{e}\nfix or remove the file; jeff does not start on a broken config"
         ))
     });
     if let Some(short) = args
@@ -1171,12 +1171,12 @@ async fn serve(args: ServeArgs) {
         .find(|k| !k.is_empty() && k.len() < MIN_STATIC_KEY_LEN)
     {
         fail_with(&format!(
-            "--api-key '{}…' is shorter than {MIN_STATIC_KEY_LEN} characters; generate one with `jengine keys create`",
+            "--api-key '{}…' is shorter than {MIN_STATIC_KEY_LEN} characters; generate one with `jeff keys create`",
             &short[..short.len().min(4)]
         ));
     }
     let allow_private = args.allow_private_providers;
-    // A provider that redirects could send the provider key on to a host jengine never checked.
+    // A provider that redirects could send the provider key on to a host jeff never checked.
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
@@ -1220,7 +1220,7 @@ async fn serve(args: ServeArgs) {
         };
         fail_with(&format!(
             "refusing to listen on {addr} without an access key: anyone who reaches it could use the stored \
-             provider keys.\ncreate one first with `jengine keys create --name NAME --role admin`, or pass --api-key"
+             provider keys.\ncreate one first with `jeff keys create --name NAME --role admin`, or pass --api-key"
         ));
     }
 
@@ -1280,7 +1280,7 @@ async fn serve(args: ServeArgs) {
     let api_listener = tokio::net::TcpListener::bind(&args.api)
         .await
         .unwrap_or_else(|e| fail(&args.api, e));
-    println!("jengine API on http://{}", args.api);
+    println!("jeff API on http://{}", args.api);
     let api_server = axum::serve(
         api_listener,
         api.with_state(app.clone())
@@ -1293,7 +1293,7 @@ async fn serve(args: ServeArgs) {
     let ui_listener = tokio::net::TcpListener::bind(&args.ui)
         .await
         .unwrap_or_else(|e| fail(&args.ui, e));
-    println!("jengine UI  on http://{}", args.ui);
+    println!("jeff UI  on http://{}", args.ui);
     let ui_server = axum::serve(
         ui_listener,
         ui.with_state(app)

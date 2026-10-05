@@ -65,14 +65,14 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name=jengine-${{ needs.version.outputs.tag }}-${{ matrix.target }}
+          name=jeff-${{ needs.version.outputs.tag }}-${{ matrix.target }}
           mkdir -p dist "$name"
           cp README.md LICENSE "$name/"
           if [ "$RUNNER_OS" = Windows ]; then
-            cp target/${{ matrix.target }}/release/jengine.exe "$name/"
+            cp target/${{ matrix.target }}/release/jeff.exe "$name/"
             7z a -bd "dist/$name.zip" "$name" > /dev/null
           else
-            cp target/${{ matrix.target }}/release/jengine "$name/"
+            cp target/${{ matrix.target }}/release/jeff "$name/"
             tar -czf "dist/$name.tar.gz" "$name"
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

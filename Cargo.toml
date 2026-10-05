@@ -1,10 +1,10 @@
 [package]
-name = "jengine"
+name = "jeff"
 version = "0.1.0"
 edition = "2024"
-description = "One API for typed decisions, in front of every Jev-compatible model"
+description = "A classifier built on Jev-compatible models, local or in the cloud"
 license = "MIT"
-repository = "https://github.com/Viperwow/jengine"
+repository = "https://github.com/Viperwow/jeff"
 
 [dependencies]
 axum = "0.8.9"
