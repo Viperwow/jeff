@@ -1,0 +1,53 @@
+name: jeff-clm
+
+services:
+  encoder:
+    # vLLM 0.14.1, pinned by digest so a re-pushed tag cannot change what runs.
+    image: vllm/vllm-openai@sha256:6bf34e50e2387dc46dc87a9d6a945fdd616a022bccfddd949052f54063ebcb8c
+    # FP8 so Qwen3-8B fits a 16 GB GPU; bf16 needs ~16.4 GB for weights alone.
+    # Last-token pooling is the default for Qwen3 under --runner pooling, matching how the CLM head was trained.
+    command: >
+      Qwen/Qwen3-8B --served-model-name qwen3-8b --runner pooling
+      --quantization fp8 --enforce-eager --enable-prefix-caching
+      --max-model-len 2048 --gpu-memory-utilization 0.85 --max-num-seqs 32
+    ipc: host
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  clm:
+    # The vLLM image already ships torch, fastapi and uvicorn, so clm-serve installs with --no-deps.
+    image: vllm/vllm-openai@sha256:6bf34e50e2387dc46dc87a9d6a945fdd616a022bccfddd949052f54063ebcb8c
+    entrypoint: ["sh", "-c"]
+    # pip checks the archive against the #sha256 fragment and refuses anything else.
+    command:
+      - >
+        python3 -m pip install -q --no-deps "contrastive-lm @ $$CLM_SRC"
+        && exec clm-serve --port 8700 --device cpu --emb-url http://encoder:8000/v1/embeddings
+    environment:
+      CLM_SRC: https://github.com/Contrastive-LM/CLM/archive/bb42c6c5bf914fd449bed2f6ca65be80602cb1f7.zip#sha256=40b30711207d733c23bbbf7cf5c1839c5d35ec7ebeb6465b4f8d12d14541fc2c
+      CLM_CKPT_DIR: /data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - clm-data:/data
+    ports:
+      - "127.0.0.1:8700:8700"
+    depends_on:
+      - encoder
+    restart: unless-stopped
+
+volumes:
+  hf-cache:
+  clm-data:

@@ -1,0 +1,26 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "ui/index.html"
+        ],
+        "createdAt": "2026-10-05T06:05:14.619Z",
+        "reason": "Claude: static scan cannot resolve compiled Tailwind classes (reads h1/h2/body as 16px); live-URL detect at 1280x800 and 390x844 returns no findings, rendered h1 24px / h2 16px / body 14px"
+      },
+      {
+        "rule": "gray-on-color",
+        "value": "*",
+        "files": [
+          "ui/app.css"
+        ],
+        "createdAt": "2026-10-05T07:56:20.075Z",
+        "reason": "Claude: static scan pairs bg-red-800 of .btn-danger[data-confirm] with text colors of neighbouring rules (.note, .btn-primary); live Edge check renders Confirm revoke as rgb(255,255,255) on red-800"
+      }
+    ]
+  }
+}

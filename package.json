@@ -1,0 +1,68 @@
+{
+  "private": true,
+  "scripts": {
+    "prepare": "husky"
+  },
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ]
+  },
+  "release": {
+    "branches": [
+      "main"
+    ],
+    "plugins": [
+      [
+        "@semantic-release/commit-analyzer",
+        {
+          "preset": "conventionalcommits",
+          "releaseRules": [
+            {
+              "breaking": true,
+              "release": "minor"
+            }
+          ]
+        }
+      ],
+      [
+        "@semantic-release/release-notes-generator",
+        {
+          "preset": "conventionalcommits"
+        }
+      ],
+      [
+        "@semantic-release/exec",
+        {
+          "prepareCmd": "node scripts/set-version.mjs ${nextRelease.version}",
+          "successCmd": "echo tag=${nextRelease.gitTag} >> \"$GITHUB_OUTPUT\""
+        }
+      ],
+      [
+        "@semantic-release/git",
+        {
+          "assets": [
+            "Cargo.toml",
+            "Cargo.lock"
+          ],
+          "message": "chore(release): ${nextRelease.version} [skip ci]"
+        }
+      ],
+      [
+        "@semantic-release/github",
+        {
+          "draftRelease": true
+        }
+      ]
+    ]
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.3",
+    "@commitlint/config-conventional": "^21.2.3",
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/git": "^11.0.1",
+    "conventional-changelog-conventionalcommits": "^9.3.1",
+    "husky": "^9.1.7",
+    "semantic-release": "^25.0.9"
+  }
+}
