@@ -1,0 +1,4 @@
+/target
+jengine.json
+node_modules/
+.strict-ai/
