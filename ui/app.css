@@ -32,6 +32,12 @@
   .control {
     @apply w-full rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-neutral-900 placeholder:text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:placeholder:text-neutral-400;
   }
+  select.control {
+    @apply appearance-none bg-no-repeat pr-8;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-position: right 0.5rem center;
+    background-size: 1rem;
+  }
   .btn {
     @apply inline-flex min-w-24 shrink-0 cursor-pointer items-center justify-center rounded-md border border-neutral-300 px-3 py-1.5 font-medium enabled:hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-neutral-700 dark:enabled:hover:bg-neutral-800;
   }

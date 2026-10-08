@@ -10,67 +10,100 @@
 <div class="flex min-h-screen max-md:flex-col">
   <nav class="flex w-48 shrink-0 flex-col gap-1 border-r border-neutral-200 p-3 max-md:w-auto max-md:flex-row max-md:items-center max-md:border-r-0 max-md:border-b dark:border-neutral-800">
     <div class="px-2 pb-4 text-base font-semibold tracking-tight max-md:pr-4 max-md:pb-0">jeff</div>
-    <a class="tab" href="#playground">Playground</a>
+    <a class="tab" href="#questions">Questions</a>
     <a class="tab" href="#providers">Providers</a>
     <a class="tab" href="#keys">Access keys</a>
   </nav>
 
   <main class="min-w-0 flex-1">
     <p id="auth-error" role="alert" class="m-6 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-red-800 max-sm:m-4 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200" hidden></p>
-    <!-- Playground -->
-    <div id="page-playground" class="grid lg:h-screen lg:grid-cols-2">
-      <section class="flex min-w-0 flex-col gap-5 border-neutral-200 p-6 lg:overflow-y-auto lg:border-r max-sm:p-4 dark:border-neutral-800">
-        <header>
-          <h1 class="text-2xl font-semibold tracking-tight">Playground</h1>
-          <p class="mt-1 text-neutral-600 dark:text-neutral-400">Ask any Jev-compatible model through one endpoint.</p>
-        </header>
+    <!-- Questions -->
+    <div id="page-questions">
+      <div id="q-list-view" class="grid lg:h-screen lg:grid-cols-2">
+        <section class="flex min-w-0 flex-col gap-5 border-neutral-200 p-6 lg:overflow-y-auto lg:border-r max-sm:p-4 dark:border-neutral-800">
+          <header class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 class="text-2xl font-semibold tracking-tight">Questions</h1>
+              <p class="mt-1 text-neutral-600 dark:text-neutral-400">Saved questions any client can reuse by key.</p>
+            </div>
+            <button id="q-new" type="button" class="btn">New question</button>
+          </header>
 
-        <label class="block space-y-1">
-          <span class="block font-medium">Model</span>
-          <select id="pg-model" class="control"></select>
-        </label>
-
-        <label class="block space-y-1">
-          <span class="flex items-baseline justify-between font-medium">State <span id="pg-count" class="note font-normal tabular-nums"></span></span>
-          <textarea id="pg-state" class="control font-mono text-xs leading-relaxed" rows="5"></textarea>
-        </label>
-
-        <div class="space-y-3">
-          <div class="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 class="text-base font-semibold">Questions</h2>
-            <span class="note">One call answers all of them against the same state.</span>
+          <ul id="q-items" class="divide-y divide-neutral-200 rounded-lg border border-neutral-200 bg-white dark:divide-neutral-800 dark:border-neutral-800 dark:bg-neutral-900/40" hidden></ul>
+          <div id="q-empty" class="flex flex-col items-center gap-3 rounded-lg border border-dashed border-neutral-300 p-8 text-center dark:border-neutral-700" hidden>
+            <p class="font-medium">No saved questions</p>
+            <p class="note">Create one, or add three examples to try a run.</p>
+            <div class="flex flex-wrap justify-center gap-2">
+              <button id="q-empty-new" type="button" class="btn btn-primary">New question</button>
+              <button id="q-examples" type="button" class="btn">Add examples</button>
+            </div>
           </div>
-          <div id="pg-questions" class="space-y-3"></div>
-          <div class="flex flex-wrap gap-2">
-            <button type="button" class="btn" data-add="noul">Add yes/no</button>
-            <button type="button" class="btn" data-add="choice">Add choice</button>
-            <button type="button" class="btn" data-add="score">Add score</button>
+
+          <label class="block space-y-1">
+            <span class="block font-medium">Model</span>
+            <select id="pg-model" class="control"></select>
+            <span class="note block">For questions without their own model.</span>
+          </label>
+
+          <label class="block space-y-1">
+            <span class="flex items-baseline justify-between font-medium">State <span id="pg-count" class="note font-normal tabular-nums"></span></span>
+            <textarea id="pg-state" class="control font-mono text-xs leading-relaxed" rows="5"></textarea>
+          </label>
+
+          <div class="sticky bottom-0 -mx-6 mt-auto flex items-center gap-3 border-t border-neutral-200 bg-neutral-50 px-6 py-4 max-sm:-mx-4 max-sm:px-4 dark:border-neutral-800 dark:bg-neutral-950">
+            <button id="pg-run" type="button" class="btn btn-primary">Run</button>
+            <span id="q-selected" class="note"></span>
+            <span id="pg-status" class="note ml-auto text-right" aria-live="polite"></span>
           </div>
-        </div>
+        </section>
 
-        <div class="sticky bottom-0 -mx-6 mt-auto flex items-center gap-3 border-t border-neutral-200 bg-neutral-50 px-6 py-4 max-sm:-mx-4 max-sm:px-4 dark:border-neutral-800 dark:bg-neutral-950">
-          <button id="pg-run" type="button" class="btn btn-primary">Run</button>
-          <span class="note">Ctrl + Enter</span>
-          <span id="pg-status" class="note ml-auto text-right" aria-live="polite"></span>
-        </div>
-      </section>
+        <section class="flex min-w-0 flex-col gap-4 p-6 lg:overflow-y-auto max-sm:p-4">
+          <div class="flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800" role="tablist">
+            <button type="button" class="view-tab" data-view="answer" role="tab">Answer</button>
+            <button type="button" class="view-tab" data-view="json" role="tab">JSON</button>
+            <button type="button" class="view-tab" data-view="curl" role="tab">curl</button>
+          </div>
+          <div id="pg-meta" class="flex flex-wrap gap-2"></div>
+          <div id="view-answer" class="space-y-3">
+            <p class="note py-12 text-center">Check questions and run them to see each answer here.</p>
+          </div>
+          <pre id="view-json" class="card overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap" hidden></pre>
+          <div id="view-curl" class="space-y-2" hidden>
+            <pre id="curl-text" class="card overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap"></pre>
+            <button id="curl-copy" type="button" class="btn">Copy</button>
+          </div>
+        </section>
+      </div>
 
-      <section class="flex min-w-0 flex-col gap-4 p-6 lg:overflow-y-auto max-sm:p-4">
-        <div class="flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800" role="tablist">
-          <button type="button" class="view-tab" data-view="answer" role="tab">Answer</button>
-          <button type="button" class="view-tab" data-view="json" role="tab">JSON</button>
-          <button type="button" class="view-tab" data-view="curl" role="tab">curl</button>
-        </div>
-        <div id="pg-meta" class="flex flex-wrap gap-2"></div>
-        <div id="view-answer" class="space-y-3">
-          <p class="note py-12 text-center">Run the questions to see each answer here.</p>
-        </div>
-        <pre id="view-json" class="card overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap" hidden></pre>
-        <div id="view-curl" class="space-y-2" hidden>
-          <pre id="curl-text" class="card overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap"></pre>
-          <button id="curl-copy" type="button" class="btn">Copy</button>
-        </div>
-      </section>
+      <div id="q-form-view" class="grid lg:h-screen lg:grid-cols-2" hidden>
+        <section class="flex min-w-0 flex-col gap-5 border-neutral-200 p-6 lg:overflow-y-auto lg:border-r max-sm:p-4 dark:border-neutral-800">
+          <header>
+            <button id="q-back" type="button" class="note cursor-pointer hover:underline">&larr; Questions</button>
+            <h1 id="q-form-title" class="mt-1 text-2xl font-semibold tracking-tight">New question</h1>
+          </header>
+          <div id="q-form-card"></div>
+          <label class="block space-y-1">
+            <span class="block font-medium">Model</span>
+            <select id="q-form-model" class="control"></select>
+          </label>
+          <div class="sticky bottom-0 -mx-6 mt-auto flex items-center gap-3 border-t border-neutral-200 bg-neutral-50 px-6 py-4 max-sm:-mx-4 max-sm:px-4 dark:border-neutral-800 dark:bg-neutral-950">
+            <button id="q-save" type="button" class="btn btn-primary">Save</button>
+            <button id="q-cancel" type="button" class="btn">Cancel</button>
+            <span id="q-form-status" class="note ml-auto text-right" aria-live="polite"></span>
+            <button id="q-try" type="button" class="btn">Try</button>
+          </div>
+        </section>
+
+        <section class="flex min-w-0 flex-col gap-4 p-6 lg:overflow-y-auto max-sm:p-4">
+          <label class="block space-y-1">
+            <span class="block font-medium">State</span>
+            <textarea id="q-try-state" class="control font-mono text-xs leading-relaxed" rows="5"></textarea>
+          </label>
+          <div id="q-try-answer" class="space-y-3">
+            <p class="note py-12 text-center">Try runs the draft against this state. Nothing is saved.</p>
+          </div>
+        </section>
+      </div>
     </div>
 
     <!-- Providers -->
@@ -212,7 +245,6 @@
         <option value="choice">choice</option>
         <option value="score">score</option>
       </select>
-      <button type="button" class="q-del icon-btn" aria-label="Remove question" title="Remove question"></button>
     </div>
     <input class="q-instr control" placeholder="Instructions, for example: Is the customer asking for a refund?" aria-label="Instructions">
     <div class="q-rows space-y-2"></div>

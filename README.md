@@ -11,7 +11,7 @@ Your agent or service describes what it needs to know as typed questions: yes/no
 jeff runs as one small binary. It serves:
 
 - **The API**, on port 8080 by default: what your code calls.
-- **The admin page**, on port 8081 by default: providers, a playground and access keys.
+- **The admin page**, on port 8081 by default: saved questions, providers and access keys.
 
 ## Contents
 
@@ -78,7 +78,7 @@ This starts the API on `http://127.0.0.1:8080` and the admin page on `http://127
    - Paste your TypeSafe key, or click **Install** on CLM to run it locally.
    - Each provider shows **Online** when jeff can reach it.
    - Click **Save**.
-2. **Playground.** Pick a model, write the state and the questions, then click **Run** or press Ctrl+Enter.
+2. **Questions.** Click **New question** or **Add examples**, check the questions to ask, write the state, then click **Run** or press Ctrl+Enter. **Try** in the question form runs a draft before you save it.
    - The **curl** tab shows the same request for your own code.
 
 jeff keeps its settings in `~/.jeff/jeff.json` (`%USERPROFILE%\.jeff\jeff.json` on Windows).

@@ -45,10 +45,10 @@ async function api(path, opts = {}) {
 
 /* ---------- tabs ---------- */
 
-const PAGES = ["playground", "providers", "keys"];
+const PAGES = ["questions", "providers", "keys"];
 
 function showTab() {
-  const id = PAGES.find((p) => location.hash === "#" + p) || "playground";
+  const id = PAGES.find((p) => location.hash === "#" + p) || "questions";
   for (const t of PAGES) $("#page-" + t).hidden = t !== id;
   if (id === "keys" && config) loadKeys().catch((e) => say($("#key-status"), e.message, "err"));
   for (const a of $$(".tab")) {
@@ -82,17 +82,22 @@ function confirmClick(button, armedLabel, action) {
 
 /* ---------- models ---------- */
 
+function modelGroups() {
+  return modelList.providers.map((p) => {
+    const g = el("optgroup");
+    g.label = p.ok ? p.name : `${p.name} (${p.warning ? "starting" : "offline"})`;
+    for (const m of p.models) g.append(new Option(`${p.id}/${m}`, `${p.id}/${m}`));
+    return g;
+  });
+}
+
 function fillModelSelects() {
   const groups = modelList.providers;
   const all = modelList.data.map((m) => m.id);
   const sel = $("#pg-model");
   const keep = sel.value || store.get("model") || config.default_model;
-  sel.replaceChildren(...groups.map((p) => {
-    const g = el("optgroup");
-    g.label = p.ok ? p.name : `${p.name} (${p.warning ? "starting" : "offline"})`;
-    for (const m of p.models) g.append(new Option(`${p.id}/${m}`, `${p.id}/${m}`));
-    return g;
-  }));
+  sel.replaceChildren(...modelGroups());
+  fillFormModel();
   if (!all.includes(config.default_model)) sel.prepend(new Option(config.default_model, config.default_model));
   sel.value = all.includes(keep) ? keep : config.default_model;
   fillDefaultModel();
@@ -498,7 +503,7 @@ function addRow(card, type, a = "", b = "") {
     const n = $(".q-rows", card).children.length;
     row.append(el("span", "q-level-n note w-6 shrink-0 text-right font-mono tabular-nums", String(n)), rowInput("q-level", a, "level description", "Level description"));
   }
-  row.append(removeButton(() => { row.remove(); renumber(card); saveDraft(); }, type === "choice" ? "Remove option" : "Remove level"));
+  row.append(removeButton(() => { row.remove(); renumber(card); }, type === "choice" ? "Remove option" : "Remove level"));
   $(".q-rows", card).append(row);
 }
 
@@ -524,26 +529,16 @@ function addQuestion(q) {
   const card = $("#tpl-question").content.firstElementChild.cloneNode(true);
   $(".q-key", card).value = q.key || "";
   $(".q-instr", card).value = q.instructions || "";
-  $(".q-type", card).onchange = (e) => { setType(card, e.target.value); saveDraft(); };
-  $(".q-add", card).onclick = () => { addRow(card, card.dataset.type); saveDraft(); };
-  $(".q-del", card).innerHTML = X_ICON;
-  $(".q-del", card).onclick = () => { card.remove(); saveDraft(); };
+  $(".q-type", card).onchange = (e) => setType(card, e.target.value);
+  $(".q-add", card).onclick = () => addRow(card, card.dataset.type);
   setType(card, q.type || "noul", q.rows);
-  $("#pg-questions").append(card);
+  $("#q-form-card").replaceChildren(card);
   return card;
-}
-
-for (const b of $$("[data-add]")) {
-  b.onclick = () => {
-    const n = $$("#pg-questions .q").length + 1;
-    $(".q-key", addQuestion({ type: b.dataset.add, key: `q${n}` })).focus();
-    saveDraft();
-  };
 }
 
 function readQuestions() {
   const out = {};
-  for (const card of $$("#pg-questions .q")) {
+  for (const card of $$("#q-form-card .q")) {
     const key = $(".q-key", card).value.trim();
     if (!key) throw new Error("Every question needs a key.");
     if (out[key]) throw new Error(`Question key "${key}" is used twice.`);
@@ -561,23 +556,11 @@ function readQuestions() {
     }
     out[key] = q;
   }
-  if (!Object.keys(out).length) throw new Error("Add at least one question.");
   return out;
 }
 
-function snapshotQuestions() {
-  return $$("#pg-questions .q").map((card) => ({
-    key: $(".q-key", card).value,
-    type: card.dataset.type,
-    instructions: $(".q-instr", card).value,
-    rows: card.dataset.type === "choice"
-      ? $$(".q-row", card).map((r) => [$(".q-opt-key", r).value, $(".q-opt-desc", r).value])
-      : $$(".q-level", card).map((i) => [i.value]),
-  }));
-}
-
-function saveDraft() {
-  store.set("draft", { state: $("#pg-state").value, questions: snapshotQuestions() });
+function saveState() {
+  store.set("state", $("#pg-state").value);
   $("#pg-count").textContent = `${$("#pg-state").value.length} chars`;
 }
 
@@ -590,15 +573,23 @@ const EXAMPLE = {
   ],
 };
 
-function loadDraft() {
-  const d = store.get("draft") || EXAMPLE;
-  $("#pg-state").value = d.state;
-  for (const q of d.questions) addQuestion(q);
-  saveDraft();
+/** Turns a builder snapshot (`rows`) into the native question shape. */
+function nativeOf(q) {
+  const out = { type: q.type, instructions: q.instructions };
+  if (q.type === "choice") out.criteria = Object.fromEntries(q.rows);
+  if (q.type === "score") out.criteria = q.rows.map((r) => r[0]);
+  return out;
 }
 
-$("#pg-state").addEventListener("input", saveDraft);
-$("#pg-questions").addEventListener("input", saveDraft);
+/** Turns a saved question into what `addQuestion` takes. */
+function builderOf(key, q) {
+  const rows = q.type === "choice" ? Object.entries(q.criteria || {}) : q.type === "score" ? (q.criteria || []).map((c) => [c]) : undefined;
+  return { key, type: q.type, instructions: q.instructions, rows };
+}
+
+$("#pg-state").value = store.get("state") ?? EXAMPLE.state;
+saveState();
+$("#pg-state").addEventListener("input", saveState);
 $("#pg-model").onchange = (e) => store.set("model", e.target.value);
 
 /* ---------- answers ---------- */
@@ -630,13 +621,14 @@ function bar(label, note, p, chosen) {
   return row;
 }
 
-function answerCard(key, q, a) {
+function answerCard(key, q, a, model) {
   const card = el("div", "card space-y-3");
   const head = el("div", "flex flex-wrap items-center gap-2");
   head.append(el("span", "font-mono font-semibold", key));
   const badge = el("span", "badge", TYPE_INFO[a.type]?.badge || a.type);
   badge.dataset.type = a.type;
   head.append(badge);
+  if (model) head.append(modelChip(model));
   card.append(head);
   if (q?.instructions) card.append(el("p", "text-neutral-600 dark:text-neutral-400", q.instructions));
 
@@ -685,23 +677,24 @@ function curlFor(body) {
   return `curl ${apiOrigin()}/v1/systemone \\\n${auth}  -H 'content-type: application/json' \\\n  -d '${json}'`;
 }
 
+/** Saved keys in list order that are checked. */
+function checkedKeys() {
+  return Object.keys(saved).filter((k) => checked.has(k));
+}
+
+function runBody() {
+  return { model: $("#pg-model").value, state: $("#pg-state").value, questions: checkedKeys() };
+}
+
 function updateCurl() {
-  try {
-    $("#curl-text").textContent = curlFor({ model: $("#pg-model").value, state: $("#pg-state").value, questions: readQuestions() });
-  } catch (e) {
-    $("#curl-text").textContent = e.message;
-  }
+  $("#curl-text").textContent = curlFor(runBody());
 }
 $("#curl-copy").onclick = () => navigator.clipboard.writeText($("#curl-text").textContent).then(() => say($("#pg-status"), "curl copied", "ok"));
 for (const t of $$('.view-tab[data-view="curl"]')) t.addEventListener("click", updateCurl);
 
-async function run() {
-  const status = $("#pg-status");
-  let questions;
-  try { questions = readQuestions(); }
-  catch (e) { say(status, e.message, "err"); return; }
-  const body = { model: $("#pg-model").value, state: $("#pg-state").value, questions };
-  $("#pg-run").disabled = true;
+/** Posts to /v1/systemone with a running timer in `status`; `button` stays disabled meanwhile. */
+async function ask(body, status, button) {
+  button.disabled = true;
   const t0 = performance.now();
   say(status, "Running…");
   const tick = setInterval(() => say(status, `Running… ${Math.floor((performance.now() - t0) / 1000)} s`), 1000);
@@ -711,7 +704,25 @@ async function run() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    const ms = Math.round(performance.now() - t0);
+    say(status, "");
+    return { out, headers, ms: Math.round(performance.now() - t0) };
+  } finally {
+    clearInterval(tick);
+    button.disabled = false;
+  }
+}
+
+function answerCards(questions, answers, runModel) {
+  const order = [...Object.keys(questions).filter((k) => k in answers), ...Object.keys(answers).filter((k) => !(k in questions))];
+  return order.map((k) => answerCard(k, questions[k], answers[k], questions[k]?.model || runModel));
+}
+
+async function run() {
+  const status = $("#pg-status");
+  const body = runBody();
+  if (!body.questions.length) { say(status, "Check at least one question.", "err"); return; }
+  try {
+    const { out, headers, ms } = await ask(body, status, $("#pg-run"));
     last = out;
     $("#pg-meta").replaceChildren(
       chip("provider", headers.get("x-jeff-provider") || "?"),
@@ -720,27 +731,167 @@ async function run() {
       ...(headers.get("x-jeff-upstream-ms") ? [chip("upstream", `${headers.get("x-jeff-upstream-ms")} ms`)] : []),
       ...Object.entries(out.usage || {}).map(([k, v]) => chip(k.replaceAll("_", " "), String(v))),
     );
-    const answers = out.answers || {};
-    const order = [...Object.keys(questions).filter((k) => k in answers), ...Object.keys(answers).filter((k) => !(k in questions))];
-    $("#view-answer").replaceChildren(...order.map((k) => answerCard(k, questions[k], answers[k])));
+    const questions = Object.fromEntries(body.questions.map((k) => [k, saved[k]]));
+    $("#view-answer").replaceChildren(...answerCards(questions, out.answers || {}, body.model));
     $("#view-json").textContent = JSON.stringify(out, null, 2);
     updateCurl();
-    say(status, "");
   } catch (e) {
     say(status, e.message, "err");
-  } finally {
-    clearInterval(tick);
-    $("#pg-run").disabled = false;
   }
 }
 $("#pg-run").onclick = run;
 addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && location.hash !== "#providers") run();
+  if (!(e.ctrlKey || e.metaKey) || e.key !== "Enter" || $("#page-questions").hidden) return;
+  if ($("#q-form-view").hidden) run();
+  else tryDraft();
 });
+
+/* ---------- saved questions ---------- */
+
+let saved = {};
+const checked = new Set(store.get("checked") || []);
+/** The key being edited; null while creating. */
+let editing = null;
+
+function saveChecked() {
+  store.set("checked", [...checked]);
+  $("#q-selected").textContent = `${checkedKeys().length} selected · Ctrl + Enter`;
+}
+
+function modelChip(model) {
+  return el("span", "shrink-0 rounded border border-neutral-300 px-1.5 py-0.5 font-mono text-[11px] text-neutral-700 dark:border-neutral-700 dark:text-neutral-300", model);
+}
+
+function questionRow(key, q) {
+  const li = el("li", "flex items-start gap-3 p-3");
+  const box = el("input", "mt-1 size-4 shrink-0");
+  box.type = "checkbox";
+  box.checked = checked.has(key);
+  box.setAttribute("aria-label", `Run ${key}`);
+  box.onchange = () => { if (box.checked) checked.add(key); else checked.delete(key); saveChecked(); };
+  const main = el("div", "min-w-0 flex-1");
+  const head = el("div", "flex flex-wrap items-center gap-2");
+  head.append(el("span", "font-mono font-medium", key));
+  const badge = el("span", "badge", TYPE_INFO[q.type]?.badge || q.type);
+  badge.dataset.type = q.type;
+  head.append(badge);
+  if (q.model) head.append(modelChip(q.model));
+  main.append(head, el("p", "note mt-0.5 truncate", q.instructions));
+  const edit = el("button", "btn min-w-0", "Edit");
+  edit.type = "button";
+  edit.onclick = () => openForm(key);
+  const del = el("button", "btn btn-danger min-w-0", "Delete");
+  del.type = "button";
+  confirmClick(del, "Confirm delete", async () => {
+    try {
+      saved = (await api(`/api/questions/${encodeURIComponent(key)}`, { method: "DELETE" })).body;
+      renderQuestions();
+    } catch (err) {
+      say($("#pg-status"), err.message, "err");
+    }
+  });
+  li.append(box, main, edit, del);
+  return li;
+}
+
+function renderQuestions() {
+  const keys = Object.keys(saved);
+  $("#q-items").replaceChildren(...keys.map((k) => questionRow(k, saved[k])));
+  $("#q-items").hidden = !keys.length;
+  $("#q-empty").hidden = keys.length > 0;
+  for (const k of [...checked]) if (!(k in saved)) checked.delete(k);
+  saveChecked();
+}
+
+async function loadQuestions() {
+  saved = (await api("/v1/questions")).body;
+  renderQuestions();
+}
+
+$("#q-examples").onclick = async () => {
+  try {
+    const examples = Object.fromEntries(EXAMPLE.questions.map((q) => [q.key, nativeOf(q)]));
+    saved = (await api("/api/questions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(examples) })).body;
+    for (const k of Object.keys(examples)) checked.add(k);
+    renderQuestions();
+  } catch (err) {
+    say($("#pg-status"), err.message, "err");
+  }
+};
+
+/** Offers Default plus every listed model, keeping a saved model that no provider lists right now. */
+function fillFormModel(want = $("#q-form-model").value) {
+  const sel = $("#q-form-model");
+  sel.replaceChildren(new Option("Default (Model picked for the run)", ""), ...(modelList ? modelGroups() : []));
+  if (want && ![...sel.options].some((o) => o.value === want)) sel.append(new Option(want, want));
+  sel.value = want;
+}
+
+function showForm(open) {
+  $("#q-list-view").hidden = open;
+  $("#q-form-view").hidden = !open;
+}
+
+function openForm(key = null) {
+  editing = key;
+  const q = key ? saved[key] : {};
+  $("#q-form-title").textContent = key ? "Edit question" : "New question";
+  const card = addQuestion(key ? builderOf(key, q) : { type: "noul", key: "" });
+  $(".q-key", card).readOnly = !!key;
+  fillFormModel(q.model || "");
+  $("#q-try-state").value = $("#pg-state").value;
+  $("#q-try-answer").replaceChildren(el("p", "note py-12 text-center", "Try runs the draft against this state. Nothing is saved."));
+  say($("#q-form-status"), "");
+  showForm(true);
+  (key ? $(".q-instr", card) : $(".q-key", card)).focus();
+}
+
+/** The form's question as `[key, native question]`, with its model when one is picked. */
+function draft() {
+  const [[key, q]] = Object.entries(readQuestions());
+  if ($("#q-form-model").value) q.model = $("#q-form-model").value;
+  return [key, q];
+}
+
+async function saveForm() {
+  const status = $("#q-form-status");
+  try {
+    const [key, q] = draft();
+    const json = { "content-type": "application/json" };
+    if (editing) await api(`/api/questions/${encodeURIComponent(editing)}`, { method: "PUT", headers: json, body: JSON.stringify(q) });
+    else await api("/api/questions", { method: "POST", headers: json, body: JSON.stringify({ [key]: q }) });
+    checked.add(key);
+    await loadQuestions();
+    showForm(false);
+  } catch (err) {
+    say(status, err.message, "err");
+  }
+}
+
+async function tryDraft() {
+  const status = $("#q-form-status");
+  let key, q;
+  try { [key, q] = draft(); }
+  catch (err) { say(status, err.message, "err"); return; }
+  const body = { model: $("#pg-model").value, state: $("#q-try-state").value, questions: { [key]: q } };
+  try {
+    const { out } = await ask(body, status, $("#q-try"));
+    $("#q-try-answer").replaceChildren(...answerCards(body.questions, out.answers || {}, body.model));
+  } catch (err) {
+    say(status, err.message, "err");
+  }
+}
+
+$("#q-new").onclick = () => openForm();
+$("#q-empty-new").onclick = () => openForm();
+$("#q-back").onclick = () => showForm(false);
+$("#q-cancel").onclick = () => showForm(false);
+$("#q-save").onclick = saveForm;
+$("#q-try").onclick = tryDraft;
 
 setInterval(() => !document.hidden && location.hash === "#providers" && modelList && loadModels().catch(() => {}), 15000);
 
 showTab();
 setView(view);
-loadDraft();
+loadQuestions().catch((e) => say($("#pg-status"), e.message, "err"));
 loadConfig().catch((e) => say($("#pg-status"), e.message, "err"));
