@@ -17,6 +17,34 @@ function say(el, text, tone = "") {
   el.dataset.tone = tone;
 }
 
+/** A success note that fades out after 3 s; an error shown with `say` stays until replaced. */
+function flash(el, text) {
+  say(el, text, "ok");
+  clearTimeout(el.flashTimer);
+  el.flashTimer = setTimeout(() => { if (el.textContent === text) say(el, ""); }, 3000);
+}
+
+/** How long a locked button stays locked at least, so a fast action shows its spinner instead of a flicker. */
+const BUSY_MS = 400;
+
+/** Disables `button` and shows a spinner in it; the returned function unlocks it. */
+function lock(button) {
+  button.disabled = true;
+  const until = Date.now() + BUSY_MS;
+  button.insertAdjacentHTML("afterbegin", '<svg viewBox="0 0 16 16" class="spinner size-4 motion-safe:animate-spin" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2" opacity="0.25"/><path d="M14 8a6 6 0 0 0-6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>');
+  return () => setTimeout(() => {
+    button.querySelector(".spinner")?.remove();
+    button.disabled = false;
+  }, Math.max(0, until - Date.now()));
+}
+
+/** Runs `action` with `button` locked; a click while it runs is ignored. */
+async function busy(button, action) {
+  if (button.disabled) return;
+  const unlock = lock(button);
+  try { await action(); } finally { unlock(); }
+}
+
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -231,9 +259,11 @@ async function loadConfig() {
   await loadModels();
 }
 
-$("#refresh").onclick = () => loadModels().catch((e) => say($("#save-status"), e.message, "err"));
+$("#refresh").onclick = (e) => busy(e.currentTarget, () => loadModels().catch((err) => say($("#save-status"), err.message, "err")));
 
-$("#save").onclick = async () => {
+$("#save").onclick = (e) => busy(e.currentTarget, saveProviders);
+
+async function saveProviders() {
   const providers = $$("#provider-list [data-provider]").map((card) => {
     const p = {
       id: $(".p-id", card).value.trim(),
@@ -252,12 +282,12 @@ $("#save").onclick = async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ default_model: $("#default-model").value, providers }),
     });
-    say($("#save-status"), "Saved", "ok");
+    flash($("#save-status"), "Saved");
     await loadConfig();
   } catch (e) {
     say($("#save-status"), e.message, "err");
   }
-};
+}
 
 const STEP_ICONS = {
   done: '<svg viewBox="0 0 20 20" class="size-5 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 10.5l3.2 3L15 7"/></svg>',
@@ -419,8 +449,12 @@ $("#key-date").addEventListener("input", syncExpiry);
 $("#key-exp").addEventListener("change", syncExpiry);
 syncExpiry();
 
-$("#key-form").onsubmit = async (e) => {
+$("#key-form").onsubmit = (e) => {
   e.preventDefault();
+  busy(e.submitter ?? $("#key-form [type=submit]"), createKey);
+};
+
+async function createKey() {
   const never = $("#key-exp").value === "never";
   if (!never && !expiryDate()) { say($("#key-status"), "Pick an expiry date or choose Never.", "err"); return; }
   try {
@@ -436,15 +470,15 @@ $("#key-form").onsubmit = async (e) => {
     if (kept) store.set("key", body.key);
     $("#key-saved-note").textContent = kept ? "This browser now uses this key for the admin page." : "";
     $("#key-name").value = "";
-    say($("#key-status"), "Key created", "ok");
+    flash($("#key-status"), "Key created");
     await refreshInfo();
     await loadKeys();
   } catch (err) {
     say($("#key-status"), err.message, "err");
   }
-};
+}
 
-$("#key-copy").onclick = () => navigator.clipboard.writeText($("#key-value").value).then(() => say($("#key-status"), "Key copied", "ok"));
+$("#key-copy").onclick = () => navigator.clipboard.writeText($("#key-value").value).then(() => flash($("#key-status"), "Key copied"));
 
 function keyRow(k, now, last) {
   const li = el("li", "flex flex-wrap items-center gap-x-4 gap-y-1 py-3");
@@ -715,12 +749,12 @@ function runBody() {
 function updateCurl() {
   $("#curl-text").textContent = curlFor(runBody());
 }
-$("#curl-copy").onclick = () => navigator.clipboard.writeText($("#curl-text").textContent).then(() => say($("#pg-status"), "curl copied", "ok"));
+$("#curl-copy").onclick = () => navigator.clipboard.writeText($("#curl-text").textContent).then(() => flash($("#pg-status"), "curl copied"));
 for (const t of $$('.view-tab[data-view="curl"]')) t.addEventListener("click", updateCurl);
 
 /** Posts to /v1/systemone with a running timer in `status`; `button` stays disabled meanwhile. */
 async function ask(body, status, button) {
-  button.disabled = true;
+  const unlock = lock(button);
   const t0 = performance.now();
   say(status, "Running…");
   const tick = setInterval(() => say(status, `Running… ${Math.floor((performance.now() - t0) / 1000)} s`), 1000);
@@ -734,7 +768,7 @@ async function ask(body, status, button) {
     return { out, headers, ms: Math.round(performance.now() - t0) };
   } finally {
     clearInterval(tick);
-    button.disabled = false;
+    unlock();
   }
 }
 
@@ -835,7 +869,7 @@ async function loadQuestions() {
   renderQuestions();
 }
 
-$("#q-examples").onclick = async () => {
+$("#q-examples").onclick = (e) => busy(e.currentTarget, async () => {
   try {
     const examples = Object.fromEntries(EXAMPLE.questions.map((q) => [q.key, nativeOf(q)]));
     saved = (await api("/api/questions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(examples) })).body;
@@ -844,7 +878,7 @@ $("#q-examples").onclick = async () => {
   } catch (err) {
     say($("#pg-status"), err.message, "err");
   }
-};
+});
 
 /** Offers Default plus every listed model, keeping a saved model that no provider lists right now. */
 function fillFormModel(want = $("#q-form-model").value) {
@@ -885,8 +919,6 @@ function draft() {
 
 async function saveForm() {
   const status = $("#q-form-status");
-  const button = $("#q-save");
-  button.disabled = true;
   try {
     const [key, q] = draft();
     const json = { "content-type": "application/json" };
@@ -897,8 +929,6 @@ async function saveForm() {
     showForm(false);
   } catch (err) {
     say(status, err.message, "err");
-  } finally {
-    button.disabled = false;
   }
 }
 
@@ -920,7 +950,7 @@ $("#q-new").onclick = () => openForm();
 $("#q-empty-new").onclick = () => openForm();
 $("#q-back").onclick = () => showForm(false);
 $("#q-cancel").onclick = () => showForm(false);
-$("#q-save").onclick = saveForm;
+$("#q-save").onclick = (e) => busy(e.currentTarget, saveForm);
 $("#q-try").onclick = tryDraft;
 
 setInterval(() => !document.hidden && location.hash === "#providers" && modelList && loadModels().catch(() => {}), 15000);
