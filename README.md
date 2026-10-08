@@ -18,6 +18,7 @@ jeff runs as one small binary. It serves:
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Call the API](#call-the-api)
+- [Saved questions](#saved-questions)
 - [Providers and models](#providers-and-models)
 - [Local CLM](#local-clm)
 - [Access keys](#access-keys)
@@ -119,10 +120,27 @@ Other endpoints:
 | `GET /v1/models` | Every `provider/model` and the status of each provider. |
 | `GET /v1/questions` | Every saved question, by key. |
 | `GET /v1/questions/{key}` | One saved question. |
-| `POST /api/questions` | Saves new questions from a map of key to question. An existing key fails with `409`. Admin only. |
-| `PUT /api/questions/{key}` | Replaces one saved question. Admin only. |
-| `DELETE /api/questions/{key}` | Deletes one saved question. Admin only. |
 | `GET /health` | `{"ok": true}`. It needs no key, so it suits liveness probes. |
+
+## Saved questions
+
+Save a question once and ask it by key. Manage saved questions on the admin page under **Questions**, or through the admin port with an admin key:
+
+| Endpoint | What it does |
+|---|---|
+| `POST /api/questions` | Saves new questions from a map of key to question. An existing key fails with `409`. |
+| `PUT /api/questions/{key}` | Replaces one saved question. |
+| `DELETE /api/questions/{key}` | Deletes one saved question. |
+
+A key uses `A-Z`, `a-z`, `0-9`, `_` and `-`, up to 64 characters.
+
+To ask saved questions, pass their keys as an array:
+
+```sh
+curl http://127.0.0.1:8080/v1/systemone   -H 'content-type: application/json'   -d '{ "state": "Customer: my invoice was charged twice!", "questions": ["urgent", "department"] }'
+```
+
+A question may name its own `model`. It goes to that model, and the others go to the request's `model` or the default model. jeff sends one call per model, at most 8 per request, and merges the answers into one response. `x-jeff-provider` then lists every provider that answered.
 
 ## Providers and models
 

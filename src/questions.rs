@@ -140,11 +140,18 @@ pub fn merge(parts: Vec<Value>) -> Value {
                 }
                 ("usage", Some(Value::Object(usage))) => {
                     for (k, v) in value.as_object().into_iter().flatten() {
-                        let sum = usage.get(k).and_then(Value::as_f64).unwrap_or(0.0)
-                            + v.as_f64().unwrap_or(0.0);
-                        let sum = match v.is_u64() && usage.get(k).is_none_or(Value::is_u64) {
-                            true => Value::from(sum as u64),
-                            false => Value::from(sum),
+                        let sum = match (usage.get(k), v) {
+                            (None, _) => v.clone(),
+                            (Some(Value::Number(a)), Value::Number(b)) => {
+                                match (a.as_u64(), b.as_u64()) {
+                                    (Some(a), Some(b)) => Value::from(a + b),
+                                    _ => Value::from(
+                                        a.as_f64().unwrap_or(0.0) + b.as_f64().unwrap_or(0.0),
+                                    ),
+                                }
+                            }
+                            // Only counts add up; any other field keeps the first group's value.
+                            (Some(first), _) => first.clone(),
                         };
                         usage.insert(k.clone(), sum);
                     }
@@ -316,6 +323,18 @@ mod tests {
             json!({"model": "clm-latest, jev-latest", "id": "x",
                 "answers": {"a": {"noul": 0.9}, "b": {"noul": 0.1}},
                 "usage": {"input_tokens": 15}})
+        );
+    }
+
+    #[test]
+    fn merge_sums_only_numbers_in_usage() {
+        let merged = merge(vec![
+            json!({"usage": {"input_tokens": 10, "details": {"cached": 1}, "unit": "tok"}}),
+            json!({"usage": {"input_tokens": 5, "details": {"cached": 2}, "cost": 0.5, "note": "x"}}),
+        ]);
+        assert_eq!(
+            merged["usage"],
+            json!({"input_tokens": 15, "details": {"cached": 1}, "unit": "tok", "cost": 0.5, "note": "x"})
         );
     }
 

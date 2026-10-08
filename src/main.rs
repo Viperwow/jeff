@@ -361,27 +361,35 @@ impl Upstream {
     }
 }
 
-/// Sends `body` to the provider serving `model`; the error is the status and message for the client.
-async fn forward(
+/// Finds the provider and its model name for `model`, refreshing the model lists once for a bare name.
+async fn find_model(
     app: &App,
     config: &Config,
     model: &str,
-    mut body: Value,
-) -> Result<Upstream, (StatusCode, String)> {
+) -> Result<(Provider, String), (StatusCode, String)> {
     let mut found = resolve(config, &*app.listed.read().await, model);
     if found.is_none() && !model.contains('/') {
         refresh_models(app, config).await;
         found = resolve(config, &*app.listed.read().await, model);
     }
-    let Some((p, upstream_model)) = found else {
-        return Err((
+    found.ok_or_else(|| {
+        (
             StatusCode::BAD_REQUEST,
             format!(
                 "unknown model '{model}': use provider/model, for example {}",
                 config.default_model
             ),
-        ));
-    };
+        )
+    })
+}
+
+/// Sends `body` to provider `p` as `upstream_model`; the error is the status and message for the client.
+async fn forward(
+    app: &App,
+    p: Provider,
+    upstream_model: String,
+    mut body: Value,
+) -> Result<Upstream, (StatusCode, String)> {
     body["model"] = Value::String(upstream_model);
 
     let t0 = Instant::now();
@@ -439,14 +447,19 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
             Err(e) => return error(StatusCode::BAD_REQUEST, e),
         },
     };
-    let calls = groups.into_iter().map(|(model, qs)| {
+    // Every model resolves before any call, so a request bound to fail costs no provider anything.
+    let mut calls = Vec::new();
+    for (model, qs) in groups {
+        let (p, upstream_model) = match find_model(&app, &config, &model).await {
+            Ok(found) => found,
+            Err((status, msg)) => return error(status, msg),
+        };
         let mut body = body.clone();
         if let Some(qs) = qs {
             body["questions"] = Value::Object(qs);
         }
-        let (app, config) = (&app, &config);
-        async move { forward(app, config, &model, body).await }
-    });
+        calls.push(forward(&app, p, upstream_model, body));
+    }
     let mut parts = Vec::new();
     for result in join_all(calls).await {
         match result {
@@ -1012,6 +1025,15 @@ async fn check_provider_hosts(providers: &[Provider], allow_private: bool) -> Re
     Ok(())
 }
 
+/// Keys and questions have their own endpoints; a provider save built from an older snapshot must not undo them.
+fn keep_live(next: Config, live: &Config) -> Config {
+    Config {
+        keys: live.keys.clone(),
+        questions: live.questions.clone(),
+        ..next
+    }
+}
+
 async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>) -> Response {
     // The DNS checks run without the lock, so a slow resolver does not stall every request meanwhile.
     let snapshot = app.config.read().await.clone();
@@ -1023,10 +1045,7 @@ async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>)
         return error(StatusCode::BAD_REQUEST, e);
     }
     let mut config = app.config.write().await;
-    let next = Config {
-        keys: config.keys.clone(),
-        ..next
-    };
+    let next = keep_live(next, &config);
     if let Err(e) = app.save(&next).await {
         return error(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
@@ -1593,6 +1612,18 @@ mod tests {
         let mut bad = input(None);
         bad.default_model = "clm/clm-latest".into();
         assert!(build_config(&current, bad, false).is_err());
+    }
+
+    #[test]
+    fn provider_save_keeps_live_keys_and_questions() {
+        let snapshot = Config::default();
+        let mut live = Config::default();
+        live.questions.insert(
+            "added-meanwhile".into(),
+            json!({"type": "noul", "instructions": "x"}),
+        );
+        let next = keep_live(snapshot, &live);
+        assert_eq!(next.questions, live.questions);
     }
 
     #[test]

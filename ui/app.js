@@ -863,7 +863,10 @@ function openForm(key = null) {
 
 /** The form's question as `[key, native question]`, with its model when one is picked. */
 function draft() {
-  const [[key, q]] = Object.entries(readQuestions());
+  const [[key, form]] = Object.entries(readQuestions());
+  // Fields the form does not show, such as newer Jev fields saved through the API, survive an edit.
+  const { type, instructions, criteria, model, ...rest } = editing ? saved[editing] : {};
+  const q = { ...rest, ...form };
   if ($("#q-form-model").value) q.model = $("#q-form-model").value;
   return [key, q];
 }
