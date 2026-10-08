@@ -90,6 +90,8 @@ When they resolve to several models, jeff groups the questions by model and send
 parallel, each with the same `state` and other request fields. It then merges the results:
 
 - `answers` is the union of the group answers, keyed by question.
+- `usage` sums each numeric field across groups.
+- `model` lists the group models, comma-separated.
 - Other top-level fields come from the first group's response.
 - `x-jeff-provider` lists the providers, comma-separated.
 - `x-jeff-upstream-ms` is the slowest group's time.
