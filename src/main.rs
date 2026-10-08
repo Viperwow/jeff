@@ -298,13 +298,21 @@ impl reqwest::dns::Resolve for GuardedResolver {
 }
 
 impl App {
-    /// A broken file keeps the config in memory, so the access keys stay in force until the file is fixed.
+    /// A file that does not parse keeps the config in memory, so the access keys stay in force until it is fixed.
+    /// An invalid question does not block the reload: a key revoked meanwhile must stop working.
     async fn refresh_from_disk(&self) {
         let now = modified(&self.config_path);
         let seen = *self.config_mtime.lock().unwrap();
         if now.is_some() && now != seen {
-            match load_config(&self.config_path) {
-                Ok(config) => *self.config.write().await = config,
+            match read_config(&self.config_path) {
+                Ok(config) => {
+                    for (key, q) in &config.questions {
+                        if let Err(e) = questions::validate(key, q) {
+                            eprintln!("{}: {e}; it cannot be asked until fixed", self.config_path);
+                        }
+                    }
+                    *self.config.write().await = config;
+                }
                 Err(e) => eprintln!("{e}; keeping the config loaded before"),
             }
             *self.config_mtime.lock().unwrap() = now;
