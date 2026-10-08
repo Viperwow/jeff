@@ -939,17 +939,19 @@ async fn get_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> R
 async fn change_questions(
     app: &App,
     change: impl FnOnce(&mut questions::Questions) -> Result<(), questions::Change>,
-) -> Result<questions::Questions, Response> {
+) -> Result<questions::Questions, Box<Response>> {
     let mut config = app.config.write().await;
     let mut next = config.clone();
-    change(&mut next.questions).map_err(|c| match c {
-        questions::Change::NotFound(m) => error(StatusCode::NOT_FOUND, m),
-        questions::Change::Exists(m) => error(StatusCode::CONFLICT, m),
-        questions::Change::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
+    change(&mut next.questions).map_err(|c| {
+        Box::new(match c {
+            questions::Change::NotFound(m) => error(StatusCode::NOT_FOUND, m),
+            questions::Change::Exists(m) => error(StatusCode::CONFLICT, m),
+            questions::Change::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
+        })
     })?;
     app.save(&next)
         .await
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| Box::new(error(StatusCode::INTERNAL_SERVER_ERROR, e)))?;
     *config = next;
     Ok(config.questions.clone())
 }
@@ -960,7 +962,7 @@ async fn create_questions(
 ) -> Response {
     match change_questions(&app, |qs| questions::create(qs, input)).await {
         Ok(qs) => (StatusCode::CREATED, Json(qs)).into_response(),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
@@ -971,14 +973,14 @@ async fn update_question(
 ) -> Response {
     match change_questions(&app, |qs| questions::update(qs, &key, q)).await {
         Ok(qs) => Json(qs[&key].clone()).into_response(),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
 async fn delete_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
     match change_questions(&app, |qs| questions::remove(qs, &key)).await {
         Ok(qs) => Json(qs).into_response(),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
