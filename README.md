@@ -140,6 +140,22 @@ To ask saved questions, pass their keys as an array:
 curl http://127.0.0.1:8080/v1/systemone   -H 'content-type: application/json'   -d '{ "state": "Customer: my invoice was charged twice!", "questions": ["urgent", "department"] }'
 ```
 
+To change a saved question for one request, send it in the map without `type`. Only the fields you send change, and nothing is saved:
+
+```json
+"questions": { "urgent": {}, "department": { "model": "typesafe/jev-latest" } }
+```
+
+From the command line, `jeff ask` does the same through a running jeff. `--state-file -` reads the state from stdin, and `--questions` takes JSON or a file with a map of custom questions:
+
+```sh
+jeff ask urgent department --state "My invoice was charged twice!"
+jeff ask urgent --questions refund.json --state-file ticket.txt
+jeff ask urgent --questions '{"urgent": {"model": "clm/clm-raw"}}' --state "..."
+```
+
+`jeff ask` calls `http://127.0.0.1:8080` unless `--url` or `JEFF_URL` says otherwise, and sends `JEFF_API_KEY` as its key. A custom question is saved only by `jeff questions add`, the admin page or `POST /api/questions`.
+
 A question may name its own `model`. It goes to that model, and the others go to the request's `model` or the default model. jeff sends one call per model, at most 8 per request, and merges the answers into one response. `x-jeff-provider` then lists every provider that answered.
 
 ## Providers and models
@@ -256,6 +272,8 @@ jeff remove clm          stop and remove the CLM containers; the weights stay
 jeff keys list           list keys without showing them
 jeff keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|never]
 jeff keys revoke ID
+jeff ask [KEY...] --state TEXT [--questions JSON|FILE] [--model MODEL] [--url URL]
+                         ask through a running jeff and print the answer JSON
 jeff questions list      list saved questions
 jeff questions get KEY   print one saved question as JSON
 jeff questions add FILE  save new questions from a JSON map of key to question; `-` reads stdin

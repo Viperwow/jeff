@@ -1131,6 +1131,8 @@ enum Command {
         #[arg(long, env = "JEFF_CONFIG", global = true)]
         config: Option<String>,
     },
+    /// Ask saved or custom questions through a running jeff and print the answer JSON
+    Ask(AskArgs),
     /// Manage saved questions in the config file; a running server picks changes up on the next request
     Questions {
         #[command(subcommand)]
@@ -1139,6 +1141,31 @@ enum Command {
         #[arg(long, env = "JEFF_CONFIG", global = true)]
         config: Option<String>,
     },
+}
+
+#[derive(Args)]
+struct AskArgs {
+    /// Saved questions to ask, by key
+    keys: Vec<String>,
+    /// The text the questions are about
+    #[arg(
+        long,
+        conflicts_with = "state_file",
+        required_unless_present = "state_file"
+    )]
+    state: Option<String>,
+    /// Read the state from a file, or `-` for stdin
+    #[arg(long)]
+    state_file: Option<String>,
+    /// A JSON map of key to question, or a file holding one; an entry without `type` overrides that saved question
+    #[arg(long)]
+    questions: Option<String>,
+    /// The model for questions without their own
+    #[arg(long)]
+    model: Option<String>,
+    /// The jeff API to ask
+    #[arg(long, env = "JEFF_URL", default_value = "http://127.0.0.1:8080")]
+    url: String,
 }
 
 #[derive(Subcommand)]
@@ -1250,6 +1277,7 @@ async fn main() {
         }
         Some(Command::Remove { stack: Stack::Clm }) => return run_install(install::Action::Remove),
         Some(Command::Keys { action, config }) => return run_keys(action, &config_file(config)),
+        Some(Command::Ask(args)) => return run_ask(args).await,
         Some(Command::Questions { action, config }) => {
             return run_questions(action, &config_file(config));
         }
@@ -1276,6 +1304,69 @@ fn read_input(file: &str) -> Result<String, String> {
     } else {
         fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))
     }
+}
+
+/// Builds the `/v1/systemone` body: each key asks its saved question, and `--questions` entries go on top.
+fn ask_body(
+    keys: &[String],
+    questions: Option<Value>,
+    state: String,
+    model: Option<String>,
+) -> Result<Value, String> {
+    let mut map: questions::Questions = keys.iter().map(|k| (k.clone(), json!({}))).collect();
+    match questions {
+        None => {}
+        Some(Value::Object(extra)) => map.extend(extra),
+        Some(_) => return Err("--questions must be a JSON map of key to question".into()),
+    }
+    if map.is_empty() {
+        return Err("name a saved question or pass --questions".into());
+    }
+    let mut body = json!({ "state": state, "questions": map });
+    if let Some(m) = model {
+        body["model"] = Value::String(m);
+    }
+    Ok(body)
+}
+
+async fn run_ask(args: AskArgs) {
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1)
+    };
+    let state = match (args.state, args.state_file) {
+        (Some(s), _) => s,
+        (None, Some(file)) => read_input(&file).unwrap_or_else(|e| fail(e)),
+        (None, None) => unreachable!("clap requires --state or --state-file"),
+    };
+    // Inline JSON first; anything else is a path, so a custom question can live in a file.
+    let questions = args.questions.map(|q| {
+        serde_json::from_str(&q).unwrap_or_else(|_| {
+            let text = read_input(&q).unwrap_or_else(|e| fail(e));
+            serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{q}: {e}")))
+        })
+    });
+    let body = ask_body(&args.keys, questions, state, args.model).unwrap_or_else(|e| fail(e));
+    let url = format!("{}/v1/systemone", args.url.trim_end_matches('/'));
+    let mut req = reqwest::Client::new().post(&url).json(&body);
+    if let Ok(key) = env::var("JEFF_API_KEY")
+        && !key.trim().is_empty()
+    {
+        req = req.bearer_auth(key.trim());
+    }
+    let resp = req
+        .send()
+        .await
+        .unwrap_or_else(|e| fail(format!("{url}: {}", e.without_url())));
+    let ok = resp.status().is_success();
+    let text = resp.text().await.unwrap_or_else(|e| fail(e.to_string()));
+    let pretty = serde_json::from_str::<Value>(&text)
+        .map(|v| serde_json::to_string_pretty(&v).unwrap())
+        .unwrap_or(text);
+    if !ok {
+        fail(pretty);
+    }
+    println!("{pretty}");
 }
 
 fn run_questions(action: QuestionsAction, path: &str) {
@@ -1688,6 +1779,26 @@ mod tests {
         let mut bad = input(None);
         bad.default_model = "clm/clm-latest".into();
         assert!(build_config(&current, bad, false).is_err());
+    }
+
+    #[test]
+    fn ask_body_merges_keys_and_overrides() {
+        let body = ask_body(
+            &["a".into(), "b".into()],
+            Some(json!({"b": {"model": "p/m"}, "c": {"type": "noul", "instructions": "x"}})),
+            "s".into(),
+            Some("p/n".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            json!({"state": "s", "model": "p/n", "questions": {
+                "a": {}, "b": {"model": "p/m"}, "c": {"type": "noul", "instructions": "x"}}})
+        );
+        let bare = ask_body(&["a".into()], None, "s".into(), None).unwrap();
+        assert!(bare.get("model").is_none());
+        assert!(ask_body(&[], None, "s".into(), None).is_err());
+        assert!(ask_body(&[], Some(json!([1])), "s".into(), None).is_err());
     }
 
     #[test]
