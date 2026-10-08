@@ -119,7 +119,7 @@ adds a yellow notice above the cards: `1 question skipped: spam`. The curl tab s
 - Add question: a search field with a dropdown. It filters by substring of key and instructions and hides questions
   already selected. Each option shows key, type badge and instructions. Arrow keys move, Enter adds, Escape closes.
 - Model override: a select with the listed models. The first option is "None (each question uses its own)".
-- Footer: Save, Cancel, Delete with `confirm()`, Try.
+- Footer: Save, Cancel, Delete with the page's two-click confirmation (`confirmClick`), Try.
 - Try resolves the draft in the browser, drops deleted questions, and sends the result to `/v1/systemone`. The
   answer renders with `answerCards()` and the same skipped notice. Nothing is saved.
 
