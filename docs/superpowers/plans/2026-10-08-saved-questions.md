@@ -17,7 +17,7 @@
 - Unknown question fields pass through unchanged.
 - Model precedence: question `model`, then request `model`, then `default_model`. `model` is stripped before forwarding.
 - Errors use the existing `error(status, msg)` JSON shape `{"error": "..."}`.
-- Reads (`GET /v1/questions*`) need a client key. Writes (`PUT /api/questions`, `DELETE /api/questions/{key}`) need an admin key.
+- Reads (`GET /v1/questions*`) need a client key. Writes (`POST /api/questions`, `PUT /api/questions/{key}`, `DELETE /api/questions/{key}`) need an admin key.
 - CI gates: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`.
 - UI CSS is rebuilt with `pnpm --dir ui build` and `ui/dist/app.css` is committed.
 - Commits follow Conventional Commits. No AI attribution trailers.
@@ -27,7 +27,7 @@
 1. `questions` is an empty array `[]` or empty map `{}` in `/v1/systemone`: expect `400 "questions must not be empty"`, no provider call. Test in Task 3.
 2. A saved key repeated in the array, `["urgency", "urgency"]`: expect one question, no error. Test in Task 3.
 3. A saved question names a model whose provider was later removed: expect `400` naming that model, as for an unknown request model. Covered by the resolve step in Task 4; manual check in Task 4.
-4. `PUT /api/questions` with a key containing `/` or a space: expect `400` naming the key, nothing saved. Test in Task 1.
+4. `POST /api/questions` with a key containing `/` or a space: expect `400` naming the key, nothing saved. Test in Task 1.
 5. Saving providers on the Providers page after questions exist: questions stay. Test in Task 1.
 
 ---
@@ -116,18 +116,19 @@ git commit -m "feat: validate saved questions in the config"
 - Produces:
   - `GET /v1/questions` → `200` with the saved map.
   - `GET /v1/questions/{key}` → `200` with one question, or `404 "unknown question '{key}'"`.
-  - `PUT /api/questions` (body: map) → `200` with the full saved map after upsert; `400` from `validate_all`.
+  - `POST /api/questions` (body: map) → `201` with the full saved map; `400` from `validate_all`; `409 "question '{key}' already exists"`, nothing saved.
+  - `PUT /api/questions/{key}` (body: one question) → `200` with the question; `400` from `validate`; `404 "unknown question '{key}'"`.
   - `DELETE /api/questions/{key}` → `200` with the full saved map, or `404 "unknown question '{key}'"`.
 
-- [ ] **Step 1: Implement `list_questions`, `get_question`, `put_questions`, `delete_question` in `src/main.rs`**
+- [ ] **Step 1: Implement `list_questions`, `get_question`, `create_questions`, `update_question`, `delete_question` in `src/main.rs`**
 
 Writes follow `revoke_key`: take `app.config.write()`, clone, change `questions`, `app.save(&next)`, then replace. A save failure returns `500` and keeps memory unchanged.
 
 - [ ] **Step 2: Register routes**
 
-`/v1/questions` and `/v1/questions/{key}` on the `api` router (before `route_layer(require_client)`). `PUT /api/questions` and `DELETE /api/questions/{key}` on the `manage` router.
+`/v1/questions` and `/v1/questions/{key}` on the `api` router (before `route_layer(require_client)`). `POST /api/questions`, `PUT /api/questions/{key}` and `DELETE /api/questions/{key}` on the `manage` router.
 
-- [ ] **Step 3: Add the four endpoints to the README endpoint table**
+- [ ] **Step 3: Add the five endpoints to the README endpoint table**
 
 One row each, same style as the existing rows.
 
@@ -139,12 +140,12 @@ Run `cargo run -- serve` with a scratch config (`--config` pointing into the scr
 curl -s -X PUT localhost:<ui-port>/api/questions -H 'content-type: application/json' \
   -d '{"urgency":{"type":"noul","instructions":"Urgent?"}}'
 curl -s localhost:<api-port>/v1/questions/urgency
-curl -s -X PUT localhost:<ui-port>/api/questions -H 'content-type: application/json' -d '{"a b":{"type":"noul","instructions":"x"}}'
+curl -s -X POST localhost:<ui-port>/api/questions -H 'content-type: application/json' -d '{"a b":{"type":"noul","instructions":"x"}}'
 curl -s -X DELETE localhost:<ui-port>/api/questions/urgency
 curl -s -o /dev/null -w '%{http_code}\n' localhost:<api-port>/v1/questions/urgency
 ```
 
-Expected: map with `urgency`; the question; `{"error":"question 'a b': ..."}`; `{}`; `404`. The config file holds the same map after the first call.
+Expected: `201` map with `urgency`; `409 question 'urgency' already exists`; the updated question; the updated question; `{"error":"question 'a b': ..."}`; `{}`; `404`. The config file holds the same map after the first call.
 
 - [ ] **Step 5: Run CI gates and commit**
 
@@ -270,7 +271,7 @@ git commit -m "feat: route saved questions to their own models"
 - Modify: `ui/index.html` (nav at line 13, `#page-playground` at lines 21-75), `ui/app.js` (`PAGES` at line 47, question builder 464-601, `run` 698-737), `ui/app.css`, `ui/dist/app.css`
 
 **Interfaces:**
-- Consumes: `GET /v1/questions`, `DELETE /api/questions/{key}`, `PUT /api/questions`, `/v1/systemone` with an array.
+- Consumes: `GET /v1/questions`, `POST /api/questions`, `PUT /api/questions/{key}`, `DELETE /api/questions/{key}`, `/v1/systemone` with an array.
 - Produces (for Task 6): `async function loadQuestions()` refreshes the list from the server; `saved` holds the last map; `#page-questions` contains `#q-list` (list view) and `#q-form` (form view, hidden).
 
 - [ ] **Step 1: Style selects in `ui/app.css`**
@@ -283,7 +284,7 @@ Nav link `#questions` labelled "Questions"; `PAGES = ["questions", "providers", 
 
 - [ ] **Step 3: Render the list and run in `ui/app.js`**
 
-Each row: checkbox, key (mono), type badge, model chip when set, instructions (truncated), Edit, Delete. Delete uses the two-click confirm already used by Revoke. Checked keys persist in `localStorage` under `checked`; the question draft (`draft`) goes away, State and Model stay. Run posts `{model, state, questions: [checked keys]}` and shows answers ordered by the checked list; `answerCard` gets the question from `saved`. curl shows the same array body. Add examples PUTs the three `EXAMPLE` questions converted to native shape.
+Each row: checkbox, key (mono), type badge, model chip when set, instructions (truncated), Edit, Delete. Delete uses the two-click confirm already used by Revoke. Checked keys persist in `localStorage` under `checked`; the question draft (`draft`) goes away, State and Model stay. Run posts `{model, state, questions: [checked keys]}` and shows answers ordered by the checked list; `answerCard` gets the question from `saved`. curl shows the same array body. Add examples POSTs the three `EXAMPLE` questions converted to native shape.
 
 - [ ] **Step 4: Rebuild CSS and check by hand**
 
@@ -311,7 +312,7 @@ Left: "← Questions" link, title "New question" / "Edit question", one builder 
 
 - [ ] **Step 2: Wire it in `ui/app.js`**
 
-New question opens an empty form. Edit opens the form filled from `saved[key]`, key input `readOnly`. Save: `readQuestions()` on the one card, add `model` when not Default, `PUT /api/questions` with `{[key]: question}`, then `loadQuestions()` and back to the list; on Edit, the new question stays checked. Cancel returns without saving. Try posts the draft as an inline map with the form State; result shows in the right panel; nothing saved. API errors go to the footer status line.
+New question opens an empty form. Edit opens the form filled from `saved[key]`, key input `readOnly`. Save: `readQuestions()` on the one card, add `model` when not Default, new: `POST /api/questions` with `{[key]: question}`, edit: `PUT /api/questions/{key}` with the question, then `loadQuestions()` and back to the list; on Edit, the new question stays checked. Cancel returns without saving. Try posts the draft as an inline map with the form State; result shows in the right panel; nothing saved. API errors go to the footer status line.
 
 - [ ] **Step 3: Rebuild CSS and check by hand**
 

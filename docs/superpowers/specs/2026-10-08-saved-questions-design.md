@@ -60,11 +60,12 @@ Other fields pass through unchanged, so newer Jev fields need no jeff change.
 |---|---|---|
 | `GET /v1/questions` | client | Returns the saved map. |
 | `GET /v1/questions/{key}` | client | Returns one question, or `404`. |
-| `PUT /api/questions` | admin | Upserts every question in the body map. Other saved keys stay. Returns the full saved map. |
+| `POST /api/questions` | admin | Creates every question in the body map. An existing key returns `409` and names it. Returns `201` with the full saved map. |
+| `PUT /api/questions/{key}` | admin | Replaces one existing question, or `404`. Returns the question. |
 | `DELETE /api/questions/{key}` | admin | Deletes one question, or `404`. |
 
-`PUT` validates the whole body before writing. One invalid question rejects the request with `400`, names the key
-and saves nothing.
+`POST` and `PUT` validate the whole body before writing. One invalid or existing question rejects the request,
+names the key and saves nothing.
 
 Clients read questions because an agent needs the catalogue to pick from. Only admins change it.
 
@@ -121,7 +122,8 @@ Form view, opened by New question or Edit:
 - On Edit the key is read-only. Renaming is a new question plus Delete.
 - The footer holds Save and Cancel on the left and Try on the right.
 - The right panel holds State and the Try answer. Try sends the draft as an inline map; nothing is saved.
-- Save sends `PUT /api/questions` with the one question and returns to the list.
+- Save sends `POST /api/questions` for a new question, `PUT /api/questions/{key}` for an edit, then returns to the
+  list.
 
 Every `select.control` drops the native arrow (`appearance: none`) and draws one chevron with even right padding,
 so selects look the same on every page and platform.
