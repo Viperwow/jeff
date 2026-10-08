@@ -1345,6 +1345,14 @@ enum Command {
         #[arg(long, env = "JEFF_CONFIG", global = true)]
         config: Option<String>,
     },
+    /// Manage classifiers in the config file; a running server picks changes up on the next request
+    Classifiers {
+        #[command(subcommand)]
+        action: ClassifiersAction,
+        /// The config file [default: ~/.jeff/jeff.json]
+        #[arg(long, env = "JEFF_CONFIG", global = true)]
+        config: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -1352,6 +1360,9 @@ struct AskArgs {
     /// Saved questions to ask, by key
     #[arg(conflicts_with = "request")]
     keys: Vec<String>,
+    /// Call a saved classifier instead of naming questions
+    #[arg(long, conflicts_with_all = ["keys", "questions", "questions_file", "request"])]
+    classifier: Option<String>,
     /// The text the questions are about
     #[arg(
         long,
@@ -1416,6 +1427,40 @@ enum QuestionsAction {
     },
     /// Delete one saved question
     Remove { key: String },
+}
+
+#[derive(Subcommand)]
+enum ClassifiersAction {
+    /// List classifiers: key, model and questions
+    List {
+        /// Write the classifiers as JSON to this file instead
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Print one classifier as JSON
+    Get {
+        key: String,
+        /// Write the classifier JSON to this file instead of printing it
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Save a new classifier; an existing key fails
+    Add(ClassifierArgs),
+    /// Replace a classifier; without --model its override is removed
+    Update(ClassifierArgs),
+    /// Delete one classifier
+    Remove { key: String },
+}
+
+#[derive(Args)]
+struct ClassifierArgs {
+    key: String,
+    /// Saved question keys, in the order to ask them
+    #[arg(required = true)]
+    questions: Vec<String>,
+    /// The model for every question of the classifier, in place of their own
+    #[arg(long)]
+    model: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1518,6 +1563,9 @@ async fn main() {
         Some(Command::Questions { action, config }) => {
             return run_questions(action, &config_file(config));
         }
+        Some(Command::Classifiers { action, config }) => {
+            return run_classifiers(action, &config_file(config));
+        }
     };
     serve(args).await;
 }
@@ -1601,6 +1649,13 @@ fn ask_request(
         }
         (None, None) => None,
     };
+    if args.classifier.is_some() {
+        let mut body = json!({ "state": state });
+        if let Some(m) = &args.model {
+            body["model"] = json!(m);
+        }
+        return Ok(body);
+    }
     ask_body(&args.keys, questions, state, args.model.clone())
 }
 
@@ -1627,6 +1682,38 @@ fn questions_table(qs: &questions::Questions, boxed: bool) -> String {
             ]
         })
         .collect();
+    table(["key", "type", "model", "instructions"], rows, boxed)
+}
+
+/// One line per classifier; a question it cannot ask shows as `key (deleted)`.
+fn classifiers_table(
+    cs: &classifiers::Classifiers,
+    saved: &questions::Questions,
+    boxed: bool,
+) -> String {
+    let rows = cs
+        .iter()
+        .map(|(key, c)| {
+            let skipped = classifiers::skipped(c, saved);
+            let keys: Vec<String> = c["questions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|k| match skipped.iter().any(|s| s == k) {
+                    true => format!("{k} (deleted)"),
+                    false => k.to_owned(),
+                })
+                .collect();
+            let model = c.get("model").and_then(Value::as_str).unwrap_or("-");
+            [key.clone(), model.to_owned(), keys.join(", ")]
+        })
+        .collect();
+    table(["key", "model", "questions"], rows, boxed)
+}
+
+/// A boxed table for a terminal, tab-separated fields for a pipe. The last column is cut to fit a terminal.
+fn table<const N: usize>(header: [&str; N], rows: Vec<[String; N]>, boxed: bool) -> String {
     if !boxed {
         return rows.iter().map(|r| r.join("\t") + "\n").collect();
     }
@@ -1635,18 +1722,20 @@ fn questions_table(qs: &questions::Questions, boxed: bool) -> String {
         true => s.chars().take(WIDEST - 1).chain(['…']).collect(),
         false => s.clone(),
     };
-    let header = ["key", "type", "model", "instructions"].map(String::from);
-    let rows: Vec<[String; 4]> = std::iter::once(header)
-        .chain(rows.into_iter().map(|[k, t, m, i]| [k, t, m, cut(&i)]))
+    let rows: Vec<[String; N]> = std::iter::once(header.map(String::from))
+        .chain(rows.into_iter().map(|mut r| {
+            r[N - 1] = cut(&r[N - 1]);
+            r
+        }))
         .collect();
-    let widths: Vec<usize> = (0..4)
+    let widths: Vec<usize> = (0..N)
         .map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0))
         .collect();
     let rule = |l: &str, m: &str, r: &str| {
         let cells: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
         format!("{l}{}{r}\n", cells.join(m))
     };
-    let line = |row: &[String; 4]| {
+    let line = |row: &[String; N]| {
         let cells: Vec<String> = row
             .iter()
             .zip(&widths)
@@ -1677,7 +1766,7 @@ async fn run_ask(args: AskArgs) {
     };
     let body = ask_request(&args, read_input).unwrap_or_else(|e| fail(e));
     let base = args.url.trim_end_matches('/');
-    let url = format!("{base}/v1/systemone");
+    let url = format!("{base}{}", ask_target(&args));
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(args.connect_timeout))
         .timeout(Duration::from_secs(args.max_time))
@@ -1703,10 +1792,85 @@ async fn run_ask(args: AskArgs) {
     if !ok {
         fail(answer.map_or(text, |v| serde_json::to_string_pretty(&v).unwrap()));
     }
+    if let Some(skipped) = answer.as_ref().ok().and_then(|v| v["skipped"].as_array()) {
+        let keys: Vec<&str> = skipped.iter().filter_map(Value::as_str).collect();
+        eprintln!("skipped: {}", keys.join(", "));
+    }
     match (answer, args.output) {
         (Ok(v), Some(path)) => write_json(&path, &v).unwrap_or_else(|e| fail(e)),
         (Ok(v), None) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
         (Err(_), _) => fail(format!("jeff sent an answer that is not JSON: {text}")),
+    }
+}
+
+fn ask_target(args: &AskArgs) -> String {
+    match &args.classifier {
+        Some(key) => format!("/v1/classifiers/{key}"),
+        None => "/v1/systemone".into(),
+    }
+}
+
+fn run_classifiers(action: ClassifiersAction, path: &str) {
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1)
+    };
+    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
+    let refused = |c: questions::Change| -> ! {
+        match c {
+            questions::Change::NotFound(m)
+            | questions::Change::Exists(m)
+            | questions::Change::Invalid(m) => fail(m),
+        }
+    };
+    let build = |args: &ClassifierArgs| -> Value {
+        let mut c = json!({ "questions": args.questions });
+        if let Some(m) = &args.model {
+            c["model"] = json!(m);
+        }
+        for k in classifiers::skipped(&c, &config.questions) {
+            eprintln!("question '{k}' is not saved; the classifier skips it");
+        }
+        c
+    };
+    match action {
+        ClassifiersAction::List { output: Some(file) } => {
+            write_json(&file, &Value::Object(config.classifiers)).unwrap_or_else(|e| fail(e));
+        }
+        ClassifiersAction::List { output: None } => {
+            if config.classifiers.is_empty() {
+                eprintln!("no classifiers in {path}");
+            }
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            print!(
+                "{}",
+                classifiers_table(&config.classifiers, &config.questions, terminal)
+            );
+        }
+        ClassifiersAction::Get { key, output } => match (config.classifiers.get(&key), output) {
+            (Some(c), Some(file)) => write_json(&file, c).unwrap_or_else(|e| fail(e)),
+            (Some(c), None) => println!("{}", serde_json::to_string_pretty(c).unwrap()),
+            (None, _) => fail(format!("unknown classifier '{key}'")),
+        },
+        ClassifiersAction::Add(args) => {
+            let c = build(&args);
+            let input = classifiers::Classifiers::from_iter([(args.key.clone(), c)]);
+            classifiers::create(&mut config.classifiers, input).unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("added {}", args.key);
+        }
+        ClassifiersAction::Update(args) => {
+            let c = build(&args);
+            classifiers::update(&mut config.classifiers, &args.key, c)
+                .unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("updated {}", args.key);
+        }
+        ClassifiersAction::Remove { key } => {
+            classifiers::remove(&mut config.classifiers, &key).unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("removed {key}");
+        }
     }
 }
 
@@ -2438,5 +2602,39 @@ mod tests {
         };
         let next = build_config(&current, input, false).unwrap();
         assert_eq!(next.classifiers, current.classifiers);
+    }
+
+    #[test]
+    fn lists_classifiers_one_line_each() {
+        let cs = json!({"triage": {"questions": ["a", "gone"], "model": "p/m"}, "plain": {"questions": ["a"]}});
+        let saved = json!({"a": {"type": "noul", "instructions": "x"}});
+        assert_eq!(
+            classifiers_table(cs.as_object().unwrap(), saved.as_object().unwrap(), false),
+            "plain	-	a
+triage	p/m	a, gone (deleted)
+"
+        );
+    }
+
+    #[test]
+    fn ask_calls_a_classifier() {
+        let args = ask_args(&["--classifier", "triage", "--state", "s"]).unwrap();
+        assert_eq!(ask_target(&args), "/v1/classifiers/triage");
+        assert_eq!(
+            ask_request(&args, stdin_is("")).unwrap(),
+            json!({"state": "s"})
+        );
+        let args = ask_args(&["--classifier", "triage", "--state", "s", "--model", "p/m"]).unwrap();
+        assert_eq!(
+            ask_request(&args, stdin_is("")).unwrap(),
+            json!({"state": "s", "model": "p/m"})
+        );
+        assert!(ask_args(&["u", "--classifier", "triage", "--state", "s"]).is_err());
+        assert!(ask_args(&["--classifier", "t", "--questions", "{}", "--state", "s"]).is_err());
+        assert!(ask_args(&["--classifier", "t", "--request", "-"]).is_err());
+        assert_eq!(
+            ask_target(&ask_args(&["u", "--state", "s"]).unwrap()),
+            "/v1/systemone"
+        );
     }
 }
