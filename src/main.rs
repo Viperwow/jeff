@@ -1,3 +1,4 @@
+mod classifiers;
 mod install;
 mod keys;
 mod questions;
