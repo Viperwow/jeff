@@ -66,12 +66,12 @@ const GUARD_MS = 600;
 /** Disarms the one button currently waiting for confirmation. */
 let disarmCurrent = () => {};
 
-/** The first click arms the button; a second click before CONFIRM_MS runs out calls `action`. */
+/** The first click arms the button and counts down the seconds left; a second click before then calls `action`. */
 function confirmClick(button, armedLabel, action) {
   const label = button.textContent;
   let timer;
   const disarm = () => {
-    clearTimeout(timer);
+    clearInterval(timer);
     button.dataset.confirm = "false";
     button.textContent = label;
   };
@@ -86,8 +86,13 @@ function confirmClick(button, armedLabel, action) {
         disarmCurrent();
         disarmCurrent = disarm;
         button.dataset.confirm = "true";
-        button.textContent = armedLabel;
-        timer = setTimeout(disarm, CONFIRM_MS);
+        let left = CONFIRM_MS / 1000;
+        button.textContent = `${armedLabel} · ${left}s`;
+        timer = setInterval(() => {
+          left -= 1;
+          if (left > 0) button.textContent = `${armedLabel} · ${left}s`;
+          else disarm();
+        }, 1000);
       }
     } finally {
       setTimeout(() => { button.disabled = false; }, Math.max(0, until - Date.now()));
