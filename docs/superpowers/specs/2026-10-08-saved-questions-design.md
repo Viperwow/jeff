@@ -121,6 +121,9 @@ Form view, opened by New question or Edit:
 - The right panel holds State and the Try answer. Try sends the draft as an inline map; nothing is saved.
 - Save sends `PUT /api/questions` with the one question and returns to the list.
 
+Every `select.control` drops the native arrow (`appearance: none`) and draws one chevron with even right padding,
+so selects look the same on every page and platform.
+
 `localStorage` keeps State and the run Model only. The Playground question draft goes away.
 
 ## Errors
