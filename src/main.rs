@@ -336,6 +336,86 @@ fn request(
     }
 }
 
+/// One provider's answer to `/v1/systemone`, before it becomes a response.
+struct Upstream {
+    provider: String,
+    ms: u64,
+    status: StatusCode,
+    bytes: Vec<u8>,
+}
+
+impl Upstream {
+    fn reply(self) -> Response {
+        let mut res = (
+            self.status,
+            [(header::CONTENT_TYPE, "application/json")],
+            self.bytes,
+        )
+            .into_response();
+        let headers = res.headers_mut();
+        if let Ok(v) = HeaderValue::from_str(&self.provider) {
+            headers.insert("x-jeff-provider", v);
+        }
+        headers.insert("x-jeff-upstream-ms", HeaderValue::from(self.ms));
+        res
+    }
+}
+
+/// Sends `body` to the provider serving `model`; the error is the status and message for the client.
+async fn forward(
+    app: &App,
+    config: &Config,
+    model: &str,
+    mut body: Value,
+) -> Result<Upstream, (StatusCode, String)> {
+    let mut found = resolve(config, &*app.listed.read().await, model);
+    if found.is_none() && !model.contains('/') {
+        refresh_models(app, config).await;
+        found = resolve(config, &*app.listed.read().await, model);
+    }
+    let Some((p, upstream_model)) = found else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unknown model '{model}': use provider/model, for example {}",
+                config.default_model
+            ),
+        ));
+    };
+    body["model"] = Value::String(upstream_model);
+
+    let t0 = Instant::now();
+    let upstream = request(app, &p, reqwest::Method::POST, "/v1/systemone")
+        .json(&body)
+        .timeout(Duration::from_secs(120));
+    // Clients get the provider id only; the provider URL and the transport error stay in the server log.
+    let resp = upstream.send().await.map_err(|e| {
+        eprintln!("provider {}: {}", p.id, e.without_url());
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("provider '{}' is unreachable", p.id),
+        )
+    })?;
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let bytes = read_capped(resp).await.map_err(|e| {
+        eprintln!("provider {}: {e}", p.id);
+        unreadable(&p.id)
+    })?;
+    Ok(Upstream {
+        provider: p.id,
+        ms: t0.elapsed().as_millis() as u64,
+        status,
+        bytes,
+    })
+}
+
+fn unreadable(provider: &str) -> (StatusCode, String) {
+    (
+        StatusCode::BAD_GATEWAY,
+        format!("provider '{provider}' sent an unreadable response"),
+    )
+}
+
 async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> Response {
     let config = app.config.read().await.clone();
     let Some(obj) = body.as_object_mut() else {
@@ -349,60 +429,54 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
         .and_then(Value::as_str)
         .unwrap_or(&config.default_model)
         .to_owned();
-    let mut found = resolve(&config, &*app.listed.read().await, &model);
-    if found.is_none() && !model.contains('/') {
-        refresh_models(&app, &config).await;
-        found = resolve(&config, &*app.listed.read().await, &model);
-    }
-    let Some((p, upstream_model)) = found else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "unknown model '{model}': use provider/model, for example {}",
-                config.default_model
-            ),
-        );
+    let groups = match obj.get("questions") {
+        // The provider reports a missing `questions` itself.
+        None => vec![(model, None)],
+        Some(input) => match questions::expand(input, &config.questions) {
+            Ok(qs) => questions::group(qs, &model)
+                .into_iter()
+                .map(|(m, qs)| (m, Some(qs)))
+                .collect(),
+            Err(e) => return error(StatusCode::BAD_REQUEST, e),
+        },
     };
-    obj.insert("model".into(), Value::String(upstream_model));
-
-    let t0 = Instant::now();
-    let upstream = request(&app, &p, reqwest::Method::POST, "/v1/systemone")
-        .json(&body)
-        .timeout(Duration::from_secs(120));
-    // Clients get the provider id only; the provider URL and the transport error stay in the server log.
-    let resp = match upstream.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("provider {}: {}", p.id, e.without_url());
-            return error(
-                StatusCode::BAD_GATEWAY,
-                format!("provider '{}' is unreachable", p.id),
-            );
+    let calls = groups.into_iter().map(|(model, qs)| {
+        let mut body = body.clone();
+        if let Some(qs) = qs {
+            body["questions"] = Value::Object(qs);
         }
-    };
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    match read_capped(resp).await {
-        Ok(bytes) => {
-            let mut res =
-                (status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response();
-            let headers = res.headers_mut();
-            if let Ok(v) = HeaderValue::from_str(&p.id) {
-                headers.insert("x-jeff-provider", v);
+        let (app, config) = (&app, &config);
+        async move { forward(app, config, &model, body).await }
+    });
+    let mut parts = Vec::new();
+    for result in join_all(calls).await {
+        match result {
+            Ok(u) if u.status.is_success() => parts.push(u),
+            Ok(u) => return u.reply(),
+            Err((status, msg)) => return error(status, msg),
+        }
+    }
+    if parts.len() == 1 {
+        return parts.pop().unwrap().reply();
+    }
+    let mut answers = Vec::new();
+    for u in &parts {
+        match serde_json::from_slice(&u.bytes) {
+            Ok(v) => answers.push(v),
+            Err(_) => {
+                let (status, msg) = unreadable(&u.provider);
+                return error(status, msg);
             }
-            headers.insert(
-                "x-jeff-upstream-ms",
-                HeaderValue::from(t0.elapsed().as_millis() as u64),
-            );
-            res
-        }
-        Err(e) => {
-            eprintln!("provider {}: {e}", p.id);
-            error(
-                StatusCode::BAD_GATEWAY,
-                format!("provider '{}' sent an unreadable response", p.id),
-            )
         }
     }
+    let providers: Vec<_> = parts.iter().map(|u| u.provider.as_str()).collect();
+    Upstream {
+        provider: providers.join(", "),
+        ms: parts.iter().map(|u| u.ms).max().unwrap_or(0),
+        status: StatusCode::OK,
+        bytes: serde_json::to_vec(&questions::merge(answers)).unwrap(),
+    }
+    .reply()
 }
 
 /// Lists one provider's models. A provider without `GET /v1/models` falls back to its configured list.
