@@ -97,6 +97,15 @@ pub fn remove(saved: &mut Questions, key: &str) -> Result<(), Change> {
     saved.remove(key).map(|_| ()).ok_or_else(|| not_found(key))
 }
 
+/// A hand-edited config may hold an invalid question; it stays saved but cannot be asked.
+fn saved_question<'a>(saved: &'a Questions, key: &str) -> Result<&'a Value, String> {
+    let q = saved
+        .get(key)
+        .ok_or_else(|| format!("unknown question '{key}'"))?;
+    validate(key, q)?;
+    Ok(q)
+}
+
 /// Turns the request's `questions` into a map of full questions: an array names saved questions, and a map entry
 /// without `type` overrides a saved one.
 pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
@@ -107,11 +116,10 @@ pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
                 // An entry without `type` reuses the saved question, with its own fields on top for this request.
                 let q = match q.as_object() {
                     Some(fields) if !fields.contains_key("type") => {
-                        let mut base = saved
-                            .get(key)
-                            .and_then(Value::as_object)
+                        let mut base = saved_question(saved, key)?
+                            .as_object()
                             .cloned()
-                            .ok_or_else(|| format!("unknown question '{key}'"))?;
+                            .unwrap_or_default();
                         base.extend(fields.clone());
                         Value::Object(base)
                     }
@@ -127,10 +135,7 @@ pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
                 let Some(key) = key.as_str() else {
                     return Err("saved question keys must be strings".into());
                 };
-                let q = saved
-                    .get(key)
-                    .ok_or_else(|| format!("unknown question '{key}'"))?;
-                out.insert(key.to_owned(), q.clone());
+                out.insert(key.to_owned(), saved_question(saved, key)?.clone());
             }
             out
         }
@@ -318,6 +323,15 @@ mod tests {
         assert!(expand(&json!([1]), &saved).is_err());
         let inline = json!({"i": {"type": "noul", "instructions": "y"}});
         assert_eq!(Value::Object(expand(&inline, &saved).unwrap()), inline);
+    }
+
+    #[test]
+    fn expand_refuses_an_invalid_saved_question() {
+        let saved = map(json!({"bad": {"type": "maybe", "instructions": "x"}}));
+        for input in [json!(["bad"]), json!({"bad": {}})] {
+            let e = expand(&input, &saved).unwrap_err();
+            assert!(e.starts_with("question 'bad': "), "{e}");
+        }
     }
 
     #[test]
