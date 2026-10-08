@@ -607,7 +607,8 @@ function builderOf(key, q) {
   return { key, type: q.type, instructions: q.instructions, rows };
 }
 
-$("#pg-state").value = store.get("state") ?? EXAMPLE.state;
+// The Playground kept the state inside `draft`; saveState below moves it to `state`.
+$("#pg-state").value = store.get("state") ?? store.get("draft")?.state ?? EXAMPLE.state;
 saveState();
 $("#pg-state").addEventListener("input", saveState);
 $("#pg-model").onchange = (e) => { store.set("model", e.target.value); updateCurl(); };
@@ -762,7 +763,9 @@ async function run() {
 $("#pg-run").onclick = run;
 addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.key !== "Enter" || $("#page-questions").hidden) return;
-  if ($("#q-form-view").hidden) run();
+  const list = $("#q-form-view").hidden;
+  if ($(list ? "#pg-run" : "#q-try").disabled) return;
+  if (list) run();
   else tryDraft();
 });
 

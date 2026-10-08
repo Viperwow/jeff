@@ -152,11 +152,15 @@ pub fn group(
 ) -> Result<Vec<(String, Questions)>, String> {
     let mut groups: Vec<(String, Questions)> = Vec::new();
     for (key, mut q) in questions {
-        let model = q
-            .as_object_mut()
-            .and_then(|o| o.remove("model"))
-            .and_then(|m| m.as_str().map(str::to_owned))
-            .unwrap_or_else(|| request_model.to_owned());
+        let model = match q.as_object_mut().and_then(|o| o.remove("model")) {
+            None => request_model.to_owned(),
+            Some(Value::String(m)) if !m.trim().is_empty() => m,
+            Some(_) => {
+                return Err(format!(
+                    "question '{key}': model must be a non-empty string"
+                ));
+            }
+        };
         match groups.iter_mut().find(|(m, _)| *m == model) {
             Some((_, qs)) => {
                 qs.insert(key, q);
@@ -359,6 +363,17 @@ mod tests {
                 .iter()
                 .all(|(_, q)| q.values().all(|v| v.get("model").is_none()))
         );
+    }
+
+    #[test]
+    fn group_rejects_a_model_that_is_not_text() {
+        for model in [json!(5), json!(""), json!(null)] {
+            let qs = map(json!({"a": {"type": "noul", "instructions": "x", "model": model}}));
+            assert_eq!(
+                group(qs, "p/m").unwrap_err(),
+                "question 'a': model must be a non-empty string"
+            );
+        }
     }
 
     #[test]
