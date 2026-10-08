@@ -731,6 +731,97 @@ async fn revoke_key(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
     StatusCode::NO_CONTENT.into_response()
 }
 
+fn unknown_question(key: &str) -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, format!("unknown question '{key}'"))
+}
+
+async fn list_questions(State(app): State<Arc<App>>) -> Json<questions::Questions> {
+    Json(app.config.read().await.questions.clone())
+}
+
+async fn get_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    match app.config.read().await.questions.get(&key) {
+        Some(q) => Json(q.clone()).into_response(),
+        None => {
+            let (status, msg) = unknown_question(&key);
+            error(status, msg)
+        }
+    }
+}
+
+/// Applies `change` to a copy of the saved questions and saves it; an `Err` leaves both file and memory as they were.
+async fn change_questions(
+    app: &App,
+    change: impl FnOnce(&mut questions::Questions) -> Result<(), (StatusCode, String)>,
+) -> Result<questions::Questions, Response> {
+    let mut config = app.config.write().await;
+    let mut next = config.clone();
+    change(&mut next.questions).map_err(|(status, msg)| error(status, msg))?;
+    app.save(&next)
+        .await
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    *config = next;
+    Ok(config.questions.clone())
+}
+
+async fn create_questions(
+    State(app): State<Arc<App>>,
+    Json(input): Json<questions::Questions>,
+) -> Response {
+    if let Err(e) = questions::validate_all(&input) {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
+    let saved = change_questions(&app, |qs| {
+        if let Some(key) = input.keys().find(|k| qs.contains_key(*k)) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("question '{key}' already exists"),
+            ));
+        }
+        qs.extend(input);
+        Ok(())
+    })
+    .await;
+    match saved {
+        Ok(qs) => (StatusCode::CREATED, Json(qs)).into_response(),
+        Err(r) => r,
+    }
+}
+
+async fn update_question(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+    Json(q): Json<Value>,
+) -> Response {
+    if let Err(e) = questions::validate(&key, &q) {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
+    let saved = change_questions(&app, |qs| match qs.get_mut(&key) {
+        Some(old) => {
+            *old = q;
+            Ok(())
+        }
+        None => Err(unknown_question(&key)),
+    })
+    .await;
+    match saved {
+        Ok(qs) => Json(qs[&key].clone()).into_response(),
+        Err(r) => r,
+    }
+}
+
+async fn delete_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    let saved = change_questions(&app, |qs| match qs.remove(&key) {
+        Some(_) => Ok(()),
+        None => Err(unknown_question(&key)),
+    })
+    .await;
+    match saved {
+        Ok(qs) => Json(qs).into_response(),
+        Err(r) => r,
+    }
+}
+
 async fn get_config(State(app): State<Arc<App>>) -> Json<Value> {
     Json(public(&*app.config.read().await))
 }
@@ -1233,6 +1324,8 @@ async fn serve(args: ServeArgs) {
     let api = Router::new()
         .route("/v1/systemone", post(systemone))
         .route("/v1/models", get(models))
+        .route("/v1/questions", get(list_questions))
+        .route("/v1/questions/{key}", get(get_question))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_client))
         .route("/health", get(health))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
@@ -1244,6 +1337,11 @@ async fn serve(args: ServeArgs) {
         .route("/api/clm/{action}", post(clm_action))
         .route("/api/keys", get(list_keys).post(create_key))
         .route("/api/keys/{id}", delete(revoke_key))
+        .route("/api/questions", post(create_questions))
+        .route(
+            "/api/questions/{key}",
+            axum::routing::put(update_question).delete(delete_question),
+        )
         .route_layer(middleware::from_fn_with_state(app.clone(), require_admin))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
     let info_app = app.clone();

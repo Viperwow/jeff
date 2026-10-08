@@ -117,6 +117,11 @@ Other endpoints:
 | Endpoint | What it returns |
 |---|---|
 | `GET /v1/models` | Every `provider/model` and the status of each provider. |
+| `GET /v1/questions` | Every saved question, by key. |
+| `GET /v1/questions/{key}` | One saved question. |
+| `POST /api/questions` | Saves new questions from a map of key to question. An existing key fails with `409`. Admin only. |
+| `PUT /api/questions/{key}` | Replaces one saved question. Admin only. |
+| `DELETE /api/questions/{key}` | Deletes one saved question. Admin only. |
 | `GET /health` | `{"ok": true}`. It needs no key, so it suits liveness probes. |
 
 ## Providers and models
