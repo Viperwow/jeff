@@ -68,13 +68,21 @@ pub fn remove(saved: &mut Classifiers, key: &str) -> Result<(), Change> {
 }
 
 fn keys(c: &Value) -> impl Iterator<Item = &str> {
-    c["questions"].as_array().into_iter().flatten().filter_map(Value::as_str)
+    c["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
 }
 
 /// Question keys the classifier names but cannot ask: deleted, renamed or invalid.
 pub fn skipped(c: &Value, saved: &Questions) -> Vec<String> {
     keys(c)
-        .filter(|k| saved.get(*k).is_none_or(|q| questions::validate(k, q).is_err()))
+        .filter(|k| {
+            saved
+                .get(*k)
+                .is_none_or(|q| questions::validate(k, q).is_err())
+        })
         .map(str::to_owned)
         .collect()
 }
@@ -84,7 +92,9 @@ pub fn skipped(c: &Value, saved: &Questions) -> Vec<String> {
 pub fn resolve(key: &str, c: &Value, saved: &Questions) -> Result<(Value, Vec<String>), String> {
     validate(key, c)?;
     let skipped = skipped(c, saved);
-    let working: Vec<&str> = keys(c).filter(|k| !skipped.iter().any(|s| s == k)).collect();
+    let working: Vec<&str> = keys(c)
+        .filter(|k| !skipped.iter().any(|s| s == k))
+        .collect();
     if working.is_empty() {
         return Err(format!("classifier '{key}' has no working questions"));
     }
@@ -202,9 +212,18 @@ mod tests {
         let mut saved = Classifiers::new();
         let c = json!({"questions": ["u"]});
         create(&mut saved, cs(json!({"k": c}))).unwrap();
-        assert!(matches!(create(&mut saved, cs(json!({"k": c}))), Err(Change::Exists(_))));
-        assert!(matches!(create(&mut saved, Classifiers::new()), Err(Change::Invalid(_))));
-        assert!(matches!(update(&mut saved, "x", c.clone()), Err(Change::NotFound(_))));
+        assert!(matches!(
+            create(&mut saved, cs(json!({"k": c}))),
+            Err(Change::Exists(_))
+        ));
+        assert!(matches!(
+            create(&mut saved, Classifiers::new()),
+            Err(Change::Invalid(_))
+        ));
+        assert!(matches!(
+            update(&mut saved, "x", c.clone()),
+            Err(Change::NotFound(_))
+        ));
         assert!(matches!(
             update(&mut saved, "k", json!({"questions": []})),
             Err(Change::Invalid(_))

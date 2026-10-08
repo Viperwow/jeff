@@ -66,6 +66,9 @@ Access matches questions: `/v1` needs a client key, `/api` an admin key.
 The call body's `model` has the `/v1/systemone` meaning: the model for questions without their own, used when the
 classifier has no override.
 
+JSON objects carry no order: `answers` may come back in any key order. The UI shows answers in the classifier's
+order.
+
 The call response is the `/v1/systemone` response plus `"skipped": ["spam"]`. The field is present only when the
 list is not empty.
 
