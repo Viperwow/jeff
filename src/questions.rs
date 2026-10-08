@@ -121,7 +121,9 @@ pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
                             .cloned()
                             .unwrap_or_default();
                         base.extend(fields.clone());
-                        Value::Object(base)
+                        let q = Value::Object(base);
+                        validate(key, &q)?;
+                        q
                     }
                     _ => q.clone(),
                 };
@@ -332,6 +334,13 @@ mod tests {
             let e = expand(&input, &saved).unwrap_err();
             assert!(e.starts_with("question 'bad': "), "{e}");
         }
+    }
+
+    #[test]
+    fn expand_refuses_an_override_that_breaks_the_saved_question() {
+        let saved = map(json!({"u": {"type": "noul", "instructions": "x"}}));
+        let e = expand(&json!({"u": {"instructions": ""}}), &saved).unwrap_err();
+        assert!(e.starts_with("question 'u': "), "{e}");
     }
 
     #[test]

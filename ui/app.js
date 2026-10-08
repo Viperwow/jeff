@@ -885,6 +885,8 @@ function draft() {
 
 async function saveForm() {
   const status = $("#q-form-status");
+  const button = $("#q-save");
+  button.disabled = true;
   try {
     const [key, q] = draft();
     const json = { "content-type": "application/json" };
@@ -895,6 +897,8 @@ async function saveForm() {
     showForm(false);
   } catch (err) {
     say(status, err.message, "err");
+  } finally {
+    button.disabled = false;
   }
 }
 

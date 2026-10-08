@@ -160,7 +160,7 @@ cat call.json | jeff ask --request - -o answer.json
 - `--request` takes a whole `/v1/systemone` body with `state` and `questions`, from a file or `-`.
 - `-o FILE` writes the answer JSON to the file and prints its path.
 
-Windows PowerShell 5.1 strips the inner quotes from JSON passed to a program, so there put the JSON in a file and pass it with `--questions-file`.
+Windows PowerShell 5.1 strips the inner quotes from JSON passed to a program, so put the JSON in a file there and pass it with `--questions-file`.
 
 `jeff ask` calls `http://127.0.0.1:8080` unless `--url` or `JEFF_URL` says otherwise, and sends `JEFF_API_KEY` as its key. It waits 5 seconds to connect (`--connect-timeout`) and 60 seconds for the answer (`--max-time`). A custom question is saved only by `jeff questions add`, the admin page or `POST /api/questions`.
 
