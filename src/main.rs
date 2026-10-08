@@ -1,5 +1,6 @@
 mod install;
 mod keys;
+mod questions;
 
 use axum::{
     Json, Router,
@@ -48,6 +49,8 @@ struct Config {
     /// jeff access keys, hashed.
     #[serde(default)]
     keys: Vec<keys::StoredKey>,
+    #[serde(default)]
+    questions: questions::Questions,
 }
 
 impl Default for Config {
@@ -75,6 +78,7 @@ impl Default for Config {
                 },
             ],
             keys: Vec::new(),
+            questions: questions::Questions::new(),
         }
     }
 }
@@ -813,6 +817,7 @@ fn build_config(
         default_model,
         providers,
         keys: current.keys.clone(),
+        questions: current.questions.clone(),
     })
 }
 
@@ -1410,5 +1415,27 @@ mod tests {
         let mut bad = input(None);
         bad.default_model = "clm/clm-latest".into();
         assert!(build_config(&current, bad, false).is_err());
+    }
+
+    #[test]
+    fn build_config_keeps_questions() {
+        let mut current = Config::default();
+        current.questions.insert(
+            "urgency".into(),
+            json!({"type": "noul", "instructions": "Urgent?"}),
+        );
+        let input = ConfigInput {
+            default_model: "clm/clm-latest".into(),
+            providers: vec![ProviderInput {
+                id: "clm".into(),
+                name: "CLM".into(),
+                url: "http://127.0.0.1:8700".into(),
+                key: None,
+                models: vec![],
+                installer: None,
+            }],
+        };
+        let next = build_config(&current, input, false).unwrap();
+        assert_eq!(next.questions, current.questions);
     }
 }
