@@ -64,10 +64,30 @@ pub fn validate_all(input: &Questions) -> Result<(), String> {
     input.iter().try_for_each(|(k, q)| validate(k, q))
 }
 
-/// Turns the request's `questions` into a map: a map passes through, an array names saved questions.
+/// Turns the request's `questions` into a map of full questions: an array names saved questions, and a map entry
+/// without `type` overrides a saved one.
 pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
     let out = match input {
-        Value::Object(map) => map.clone(),
+        Value::Object(map) => {
+            let mut out = Questions::new();
+            for (key, q) in map {
+                // An entry without `type` reuses the saved question, with its own fields on top for this request.
+                let q = match q.as_object() {
+                    Some(fields) if !fields.contains_key("type") => {
+                        let mut base = saved
+                            .get(key)
+                            .and_then(Value::as_object)
+                            .cloned()
+                            .ok_or_else(|| format!("unknown question '{key}'"))?;
+                        base.extend(fields.clone());
+                        Value::Object(base)
+                    }
+                    _ => q.clone(),
+                };
+                out.insert(key.clone(), q);
+            }
+            out
+        }
         Value::Array(keys) => {
             let mut out = Questions::new();
             for key in keys {
@@ -260,6 +280,25 @@ mod tests {
         assert!(expand(&json!("u"), &saved).is_err());
         assert!(expand(&json!([1]), &saved).is_err());
         let inline = json!({"i": {"type": "noul", "instructions": "y"}});
+        assert_eq!(Value::Object(expand(&inline, &saved).unwrap()), inline);
+    }
+
+    #[test]
+    fn overrides_saved_questions() {
+        let saved = map(json!({"u": {"type": "noul", "instructions": "x"}}));
+        assert_eq!(
+            Value::Object(expand(&json!({"u": {"model": "p/m"}}), &saved).unwrap()),
+            json!({"u": {"type": "noul", "instructions": "x", "model": "p/m"}})
+        );
+        assert_eq!(
+            Value::Object(expand(&json!({"u": {}}), &saved).unwrap()),
+            json!({"u": {"type": "noul", "instructions": "x"}})
+        );
+        assert_eq!(
+            expand(&json!({"nope": {}}), &saved).unwrap_err(),
+            "unknown question 'nope'"
+        );
+        let inline = json!({"u": {"type": "score", "instructions": "y", "criteria": ["a", "b"]}});
         assert_eq!(Value::Object(expand(&inline, &saved).unwrap()), inline);
     }
 
