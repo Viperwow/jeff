@@ -39,7 +39,8 @@ Out of scope, each in its own later PR:
 }
 ```
 
-A missing field loads as an empty map. `build_config` keeps `questions` from the current config, the same way it
+A missing field loads as an empty map. jeff validates every saved question when it loads the config, and refuses a
+config with an invalid one, naming the key, like any other broken config. `build_config` keeps `questions` from the current config, the same way it
 keeps `keys`, so saving providers never drops questions.
 
 A question is valid when:
@@ -76,6 +77,12 @@ Clients read questions because an agent needs the catalogue to pick from. Only a
 - A map, as today. Inline questions may carry `model`.
 - An array of saved keys, for example `["urgency", "department"]`. jeff replaces it with the saved map before
   routing. An unknown key returns `400` and names the key.
+- In a map, an entry without `type` names a saved question and overrides its fields for this request only:
+  `{"department": {"model": "typesafe/jev-latest"}}`. An unknown key returns `400`. An entry with `type` is an
+  inline question, as before.
+
+Running never saves a question. Only `POST /api/questions`, `PUT /api/questions/{key}`, the UI Save button and
+`jeff questions add` / `update` change saved questions.
 
 Model routing per question, first match wins:
 
@@ -128,7 +135,37 @@ Form view, opened by New question or Edit:
 Every `select.control` drops the native arrow (`appearance: none`) and draws one chevron with even right padding,
 so selects look the same on every page and platform.
 
+The curl tab always shows the request Run would send, updating as checkboxes, Model and State change.
+
 `localStorage` keeps State and the run Model only. The Playground question draft goes away.
+
+## CLI
+
+`jeff questions` edits the config file, like `jeff keys`; a running server picks changes up on the next request.
+All subcommands take `--config` (env `JEFF_CONFIG`).
+
+| Command | Effect |
+|---|---|
+| `jeff questions list` | One line per question: key, type, model, instructions. |
+| `jeff questions get KEY` | The question as JSON. |
+| `jeff questions add FILE` | Saves new questions from a JSON map in FILE, or stdin for `-`. An existing key fails and saves nothing. |
+| `jeff questions update KEY FILE` | Replaces one existing question with the JSON question in FILE, or stdin for `-`. |
+| `jeff questions remove KEY` | Deletes one question. |
+
+`jeff ask` sends one `/v1/systemone` request to a running jeff and prints the response JSON:
+
+```
+jeff ask [KEY...] (--state TEXT | --state-file FILE) [--questions JSON_OR_FILE] [--model MODEL] [--url URL]
+```
+
+- `KEY...` names saved questions.
+- `--questions` adds a JSON map: inline questions, or overrides of saved ones (entries without `type`). A value that
+  is not JSON is read as a file path.
+- `--state-file -` reads stdin.
+- `--url` defaults to `http://127.0.0.1:8080` (env `JEFF_URL`). `JEFF_API_KEY` is sent as the bearer key.
+- A non-2xx response prints the error to stderr and exits with `1`.
+
+`jeff questions` and `jeff ask` print validation errors with the same text as the API and exit with `1`.
 
 ## Errors
 

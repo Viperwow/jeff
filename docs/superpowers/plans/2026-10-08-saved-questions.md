@@ -325,3 +325,53 @@ Expected: create `department` with model `typesafe/jev-latest` → row shows the
 git add ui/index.html ui/app.js ui/dist/app.css
 git commit -m "feat(ui): create and edit saved questions"
 ```
+
+### Task 7: Validate saved questions on load
+
+**Files:** Modify `src/main.rs` (`load_config`). Test: `src/main.rs` `mod tests`.
+
+- [ ] **Step 1: Failing test `load_config_rejects_invalid_questions`** — write a config file in a temp dir with `"questions": {"a b": {"type": "noul", "instructions": "x"}}`; assert `load_config` returns `Err` containing `question 'a b'`.
+- [ ] **Step 2: Run** `cargo test --locked load_config` — Expected: FAIL (loads fine).
+- [ ] **Step 3: In `load_config`, run `questions::validate` on each saved question after parsing** (empty map is fine; do not use `validate_all`).
+- [ ] **Step 4: Run** `cargo test --locked` — PASS. Commit `fix: refuse a config with an invalid saved question`.
+
+### Task 8: Override saved questions per request
+
+**Files:** Modify `src/questions.rs` (`expand`). Test: `src/questions.rs`.
+
+- [ ] **Step 1: Failing test `overrides_saved_questions`** — saved `u = {type: noul, instructions: x}`; `expand({"u": {"model": "p/m"}})` → `u = {type: noul, instructions: x, model: p/m}`; `expand({"nope": {}})` → `Err("unknown question 'nope'")`; an entry with `type` passes through unchanged even when its key is saved.
+- [ ] **Step 2: Run** — FAIL. **Step 3: Implement** in `expand`'s map branch. **Step 4: Run** `cargo test --locked` — PASS. Commit `feat: override saved questions for one request`.
+
+### Task 9: `jeff questions` CLI
+
+**Files:** Modify `src/questions.rs`, `src/main.rs` (`Command`, new `QuestionsAction`, `run_questions`), `README.md` (Command reference).
+
+**Interfaces — Produces** in `questions.rs`, shared by the HTTP handlers and the CLI:
+- `pub enum Change { NotFound(String), Exists(String), Invalid(String) }` with `message()` returning the API texts.
+- `pub fn create(saved: &mut Questions, input: Questions) -> Result<(), Change>`
+- `pub fn update(saved: &mut Questions, key: &str, q: Value) -> Result<(), Change>`
+- `pub fn remove(saved: &mut Questions, key: &str) -> Result<(), Change>`
+
+- [ ] **Step 1: Failing tests** `create_rejects_existing_and_invalid` (nothing changes on error), `update_and_remove_need_existing_key`.
+- [ ] **Step 2: Run** — FAIL. **Step 3: Implement**; switch `create_questions` / `update_question` / `delete_question` to them (`NotFound` → 404, `Exists` → 409, `Invalid` → 400).
+- [ ] **Step 4: Add `Command::Questions { action, config }`** with `list`, `get KEY`, `add FILE`, `update KEY FILE`, `remove KEY`; `-` reads stdin; save with `save_config`.
+- [ ] **Step 5: Verify by hand** on a scratch config: add twice (second fails, exit 1), get, update, list, remove.
+- [ ] **Step 6: Gates, README rows, commit** `feat: manage saved questions from the CLI`.
+
+### Task 10: `jeff ask`
+
+**Files:** Modify `src/main.rs` (`Command::Ask`, `run_ask`), `README.md`.
+
+**Interfaces — Produces:** `fn ask_body(keys: &[String], questions: Option<Value>, state: String, model: Option<String>) -> Result<Value, String>` — `keys` become `{}` entries (saved, no override); `--questions` entries merge over them; empty result → `"name a saved question or pass --questions"`.
+
+- [ ] **Step 1: Failing test `ask_body_merges_keys_and_overrides`** — keys `["a","b"]` + questions `{"b": {"model": "p/m"}, "c": {"type": "noul", "instructions": "x"}}` → `{"a": {}, "b": {"model": "p/m"}, "c": {...}}`, `state` and `model` set; no keys and no questions → Err.
+- [ ] **Step 2: Run** — FAIL. **Step 3: Implement `ask_body`, then `run_ask`**: read `--questions` as JSON or as a file, `--state-file` (`-` = stdin), POST with reqwest to `{url}/v1/systemone`, bearer from `JEFF_API_KEY`, print pretty JSON; non-2xx → stderr + exit 1.
+- [ ] **Step 4: Verify by hand** against CLM: saved keys; `--questions` file with a custom question; override `model`; unknown key → exit 1.
+- [ ] **Step 5: Gates, README, commit** `feat: ask questions from the CLI`.
+
+### Task 11: Live curl tab
+
+**Files:** Modify `ui/app.js`.
+
+- [ ] **Step 1: Failing Edge check** — open the curl tab, toggle a checkbox, change State; `#curl-text` must contain the new key set and state without clicking Run.
+- [ ] **Step 2: Call `updateCurl()` from `saveChecked`, `saveState` and the `#pg-model` change handler.** Re-run the check — PASS. Commit `fix(ui): keep the curl tab in sync with the run`.
