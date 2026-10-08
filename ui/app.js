@@ -208,6 +208,9 @@ $("#add-provider").onclick = () => {
 };
 
 let info = null;
+/** Saved questions by key, as the server last sent them. */
+let saved = {};
+const checked = new Set(store.get("checked") || []);
 
 async function refreshInfo() {
   info = (await api("/api/info")).body;
@@ -577,6 +580,7 @@ function readQuestions() {
 function saveState() {
   store.set("state", $("#pg-state").value);
   $("#pg-count").textContent = `${$("#pg-state").value.length} chars`;
+  updateCurl();
 }
 
 const EXAMPLE = {
@@ -605,7 +609,7 @@ function builderOf(key, q) {
 $("#pg-state").value = store.get("state") ?? EXAMPLE.state;
 saveState();
 $("#pg-state").addEventListener("input", saveState);
-$("#pg-model").onchange = (e) => store.set("model", e.target.value);
+$("#pg-model").onchange = (e) => { store.set("model", e.target.value); updateCurl(); };
 
 /* ---------- answers ---------- */
 
@@ -763,14 +767,13 @@ addEventListener("keydown", (e) => {
 
 /* ---------- saved questions ---------- */
 
-let saved = {};
-const checked = new Set(store.get("checked") || []);
 /** The key being edited; null while creating. */
 let editing = null;
 
 function saveChecked() {
   store.set("checked", [...checked]);
   $("#q-selected").textContent = `${checkedKeys().length} selected · Ctrl + Enter`;
+  updateCurl();
 }
 
 function modelChip(model) {
