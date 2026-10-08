@@ -45,5 +45,6 @@ Found in a read-only audit against the OWASP API Security Top 10 (2023).
 Build on Jeff's existing Jev-compatible discovery and request forwarding, using the connected server's `/v1/models` rather than assuming every model is hosted by Codiv. Keep OpenJev identities separate from TypeSafe Jev and document model-specific availability and request limits. Model ids and backends were checked against OpenJev [configuration](https://github.com/razorback16/openjev/blob/75f22b6dad8c360fdba0e0ebd3dc0a1187628f60/openjev/config.py), [deployment](https://github.com/razorback16/openjev/blob/75f22b6dad8c360fdba0e0ebd3dc0a1187628f60/docker-compose.yml) and [model documentation](https://github.com/razorback16/openjev/blob/75f22b6dad8c360fdba0e0ebd3dc0a1187628f60/README.md#models).
 
 - [ ] **Admin page sign-in.** A way to enter a key in a browser that did not create it.
+- [ ] **Recent unsaved questions.** List questions asked through Try, `jeff ask` or inline `/v1/systemone` maps but not saved, newest first, so a good question can be saved or used as a template in one click instead of typed again.
 - [ ] **Uninstall confirmation.** The two-click confirmation used by Revoke, for CLM Uninstall.
 - [ ] **CLM quality.** Measure FP8 against bf16, for example on the "app crashes" ticket that CLM routes to sales.
