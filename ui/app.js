@@ -73,7 +73,7 @@ async function api(path, opts = {}) {
 
 /* ---------- tabs ---------- */
 
-const PAGES = ["questions", "providers", "keys"];
+const PAGES = ["questions", "classifiers", "providers", "keys"];
 
 function showTab() {
   const id = PAGES.find((p) => location.hash === "#" + p) || "questions";
@@ -148,7 +148,14 @@ function fillModelSelects() {
   fillFormModel();
   if (!all.includes(config.default_model)) sel.prepend(new Option(config.default_model, config.default_model));
   sel.value = all.includes(keep) ? keep : config.default_model;
+  const csel = $("#c-model");
+  const ckeep = csel.value || store.get("c-model") || config.default_model;
+  csel.replaceChildren(...modelGroups());
+  if (!all.includes(config.default_model)) csel.prepend(new Option(config.default_model, config.default_model));
+  csel.value = all.includes(ckeep) ? ckeep : config.default_model;
+  fillClassifierModel();
   updateCurl();
+  updateClassifierCurl();
   fillDefaultModel();
   for (const p of groups) {
     const card = $(`[data-provider="${p.id}"]`);
@@ -244,6 +251,8 @@ $("#add-provider").onclick = () => {
 let info = null;
 /** Saved questions by key, as the server last sent them. */
 let saved = {};
+/** Saved classifiers by key, as the server last sent them. */
+let classifiers = {};
 const checked = new Set(store.get("checked") || []);
 
 async function refreshInfo() {
@@ -649,7 +658,9 @@ function builderOf(key, q) {
 // The Playground kept the state inside `draft`; saveState below moves it to `state`.
 $("#pg-state").value = store.get("state") ?? store.get("draft")?.state ?? EXAMPLE.state;
 saveState();
-$("#pg-state").addEventListener("input", saveState);
+$("#c-state").value = $("#pg-state").value;
+$("#pg-state").addEventListener("input", () => { $("#c-state").value = $("#pg-state").value; saveState(); });
+$("#c-state").addEventListener("input", () => { $("#pg-state").value = $("#c-state").value; saveState(); updateClassifierCurl(); });
 $("#pg-model").onchange = (e) => { store.set("model", e.target.value); updateCurl(); };
 
 /* ---------- answers ---------- */
@@ -661,9 +672,11 @@ function setView(v) {
   view = v;
   store.set("view", v);
   for (const t of $$(".view-tab")) t.setAttribute("aria-selected", String(t.dataset.view === v));
-  $("#view-answer").hidden = v !== "answer";
-  $("#view-json").hidden = v !== "json";
-  $("#view-curl").hidden = v !== "curl";
+  for (const p of ["", "c-"]) {
+    $(`#${p}view-answer`).hidden = v !== "answer";
+    $(`#${p}view-json`).hidden = v !== "json";
+    $(`#${p}view-curl`).hidden = v !== "curl";
+  }
 }
 for (const t of $$(".view-tab")) t.onclick = () => setView(t.dataset.view);
 
@@ -731,10 +744,10 @@ function apiOrigin() {
   return `${location.protocol}//${shown}:${info.api.slice(i + 1)}`;
 }
 
-function curlFor(body) {
+function curlFor(body, path = "/v1/systemone") {
   const json = JSON.stringify(body, null, 2).replace(/'/g, "'\\''");
   const auth = info?.api_key_set ? `  -H "authorization: Bearer $JEFF_API_KEY" \\\n` : "";
-  return `curl ${apiOrigin()}/v1/systemone \\\n${auth}  -H 'content-type: application/json' \\\n  -d '${json}'`;
+  return `curl ${apiOrigin()}${path} \\\n${auth}  -H 'content-type: application/json' \\\n  -d '${json}'`;
 }
 
 /** Saved keys in list order that are checked. */
@@ -750,16 +763,16 @@ function updateCurl() {
   $("#curl-text").textContent = curlFor(runBody());
 }
 $("#curl-copy").onclick = () => navigator.clipboard.writeText($("#curl-text").textContent).then(() => flash($("#pg-status"), "curl copied"));
-for (const t of $$('.view-tab[data-view="curl"]')) t.addEventListener("click", updateCurl);
+for (const t of $$('.view-tab[data-view="curl"]')) t.addEventListener("click", () => { updateCurl(); updateClassifierCurl(); });
 
-/** Posts to /v1/systemone with a running timer in `status`; `button` stays disabled meanwhile. */
-async function ask(body, status, button) {
+/** Posts to `path` with a running timer in `status`; `button` stays disabled meanwhile. */
+async function ask(body, status, button, path = "/v1/systemone") {
   const unlock = lock(button);
   const t0 = performance.now();
   say(status, "Running…");
   const tick = setInterval(() => say(status, `Running… ${Math.floor((performance.now() - t0) / 1000)} s`), 1000);
   try {
-    const { body: out, headers } = await api("/v1/systemone", {
+    const { body: out, headers } = await api(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -777,6 +790,16 @@ function answerCards(questions, answers, runModel) {
   return order.map((k) => answerCard(k, questions[k], answers[k], questions[k]?.model || runModel));
 }
 
+function metaChips(out, headers, ms, model) {
+  return [
+    chip("provider", headers.get("x-jeff-provider") || "?"),
+    chip("model", out.model || model),
+    chip("round trip", `${ms} ms`),
+    ...(headers.get("x-jeff-upstream-ms") ? [chip("upstream", `${headers.get("x-jeff-upstream-ms")} ms`)] : []),
+    ...Object.entries(out.usage || {}).map(([k, v]) => chip(k.replaceAll("_", " "), String(v))),
+  ];
+}
+
 async function run() {
   const status = $("#pg-status");
   const body = runBody();
@@ -784,13 +807,7 @@ async function run() {
   try {
     const { out, headers, ms } = await ask(body, status, $("#pg-run"));
     last = out;
-    $("#pg-meta").replaceChildren(
-      chip("provider", headers.get("x-jeff-provider") || "?"),
-      chip("model", out.model || body.model),
-      chip("round trip", `${ms} ms`),
-      ...(headers.get("x-jeff-upstream-ms") ? [chip("upstream", `${headers.get("x-jeff-upstream-ms")} ms`)] : []),
-      ...Object.entries(out.usage || {}).map(([k, v]) => chip(k.replaceAll("_", " "), String(v))),
-    );
+    $("#pg-meta").replaceChildren(...metaChips(out, headers, ms, body.model));
     const questions = Object.fromEntries(body.questions.map((k) => [k, saved[k]]));
     $("#view-answer").replaceChildren(...answerCards(questions, out.answers || {}, body.model));
     $("#view-json").textContent = JSON.stringify(out, null, 2);
@@ -801,7 +818,15 @@ async function run() {
 }
 $("#pg-run").onclick = run;
 addEventListener("keydown", (e) => {
-  if (!(e.ctrlKey || e.metaKey) || e.key !== "Enter" || $("#page-questions").hidden) return;
+  if (!(e.ctrlKey || e.metaKey) || e.key !== "Enter") return;
+  if (!$("#page-classifiers").hidden) {
+    const list = $("#c-form-view").hidden;
+    if ($(list ? "#c-run" : "#c-try").disabled) return;
+    if (list) runClassifier();
+    else tryClassifier();
+    return;
+  }
+  if ($("#page-questions").hidden) return;
   const list = $("#q-form-view").hidden;
   if ($(list ? "#pg-run" : "#q-try").disabled) return;
   if (list) run();
@@ -862,6 +887,8 @@ function renderQuestions() {
   $("#q-empty").hidden = keys.length > 0;
   for (const k of [...checked]) if (!(k in saved)) checked.delete(k);
   saveChecked();
+  renderClassifiers();
+  if (!$("#c-form-view").hidden) renderPicked();
 }
 
 async function loadQuestions() {
@@ -953,9 +980,334 @@ $("#q-cancel").onclick = () => showForm(false);
 $("#q-save").onclick = (e) => busy(e.currentTarget, saveForm);
 $("#q-try").onclick = tryDraft;
 
+/* ---------- classifiers ---------- */
+
+/** The classifier key being edited; null while creating. */
+let cEditing = null;
+/** The form's question keys, in the order they are asked. */
+let picked = [];
+
+const deletedTip = (key) => `Question "${key}" was deleted. The classifier skips it.`;
+const missing = (keys) => keys.filter((k) => !(k in saved));
+
+/** Saved questions in classifier order, with the override as their model, as `answerCards` takes them. */
+function fullQuestions(keys, model) {
+  return Object.fromEntries(keys.filter((k) => k in saved).map((k) => [k, model ? { ...saved[k], model } : saved[k]]));
+}
+
+function skippedNotice(keys) {
+  if (!keys?.length) return null;
+  const n = keys.length;
+  return el("p", "rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200", `${n} question${n === 1 ? "" : "s"} skipped: ${keys.join(", ")}`);
+}
+
+function questionChip(key) {
+  if (key in saved) return el("span", "rounded border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 font-mono text-[11px] text-neutral-700 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-300", key);
+  const c = el("span", "rounded border border-red-300 bg-red-50 px-1.5 py-0.5 font-mono text-[11px] text-red-800 line-through dark:border-red-900 dark:bg-red-950/40 dark:text-red-300", key);
+  c.title = deletedTip(key);
+  return c;
+}
+
+/** The classifier Run calls: the one last picked, else the first. */
+function selectedClassifier() {
+  const want = store.get("classifier");
+  return want in classifiers ? want : Object.keys(classifiers)[0] ?? null;
+}
+
+function classifierRow(key, c) {
+  const li = el("li", "flex items-start gap-3 p-3");
+  const radio = el("input", "mt-1 size-4 shrink-0");
+  radio.type = "radio";
+  radio.name = "classifier";
+  radio.checked = key === selectedClassifier();
+  radio.setAttribute("aria-label", `Run ${key}`);
+  radio.onchange = () => { store.set("classifier", key); updateClassifierCurl(); };
+  const main = el("div", "min-w-0 flex-1");
+  const head = el("div", "flex flex-wrap items-center gap-2");
+  head.append(el("span", "font-mono font-medium", key));
+  if (c.model) head.append(modelChip(c.model));
+  const chips = el("div", "mt-1.5 flex flex-wrap gap-1");
+  chips.append(...c.questions.map(questionChip));
+  main.append(head, chips);
+  const edit = el("button", "btn min-w-0", "Edit");
+  edit.type = "button";
+  edit.onclick = () => openClassifierForm(key);
+  li.append(radio, main, edit);
+  return li;
+}
+
+function renderClassifiers() {
+  const keys = Object.keys(classifiers);
+  const any = Object.keys(saved).length > 0;
+  $("#c-items").replaceChildren(...keys.map((k) => classifierRow(k, classifiers[k])));
+  $("#c-items").hidden = !keys.length;
+  $("#c-empty").hidden = keys.length > 0;
+  $("#c-empty-text").textContent = any ? "Group saved questions to run them in one call." : "Save questions first.";
+  $("#c-empty-new").hidden = !any;
+  $("#c-selected").textContent = keys.length ? "Ctrl + Enter" : "";
+  updateClassifierCurl();
+}
+
+async function loadClassifiers() {
+  classifiers = (await api("/v1/classifiers")).body;
+  renderClassifiers();
+}
+
+function classifierBody() {
+  return { model: $("#c-model").value, state: $("#pg-state").value };
+}
+
+function updateClassifierCurl() {
+  const key = selectedClassifier();
+  $("#c-curl-text").textContent = key ? curlFor(classifierBody(), `/v1/classifiers/${key}`) : "Create a classifier to see its call.";
+}
+$("#c-curl-copy").onclick = () => navigator.clipboard.writeText($("#c-curl-text").textContent).then(() => flash($("#c-status"), "curl copied"));
+$("#c-model").onchange = (e) => { store.set("c-model", e.target.value); updateClassifierCurl(); };
+
+async function runClassifier() {
+  const status = $("#c-status");
+  const key = selectedClassifier();
+  if (!key) { say(status, "Create a classifier first.", "err"); return; }
+  const c = classifiers[key];
+  const body = classifierBody();
+  try {
+    const { out, headers, ms } = await ask(body, status, $("#c-run"), `/v1/classifiers/${encodeURIComponent(key)}`);
+    $("#c-meta").replaceChildren(...metaChips(out, headers, ms, body.model));
+    $("#c-view-answer").replaceChildren(...[skippedNotice(out.skipped)].filter(Boolean), ...answerCards(fullQuestions(c.questions, c.model), out.answers || {}, body.model));
+    $("#c-view-json").textContent = JSON.stringify(out, null, 2);
+  } catch (e) {
+    say(status, e.message, "err");
+  }
+}
+
+/* The form */
+
+function showClassifierForm(open) {
+  $("#c-list-view").hidden = open;
+  $("#c-form-view").hidden = !open;
+}
+
+/** Offers None plus every listed model, keeping a saved override that no provider lists right now. */
+function fillClassifierModel(want = $("#c-form-model").value) {
+  const sel = $("#c-form-model");
+  sel.replaceChildren(new Option("None (each question uses its own)", ""), ...(modelList ? modelGroups() : []));
+  if (want && ![...sel.options].some((o) => o.value === want)) sel.append(new Option(want, want));
+  sel.value = want;
+}
+
+function pickedRow(key) {
+  const q = saved[key];
+  const li = el("li", q ? "flex items-start gap-2 p-2" : "flex items-start gap-2 bg-red-50 p-2 dark:bg-red-950/30");
+  li.draggable = true;
+  li.tabIndex = 0;
+  li.dataset.key = key;
+  if (!q) li.title = deletedTip(key);
+  const handle = el("span", "mt-0.5 cursor-grab px-1 text-neutral-400 select-none dark:text-neutral-500", "⋮⋮");
+  handle.setAttribute("aria-hidden", "true");
+  const main = el("div", "min-w-0 flex-1");
+  const head = el("div", "flex flex-wrap items-center gap-2");
+  if (q) {
+    head.append(el("span", "font-mono font-medium", key));
+    const badge = el("span", "badge", TYPE_INFO[q.type]?.badge || q.type);
+    badge.dataset.type = q.type;
+    head.append(badge);
+    if (q.model) {
+      const m = modelChip(q.model);
+      // The override replaces this model for the classifier's calls.
+      if ($("#c-form-model").value) m.classList.add("line-through", "opacity-60");
+      head.append(m);
+    }
+    main.append(head, el("p", "note mt-0.5 truncate", q.instructions));
+  } else {
+    head.append(el("span", "font-mono font-medium text-red-800 line-through dark:text-red-300", key), el("span", "badge bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200", "deleted"));
+    main.append(head, el("p", "mt-0.5 text-xs text-red-700 dark:text-red-300", "Deleted. The classifier skips it."));
+  }
+  li.append(handle, main, removeButton(() => { picked = picked.filter((k) => k !== key); renderPicked(); }, `Remove ${key}`));
+  li.onkeydown = (e) => {
+    if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    e.preventDefault();
+    const i = picked.indexOf(key);
+    const j = i + (e.key === "ArrowUp" ? -1 : 1);
+    if (j < 0 || j >= picked.length) return;
+    [picked[i], picked[j]] = [picked[j], picked[i]];
+    renderPicked();
+    $(`#c-picked li[data-key="${CSS.escape(key)}"]`).focus();
+  };
+  return li;
+}
+
+function renderPicked() {
+  $("#c-picked").replaceChildren(...picked.map(pickedRow));
+  $("#c-picked").hidden = !picked.length;
+  const gone = missing(picked).length;
+  $("#c-count").textContent = picked.length ? `${picked.length}${gone ? ` · ${gone} deleted` : ""}` : "";
+  if (!$("#c-options").hidden) renderOptions();
+}
+
+let dragKey = null;
+$("#c-picked").addEventListener("dragstart", (e) => { dragKey = e.target.closest("li")?.dataset.key ?? null; });
+$("#c-picked").addEventListener("dragover", (e) => { if (dragKey) e.preventDefault(); });
+$("#c-picked").addEventListener("drop", (e) => {
+  e.preventDefault();
+  const over = e.target.closest("li")?.dataset.key;
+  if (dragKey && over && over !== dragKey) {
+    const to = picked.indexOf(over);
+    picked = picked.filter((k) => k !== dragKey);
+    picked.splice(to, 0, dragKey);
+    renderPicked();
+  }
+  dragKey = null;
+});
+
+let optIndex = 0;
+
+/** Saved questions not yet picked whose key or instructions contain the search text. */
+function matches() {
+  const text = $("#c-search").value.trim().toLowerCase();
+  return Object.keys(saved).filter((k) => !picked.includes(k) && (k.toLowerCase().includes(text) || (saved[k].instructions || "").toLowerCase().includes(text)));
+}
+
+function renderOptions() {
+  const found = matches();
+  optIndex = Math.min(optIndex, Math.max(0, found.length - 1));
+  const options = found.map((k, i) => {
+    const o = el("li", "cursor-pointer px-3 py-2 hover:bg-neutral-50 aria-selected:bg-neutral-100 dark:hover:bg-neutral-800/60 dark:aria-selected:bg-neutral-800");
+    o.id = `c-opt-${i}`;
+    o.setAttribute("role", "option");
+    o.setAttribute("aria-selected", String(i === optIndex));
+    const head = el("div", "flex flex-wrap items-center gap-2");
+    const badge = el("span", "badge", TYPE_INFO[saved[k].type]?.badge || saved[k].type);
+    badge.dataset.type = saved[k].type;
+    head.append(el("span", "font-mono font-medium", k), badge);
+    o.append(head, el("p", "note mt-0.5 truncate", saved[k].instructions));
+    // mousedown runs before the search field's blur would close the list.
+    o.onmousedown = (e) => { e.preventDefault(); addPicked(k); };
+    return o;
+  });
+  if (!options.length) options.push(el("li", "note px-3 py-2", Object.keys(saved).length ? "No matching questions." : "No saved questions."));
+  $("#c-options").replaceChildren(...options);
+  $("#c-options").hidden = false;
+  $("#c-search").setAttribute("aria-expanded", "true");
+  if (found.length) $("#c-search").setAttribute("aria-activedescendant", `c-opt-${optIndex}`);
+  else $("#c-search").removeAttribute("aria-activedescendant");
+  $(`#c-opt-${optIndex}`)?.scrollIntoView({ block: "nearest" });
+}
+
+function closeOptions() {
+  $("#c-options").hidden = true;
+  $("#c-search").setAttribute("aria-expanded", "false");
+  $("#c-search").removeAttribute("aria-activedescendant");
+}
+
+function addPicked(key) {
+  picked.push(key);
+  $("#c-search").value = "";
+  optIndex = 0;
+  renderPicked();
+  renderOptions();
+}
+
+$("#c-search").onfocus = renderOptions;
+$("#c-search").oninput = () => { optIndex = 0; renderOptions(); };
+$("#c-search").onblur = closeOptions;
+$("#c-search").onkeydown = (e) => {
+  if (e.key === "Escape") { closeOptions(); return; }
+  if ($("#c-options").hidden && e.key !== "Enter") { if (e.key === "ArrowDown") renderOptions(); return; }
+  const found = matches();
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    optIndex = Math.max(0, Math.min(found.length - 1, optIndex + (e.key === "ArrowDown" ? 1 : -1)));
+    renderOptions();
+  } else if (e.key === "Enter" && found[optIndex]) {
+    e.preventDefault();
+    addPicked(found[optIndex]);
+  }
+};
+$("#c-form-model").onchange = renderPicked;
+
+function openClassifierForm(key = null) {
+  cEditing = key;
+  const c = key ? classifiers[key] : { questions: [] };
+  $("#c-form-title").textContent = key ? "Edit classifier" : "New classifier";
+  $("#c-key").value = key || "";
+  $("#c-key").readOnly = !!key;
+  picked = [...c.questions];
+  fillClassifierModel(c.model || "");
+  renderPicked();
+  $("#c-delete").hidden = !key;
+  $("#c-try-state").value = $("#pg-state").value;
+  $("#c-try-answer").replaceChildren(el("p", "note py-12 text-center", "Try runs the draft against this state. Nothing is saved."));
+  say($("#c-form-status"), "");
+  closeOptions();
+  showClassifierForm(true);
+  (key ? $("#c-search") : $("#c-key")).focus();
+}
+
+/** The form's classifier, without its key. */
+function classifierDraft() {
+  if (!picked.length) throw new Error("Add at least one question.");
+  // Fields the form does not show, saved through the API, survive an edit.
+  const { questions, model, ...rest } = cEditing ? classifiers[cEditing] : {};
+  const c = { ...rest, questions: [...picked] };
+  if ($("#c-form-model").value) c.model = $("#c-form-model").value;
+  return c;
+}
+
+async function saveClassifier() {
+  const status = $("#c-form-status");
+  try {
+    const key = cEditing || $("#c-key").value.trim();
+    if (!key) throw new Error("The classifier needs a key.");
+    const c = classifierDraft();
+    const json = { "content-type": "application/json" };
+    if (cEditing) await api(`/api/classifiers/${encodeURIComponent(key)}`, { method: "PUT", headers: json, body: JSON.stringify(c) });
+    else await api("/api/classifiers", { method: "POST", headers: json, body: JSON.stringify({ [key]: c }) });
+    store.set("classifier", key);
+    await loadClassifiers();
+    showClassifierForm(false);
+  } catch (err) {
+    say(status, err.message, "err");
+  }
+}
+
+async function tryClassifier() {
+  const status = $("#c-form-status");
+  let c;
+  try { c = classifierDraft(); }
+  catch (err) { say(status, err.message, "err"); return; }
+  const working = c.questions.filter((k) => k in saved);
+  if (!working.length) { say(status, "No working questions.", "err"); return; }
+  const questions = c.model ? Object.fromEntries(working.map((k) => [k, { model: c.model }])) : working;
+  const body = { model: $("#c-model").value, state: $("#c-try-state").value, questions };
+  try {
+    const { out } = await ask(body, status, $("#c-try"));
+    $("#c-try-answer").replaceChildren(...[skippedNotice(missing(c.questions))].filter(Boolean), ...answerCards(fullQuestions(c.questions, c.model), out.answers || {}, body.model));
+  } catch (err) {
+    say(status, err.message, "err");
+  }
+}
+
+confirmClick($("#c-delete"), "Confirm delete", async () => {
+  try {
+    classifiers = (await api(`/api/classifiers/${encodeURIComponent(cEditing)}`, { method: "DELETE" })).body;
+    renderClassifiers();
+    showClassifierForm(false);
+  } catch (err) {
+    say($("#c-form-status"), err.message, "err");
+  }
+});
+$("#c-new").onclick = () => openClassifierForm();
+$("#c-empty-new").onclick = () => openClassifierForm();
+$("#c-back").onclick = () => showClassifierForm(false);
+$("#c-cancel").onclick = () => showClassifierForm(false);
+$("#c-save").onclick = (e) => busy(e.currentTarget, saveClassifier);
+$("#c-try").onclick = tryClassifier;
+$("#c-run").onclick = runClassifier;
+
 setInterval(() => !document.hidden && location.hash === "#providers" && modelList && loadModels().catch(() => {}), 15000);
 
 showTab();
 setView(view);
 loadQuestions().catch((e) => say($("#pg-status"), e.message, "err"));
+loadClassifiers().catch((e) => say($("#c-status"), e.message, "err"));
 loadConfig().catch((e) => say($("#pg-status"), e.message, "err"));
