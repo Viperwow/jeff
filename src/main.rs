@@ -539,16 +539,17 @@ async fn systemone(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Resp
     let config = app.config.read().await.clone();
     answer(&app, &config, body)
         .await
-        .map_or_else(|res| res, Upstream::reply)
+        .map_or_else(|res| *res, Upstream::reply)
 }
 
 /// Asks the providers for `body` and joins their answers; `Err` is the response for the client.
-async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream, Response> {
+async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream, Box<Response>> {
     let Some(obj) = body.as_object_mut() else {
         return Err(error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "body must be a JSON object",
-        ));
+        )
+        .into());
     };
     let model = obj
         .get("model")
@@ -562,7 +563,7 @@ async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream,
             .and_then(|qs| questions::group(qs, &model))
         {
             Ok(groups) => groups.into_iter().map(|(m, qs)| (m, Some(qs))).collect(),
-            Err(e) => return Err(error(StatusCode::BAD_REQUEST, e)),
+            Err(e) => return Err(error(StatusCode::BAD_REQUEST, e).into()),
         },
     };
     // Every model resolves before any call, so a request bound to fail costs no provider anything.
@@ -571,7 +572,7 @@ async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream,
     for (model, qs) in groups {
         match find_model(app, config, &model, &mut refreshed).await {
             Ok((p, upstream_model)) => resolved.push((p, upstream_model, qs)),
-            Err((status, msg)) => return Err(error(status, msg)),
+            Err((status, msg)) => return Err(error(status, msg).into()),
         }
     }
     let total = AtomicUsize::new(0);
@@ -590,7 +591,7 @@ async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream,
         }
     });
     // The first failure answers the request and drops the calls still running.
-    let mut parts = try_join_all(calls).await?;
+    let mut parts = try_join_all(calls).await.map_err(Box::new)?;
     if parts.len() == 1 {
         return Ok(parts.pop().unwrap());
     }
@@ -600,7 +601,7 @@ async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream,
             Ok(v) => answers.push(v),
             Err(_) => {
                 let (status, msg) = unreadable(&u.provider);
-                return Err(error(status, msg));
+                return Err(error(status, msg).into());
             }
         }
     }
@@ -1045,7 +1046,7 @@ async fn call_classifier(
         }
         .reply(),
         Ok(u) => u.reply(),
-        Err(res) => res,
+        Err(res) => *res,
     }
 }
 
