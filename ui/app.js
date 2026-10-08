@@ -60,23 +60,38 @@ addEventListener("hashchange", showTab);
 
 /** How long a destructive button waits for the confirming second click. */
 const CONFIRM_MS = 3000;
+/** How long a button stays disabled after a click, so a double click is not taken as the confirmation. */
+const GUARD_MS = 600;
 
-/** The first click arms the button with a countdown; a second click before it runs out calls `action`. */
+/** Disarms the one button currently waiting for confirmation. */
+let disarmCurrent = () => {};
+
+/** The first click arms the button; a second click before CONFIRM_MS runs out calls `action`. */
 function confirmClick(button, armedLabel, action) {
   const label = button.textContent;
-  button.onclick = () => {
-    if (button.dataset.confirm === "true") { action(); return; }
-    button.dataset.confirm = "true";
-    let left = CONFIRM_MS / 1000;
-    const hint = el("span", "text-xs opacity-70 tabular-nums", `${left} s`);
-    button.replaceChildren(armedLabel, hint);
-    const tick = setInterval(() => {
-      left -= 1;
-      if (left > 0 && button.isConnected) { hint.textContent = `${left} s`; return; }
-      clearInterval(tick);
-      button.dataset.confirm = "false";
-      button.replaceChildren(label);
-    }, 1000);
+  let timer;
+  const disarm = () => {
+    clearTimeout(timer);
+    button.dataset.confirm = "false";
+    button.textContent = label;
+  };
+  button.onclick = async () => {
+    const until = Date.now() + GUARD_MS;
+    button.disabled = true;
+    try {
+      if (button.dataset.confirm === "true") {
+        disarm();
+        await action();
+      } else {
+        disarmCurrent();
+        disarmCurrent = disarm;
+        button.dataset.confirm = "true";
+        button.textContent = armedLabel;
+        timer = setTimeout(disarm, CONFIRM_MS);
+      }
+    } finally {
+      setTimeout(() => { button.disabled = false; }, Math.max(0, until - Date.now()));
+    }
   };
 }
 
