@@ -87,7 +87,13 @@ impl Default for Config {
 /// open jeff to anyone.
 fn load_config(path: &str) -> Result<Config, String> {
     match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {e}")),
+        Ok(text) => {
+            let config: Config = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+            for (key, q) in &config.questions {
+                questions::validate(key, q).map_err(|e| format!("{path}: {e}"))?;
+            }
+            Ok(config)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(format!("{path}: {e}")),
     }
@@ -1612,6 +1618,18 @@ mod tests {
         let mut bad = input(None);
         bad.default_model = "clm/clm-latest".into();
         assert!(build_config(&current, bad, false).is_err());
+    }
+
+    #[test]
+    fn load_config_rejects_invalid_questions() {
+        let path = env::temp_dir().join(format!("jeff-test-{}.json", std::process::id()));
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["questions"] = json!({"a b": {"type": "noul", "instructions": "x"}});
+        fs::write(&path, config.to_string()).unwrap();
+        let result = load_config(path.to_str().unwrap());
+        let _ = fs::remove_file(&path);
+        let e = result.err().expect("an invalid question must be refused");
+        assert!(e.contains("question 'a b'"), "{e}");
     }
 
     #[test]
