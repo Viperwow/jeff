@@ -115,6 +115,7 @@ function fillModelSelects() {
   fillFormModel();
   if (!all.includes(config.default_model)) sel.prepend(new Option(config.default_model, config.default_model));
   sel.value = all.includes(keep) ? keep : config.default_model;
+  updateCurl();
   fillDefaultModel();
   for (const p of groups) {
     const card = $(`[data-provider="${p.id}"]`);

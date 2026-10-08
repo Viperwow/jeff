@@ -86,14 +86,18 @@ impl Default for Config {
 /// A missing file gives the defaults. A broken one is an error: falling back would drop every access key and
 /// open jeff to anyone.
 fn load_config(path: &str) -> Result<Config, String> {
+    let config = read_config(path)?;
+    for (key, q) in &config.questions {
+        questions::validate(key, q).map_err(|e| format!("{path}: {e}"))?;
+    }
+    Ok(config)
+}
+
+/// Parses the config without checking saved questions, so the CLI can still revoke a key or remove the broken
+/// question from a config that `serve` refuses.
+fn read_config(path: &str) -> Result<Config, String> {
     match fs::read_to_string(path) {
-        Ok(text) => {
-            let config: Config = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-            for (key, q) in &config.questions {
-                questions::validate(key, q).map_err(|e| format!("{path}: {e}"))?;
-            }
-            Ok(config)
-        }
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {e}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(format!("{path}: {e}")),
     }
@@ -1329,6 +1333,32 @@ fn ask_body(
     Ok(body)
 }
 
+/// `--questions` is JSON when it looks like JSON, else a file path, so a JSON typo is not reported as a missing file.
+fn questions_arg(
+    arg: &str,
+    read: impl Fn(&str) -> Result<String, String>,
+) -> Result<Value, String> {
+    let trimmed = arg.trim_start();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return serde_json::from_str(arg).map_err(|e| {
+            format!(
+                "--questions is not valid JSON: {e}; in PowerShell, put the JSON in a file instead"
+            )
+        });
+    }
+    let text = read(arg)?;
+    serde_json::from_str(&text).map_err(|e| format!("{arg}: {e}"))
+}
+
+/// The server accepts a comma-separated `JEFF_API_KEY`; a client sends the first key.
+fn client_key(env_value: Option<String>) -> Option<String> {
+    env_value?
+        .split(',')
+        .map(str::trim)
+        .find(|k| !k.is_empty())
+        .map(str::to_owned)
+}
+
 async fn run_ask(args: AskArgs) {
     let fail = |e: String| -> ! {
         eprintln!("{e}");
@@ -1340,19 +1370,14 @@ async fn run_ask(args: AskArgs) {
         (None, None) => unreachable!("clap requires --state or --state-file"),
     };
     // Inline JSON first; anything else is a path, so a custom question can live in a file.
-    let questions = args.questions.map(|q| {
-        serde_json::from_str(&q).unwrap_or_else(|_| {
-            let text = read_input(&q).unwrap_or_else(|e| fail(e));
-            serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{q}: {e}")))
-        })
-    });
+    let questions = args
+        .questions
+        .map(|q| questions_arg(&q, read_input).unwrap_or_else(|e| fail(e)));
     let body = ask_body(&args.keys, questions, state, args.model).unwrap_or_else(|e| fail(e));
     let url = format!("{}/v1/systemone", args.url.trim_end_matches('/'));
     let mut req = reqwest::Client::new().post(&url).json(&body);
-    if let Ok(key) = env::var("JEFF_API_KEY")
-        && !key.trim().is_empty()
-    {
-        req = req.bearer_auth(key.trim());
+    if let Some(key) = client_key(env::var("JEFF_API_KEY").ok()) {
+        req = req.bearer_auth(key);
     }
     let resp = req
         .send()
@@ -1374,7 +1399,7 @@ fn run_questions(action: QuestionsAction, path: &str) {
         eprintln!("{e}");
         std::process::exit(1)
     };
-    let mut config = load_config(path).unwrap_or_else(|e| fail(e));
+    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
     let json = |file: &str| -> Value {
         let text = read_input(file).unwrap_or_else(|e| fail(e));
         serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{file}: {e}")))
@@ -1433,7 +1458,7 @@ fn run_keys(action: KeysAction, path: &str) {
         eprintln!("{e}");
         std::process::exit(1)
     };
-    let mut config = load_config(path).unwrap_or_else(|e| fail(e));
+    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
     // The same rules as the admin page, so the CLI cannot lock that page out. A key in JEFF_API_KEY is an
     // admin key for a server started from this environment.
     let static_admin = env::var("JEFF_API_KEY").is_ok_and(|v| !v.trim().is_empty());
@@ -1779,6 +1804,48 @@ mod tests {
         let mut bad = input(None);
         bad.default_model = "clm/clm-latest".into();
         assert!(build_config(&current, bad, false).is_err());
+    }
+
+    #[test]
+    fn questions_arg_reports_broken_json_instead_of_a_file() {
+        let no_file = |p: &str| Err(format!("{p}: not found"));
+        let e = questions_arg("{\"u\": {}", no_file).unwrap_err();
+        assert!(e.contains("not valid JSON"), "{e}");
+        assert_eq!(
+            questions_arg(" {\"u\": {}} ", no_file).unwrap(),
+            json!({"u": {}})
+        );
+        let from_file = |_: &str| Ok("{\"f\": {}}".to_owned());
+        assert_eq!(
+            questions_arg("q.json", from_file).unwrap(),
+            json!({"f": {}})
+        );
+        assert!(
+            questions_arg("q.json", no_file)
+                .unwrap_err()
+                .contains("not found")
+        );
+    }
+
+    #[test]
+    fn client_key_takes_the_first_of_a_list() {
+        assert_eq!(client_key(Some(" k1 , k2".into())).as_deref(), Some("k1"));
+        assert_eq!(client_key(Some(" ".into())), None);
+        assert_eq!(client_key(None), None);
+    }
+
+    #[test]
+    fn cli_reads_a_config_that_serve_refuses() {
+        let path = env::temp_dir().join(format!("jeff-test-cli-{}.json", std::process::id()));
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["questions"] = json!({"a b": {"type": "noul", "instructions": "x"}});
+        fs::write(&path, config.to_string()).unwrap();
+        let path = path.to_str().unwrap().to_owned();
+        let read = read_config(&path);
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        assert!(read.unwrap().questions.contains_key("a b"));
+        assert!(loaded.is_err());
     }
 
     #[test]
