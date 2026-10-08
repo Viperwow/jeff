@@ -432,11 +432,10 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
     let groups = match obj.get("questions") {
         // The provider reports a missing `questions` itself.
         None => vec![(model, None)],
-        Some(input) => match questions::expand(input, &config.questions) {
-            Ok(qs) => questions::group(qs, &model)
-                .into_iter()
-                .map(|(m, qs)| (m, Some(qs)))
-                .collect(),
+        Some(input) => match questions::expand(input, &config.questions)
+            .and_then(|qs| questions::group(qs, &model))
+        {
+            Ok(groups) => groups.into_iter().map(|(m, qs)| (m, Some(qs))).collect(),
             Err(e) => return error(StatusCode::BAD_REQUEST, e),
         },
     };
@@ -458,6 +457,13 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
     }
     if parts.len() == 1 {
         return parts.pop().unwrap().reply();
+    }
+    // Each part is capped on its own; the merged answer gets the same cap as a single provider's.
+    if parts.iter().map(|u| u.bytes.len()).sum::<usize>() > MAX_UPSTREAM_BYTES {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "the providers' answers together are too large",
+        );
     }
     let mut answers = Vec::new();
     for u in &parts {

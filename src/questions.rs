@@ -89,8 +89,14 @@ pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
     Ok(out)
 }
 
+/// Each model costs one upstream call, buffered in full, so a request cannot fan out without bound.
+pub const MAX_MODELS: usize = 8;
+
 /// Splits questions by the model that answers them; providers never see the `model` field.
-pub fn group(questions: Questions, request_model: &str) -> Vec<(String, Questions)> {
+pub fn group(
+    questions: Questions,
+    request_model: &str,
+) -> Result<Vec<(String, Questions)>, String> {
     let mut groups: Vec<(String, Questions)> = Vec::new();
     for (key, mut q) in questions {
         let model = q
@@ -105,7 +111,13 @@ pub fn group(questions: Questions, request_model: &str) -> Vec<(String, Question
             None => groups.push((model, Questions::from_iter([(key, q)]))),
         }
     }
-    groups
+    if groups.len() > MAX_MODELS {
+        return Err(format!(
+            "questions use {} models; one request may use at most {MAX_MODELS}",
+            groups.len()
+        ));
+    }
+    Ok(groups)
 }
 
 /// Joins the responses of several groups into one, as if a single provider had answered.
@@ -251,7 +263,7 @@ mod tests {
             "b": {"type": "noul", "instructions": "x", "model": "typesafe/jev-latest"},
             "c": {"type": "noul", "instructions": "x", "model": "clm/clm-latest"},
         }));
-        let groups = group(qs, "clm/clm-latest");
+        let groups = group(qs, "clm/clm-latest").unwrap();
         let names: Vec<_> = groups
             .iter()
             .map(|(m, q)| (m.as_str(), q.keys().cloned().collect::<Vec<_>>()))
@@ -267,6 +279,27 @@ mod tests {
             groups
                 .iter()
                 .all(|(_, q)| q.values().all(|v| v.get("model").is_none()))
+        );
+    }
+
+    #[test]
+    fn limits_models_per_request() {
+        let many = |n: usize| {
+            (0..n)
+                .map(|i| {
+                    let q =
+                        json!({"type": "noul", "instructions": "x", "model": format!("p/m{i}")});
+                    (format!("q{i}"), q)
+                })
+                .collect::<Questions>()
+        };
+        assert_eq!(group(many(MAX_MODELS), "p/m0").unwrap().len(), MAX_MODELS);
+        assert_eq!(
+            group(many(MAX_MODELS + 1), "p/m0").unwrap_err(),
+            format!(
+                "questions use {} models; one request may use at most {MAX_MODELS}",
+                MAX_MODELS + 1
+            )
         );
     }
 
