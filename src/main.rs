@@ -988,7 +988,7 @@ async fn get_config(State(app): State<Arc<App>>) -> Json<Value> {
     Json(public(&*app.config.read().await))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ProviderInput {
     id: String,
     name: String,
@@ -1007,7 +1007,7 @@ struct ProviderInput {
     max_time: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ConfigInput {
     default_model: String,
     providers: Vec<ProviderInput>,
@@ -1109,18 +1109,10 @@ async fn check_provider_hosts(providers: &[Provider], allow_private: bool) -> Re
 }
 
 /// Keys and questions have their own endpoints; a provider save built from an older snapshot must not undo them.
-fn keep_live(next: Config, live: &Config) -> Config {
-    Config {
-        keys: live.keys.clone(),
-        questions: live.questions.clone(),
-        ..next
-    }
-}
-
 async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>) -> Response {
     // The DNS checks run without the lock, so a slow resolver does not stall every request meanwhile.
     let snapshot = app.config.read().await.clone();
-    let next = match build_config(&snapshot, input, app.allow_private) {
+    let next = match build_config(&snapshot, input.clone(), app.allow_private) {
         Ok(c) => c,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -1128,7 +1120,11 @@ async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>)
         return error(StatusCode::BAD_REQUEST, e);
     }
     let mut config = app.config.write().await;
-    let next = keep_live(next, &config);
+    // Built again on the live config: what the UI does not send, such as keys or timeouts, may have changed meanwhile.
+    let next = match build_config(&config, input, app.allow_private) {
+        Ok(c) => c,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
     if let Err(e) = app.save(&next).await {
         return error(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
@@ -2225,18 +2221,6 @@ mod tests {
         let _ = fs::remove_file(&path);
         let e = result.err().expect("an invalid question must be refused");
         assert!(e.contains("question 'a b'"), "{e}");
-    }
-
-    #[test]
-    fn provider_save_keeps_live_keys_and_questions() {
-        let snapshot = Config::default();
-        let mut live = Config::default();
-        live.questions.insert(
-            "added-meanwhile".into(),
-            json!({"type": "noul", "instructions": "x"}),
-        );
-        let next = keep_live(snapshot, &live);
-        assert_eq!(next.questions, live.questions);
     }
 
     #[test]
