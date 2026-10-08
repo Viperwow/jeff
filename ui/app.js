@@ -989,6 +989,8 @@ let picked = [];
 
 const deletedTip = (key) => `Question "${key}" was deleted. The classifier skips it.`;
 const missing = (keys) => keys.filter((k) => !(k in saved));
+/** A hand-edited config may hold a classifier of another shape; the server keeps it until it is fixed or deleted. */
+const keysOf = (c) => (Array.isArray(c?.questions) ? c.questions.filter((k) => typeof k === "string") : []);
 
 /** Saved questions in classifier order, with the override as their model, as `answerCards` takes them. */
 function fullQuestions(keys, model) {
@@ -1025,9 +1027,14 @@ function classifierRow(key, c) {
   const main = el("div", "min-w-0 flex-1");
   const head = el("div", "flex flex-wrap items-center gap-2");
   head.append(el("span", "font-mono font-medium", key));
-  if (c.model) head.append(modelChip(c.model));
+  if (typeof c.model === "string") head.append(modelChip(c.model));
   const chips = el("div", "mt-1.5 flex flex-wrap gap-1");
-  chips.append(...c.questions.map(questionChip));
+  chips.append(...keysOf(c).map(questionChip));
+  if (!Array.isArray(c.questions)) {
+    const bad = el("span", "rounded border border-red-300 bg-red-50 px-1.5 py-0.5 text-[11px] text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300", "invalid");
+    bad.title = "questions must be an array of question keys. Edit the classifier to fix it, or delete it.";
+    chips.append(bad);
+  }
   main.append(head, chips);
   const edit = el("button", "btn min-w-0", "Edit");
   edit.type = "button";
@@ -1073,7 +1080,7 @@ async function runClassifier() {
   try {
     const { out, headers, ms } = await ask(body, status, $("#c-run"), `/v1/classifiers/${encodeURIComponent(key)}`);
     $("#c-meta").replaceChildren(...metaChips(out, headers, ms, body.model));
-    $("#c-view-answer").replaceChildren(...[skippedNotice(out.skipped)].filter(Boolean), ...answerCards(fullQuestions(c.questions, c.model), out.answers || {}, body.model));
+    $("#c-view-answer").replaceChildren(...[skippedNotice(out.skipped)].filter(Boolean), ...answerCards(fullQuestions(keysOf(c), c.model), out.answers || {}, body.model));
     $("#c-view-json").textContent = JSON.stringify(out, null, 2);
   } catch (e) {
     say(status, e.message, "err");
@@ -1122,7 +1129,12 @@ function pickedRow(key) {
     head.append(el("span", "font-mono font-medium text-red-800 line-through dark:text-red-300", key), el("span", "badge bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200", "deleted"));
     main.append(head, el("p", "mt-0.5 text-xs text-red-700 dark:text-red-300", "Deleted. The classifier skips it."));
   }
-  li.append(handle, main, removeButton(() => { picked = picked.filter((k) => k !== key); renderPicked(); }, `Remove ${key}`));
+  li.append(handle, main, removeButton(() => {
+    const i = picked.indexOf(key);
+    picked = picked.filter((k) => k !== key);
+    renderPicked();
+    ($$("#c-picked li")[Math.min(i, picked.length - 1)] || $("#c-search")).focus();
+  }, `Remove ${key}`));
   li.onkeydown = (e) => {
     if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
     e.preventDefault();
@@ -1147,6 +1159,7 @@ function renderPicked() {
 let dragKey = null;
 $("#c-picked").addEventListener("dragstart", (e) => { dragKey = e.target.closest("li")?.dataset.key ?? null; });
 $("#c-picked").addEventListener("dragover", (e) => { if (dragKey) e.preventDefault(); });
+$("#c-picked").addEventListener("dragend", () => { dragKey = null; });
 $("#c-picked").addEventListener("drop", (e) => {
   e.preventDefault();
   const over = e.target.closest("li")?.dataset.key;
@@ -1212,7 +1225,7 @@ $("#c-search").oninput = () => { optIndex = 0; renderOptions(); };
 $("#c-search").onblur = closeOptions;
 $("#c-search").onkeydown = (e) => {
   if (e.key === "Escape") { closeOptions(); return; }
-  if ($("#c-options").hidden && e.key !== "Enter") { if (e.key === "ArrowDown") renderOptions(); return; }
+  if ($("#c-options").hidden) { if (e.key === "ArrowDown") renderOptions(); return; }
   const found = matches();
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
@@ -1227,12 +1240,12 @@ $("#c-form-model").onchange = renderPicked;
 
 function openClassifierForm(key = null) {
   cEditing = key;
-  const c = key ? classifiers[key] : { questions: [] };
+  const c = key ? classifiers[key] : {};
   $("#c-form-title").textContent = key ? "Edit classifier" : "New classifier";
   $("#c-key").value = key || "";
   $("#c-key").readOnly = !!key;
-  picked = [...c.questions];
-  fillClassifierModel(c.model || "");
+  picked = keysOf(c);
+  fillClassifierModel(typeof c.model === "string" ? c.model : "");
   renderPicked();
   $("#c-delete").hidden = !key;
   $("#c-try-state").value = $("#pg-state").value;

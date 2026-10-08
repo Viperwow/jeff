@@ -1649,7 +1649,8 @@ fn ask_request(
         }
         (None, None) => None,
     };
-    if args.classifier.is_some() {
+    if let Some(key) = &args.classifier {
+        questions::check_key(key).map_err(|e| format!("classifier '{key}': {e}"))?;
         let mut body = json!({ "state": state });
         if let Some(m) = &args.model {
             body["model"] = json!(m);
@@ -1829,7 +1830,7 @@ fn run_classifiers(action: ClassifiersAction, path: &str) {
             c["model"] = json!(m);
         }
         for k in classifiers::skipped(&c, &config.questions) {
-            eprintln!("question '{k}' is not saved; the classifier skips it");
+            eprintln!("{}", classifiers::skip_reason(&k, &config.questions));
         }
         c
     };
@@ -2632,6 +2633,9 @@ triage	p/m	a, gone (deleted)
         assert!(ask_args(&["u", "--classifier", "triage", "--state", "s"]).is_err());
         assert!(ask_args(&["--classifier", "t", "--questions", "{}", "--state", "s"]).is_err());
         assert!(ask_args(&["--classifier", "t", "--request", "-"]).is_err());
+        let args = ask_args(&["--classifier", "a/b", "--state", "s"]).unwrap();
+        let e = ask_request(&args, stdin_is("")).unwrap_err();
+        assert!(e.contains("classifier 'a/b'"), "{e}");
         assert_eq!(
             ask_target(&ask_args(&["u", "--state", "s"]).unwrap()),
             "/v1/systemone"

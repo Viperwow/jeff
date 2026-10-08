@@ -87,6 +87,15 @@ pub fn skipped(c: &Value, saved: &Questions) -> Vec<String> {
         .collect()
 }
 
+pub fn skip_reason(key: &str, saved: &Questions) -> String {
+    let why = if saved.contains_key(key) {
+        "is invalid"
+    } else {
+        "is not saved"
+    };
+    format!("question '{key}' {why}; the classifier skips it")
+}
+
 /// Turns a classifier into the `questions` input of `/v1/systemone`, with the keys it skips. The override goes
 /// into the request only; the saved questions keep their own model.
 pub fn resolve(key: &str, c: &Value, saved: &Questions) -> Result<(Value, Vec<String>), String> {
@@ -188,6 +197,19 @@ mod tests {
     fn resolve_needs_one_working_question() {
         let e = resolve("c", &json!({"questions": ["gone"]}), &Questions::new()).unwrap_err();
         assert_eq!(e, "classifier 'c' has no working questions");
+    }
+
+    #[test]
+    fn skip_reason_tells_missing_from_invalid() {
+        let saved = qs(json!({"bad": {"type": "maybe", "instructions": "x"}}));
+        assert_eq!(
+            skip_reason("gone", &saved),
+            "question 'gone' is not saved; the classifier skips it"
+        );
+        assert_eq!(
+            skip_reason("bad", &saved),
+            "question 'bad' is invalid; the classifier skips it"
+        );
     }
 
     #[test]
