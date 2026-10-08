@@ -154,6 +154,8 @@ jeff ask urgent --questions refund.json --state-file ticket.txt
 jeff ask urgent --questions '{"urgent": {"model": "clm/clm-raw"}}' --state "..."
 ```
 
+Windows PowerShell 5.1 strips the inner quotes from JSON passed to a program, so there put the JSON in a file and pass its path.
+
 `jeff ask` calls `http://127.0.0.1:8080` unless `--url` or `JEFF_URL` says otherwise, and sends `JEFF_API_KEY` as its key. A custom question is saved only by `jeff questions add`, the admin page or `POST /api/questions`.
 
 A question may name its own `model`. It goes to that model, and the others go to the request's `model` or the default model. jeff sends one call per model, at most 8 per request, and merges the answers into one response. `x-jeff-provider` then lists every provider that answered.
@@ -272,7 +274,7 @@ jeff remove clm          stop and remove the CLM containers; the weights stay
 jeff keys list           list keys without showing them
 jeff keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|never]
 jeff keys revoke ID
-jeff ask [KEY...] --state TEXT [--questions JSON|FILE] [--model MODEL] [--url URL]
+jeff ask [KEY...] (--state TEXT | --state-file FILE) [--questions JSON|FILE] [--model MODEL] [--url URL]
                          ask through a running jeff and print the answer JSON
 jeff questions list      list saved questions
 jeff questions get KEY   print one saved question as JSON
