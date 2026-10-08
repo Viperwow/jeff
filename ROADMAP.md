@@ -46,5 +46,6 @@ Build on Jeff's existing Jev-compatible discovery and request forwarding, using 
 
 - [ ] **Admin page sign-in.** A way to enter a key in a browser that did not create it.
 - [ ] **Recent unsaved questions.** List questions asked through Try, `jeff ask` or inline `/v1/systemone` maps but not saved, newest first, so a good question can be saved or used as a template in one click instead of typed again.
+- [ ] **Streaming mode.** Deliver each model's answers as they arrive, through the API and `jeff ask`, instead of waiting for the slowest model.
 - [ ] **Uninstall confirmation.** The two-click confirmation used by Revoke, for CLM Uninstall.
 - [ ] **CLM quality.** Measure FP8 against bf16, for example on the "app crashes" ticket that CLM routes to sales.
