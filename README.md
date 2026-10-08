@@ -256,6 +256,11 @@ jeff remove clm          stop and remove the CLM containers; the weights stay
 jeff keys list           list keys without showing them
 jeff keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|never]
 jeff keys revoke ID
+jeff questions list      list saved questions
+jeff questions get KEY   print one saved question as JSON
+jeff questions add FILE  save new questions from a JSON map of key to question; `-` reads stdin
+jeff questions update KEY FILE
+jeff questions remove KEY
 ```
 
 Add `--help` to any command for details.

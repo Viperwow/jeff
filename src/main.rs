@@ -830,10 +830,6 @@ async fn revoke_key(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
     StatusCode::NO_CONTENT.into_response()
 }
 
-fn unknown_question(key: &str) -> (StatusCode, String) {
-    (StatusCode::NOT_FOUND, format!("unknown question '{key}'"))
-}
-
 async fn list_questions(State(app): State<Arc<App>>) -> Json<questions::Questions> {
     Json(app.config.read().await.questions.clone())
 }
@@ -841,21 +837,22 @@ async fn list_questions(State(app): State<Arc<App>>) -> Json<questions::Question
 async fn get_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
     match app.config.read().await.questions.get(&key) {
         Some(q) => Json(q.clone()).into_response(),
-        None => {
-            let (status, msg) = unknown_question(&key);
-            error(status, msg)
-        }
+        None => error(StatusCode::NOT_FOUND, format!("unknown question '{key}'")),
     }
 }
 
 /// Applies `change` to a copy of the saved questions and saves it; an `Err` leaves both file and memory as they were.
 async fn change_questions(
     app: &App,
-    change: impl FnOnce(&mut questions::Questions) -> Result<(), (StatusCode, String)>,
+    change: impl FnOnce(&mut questions::Questions) -> Result<(), questions::Change>,
 ) -> Result<questions::Questions, Response> {
     let mut config = app.config.write().await;
     let mut next = config.clone();
-    change(&mut next.questions).map_err(|(status, msg)| error(status, msg))?;
+    change(&mut next.questions).map_err(|c| match c {
+        questions::Change::NotFound(m) => error(StatusCode::NOT_FOUND, m),
+        questions::Change::Exists(m) => error(StatusCode::CONFLICT, m),
+        questions::Change::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
+    })?;
     app.save(&next)
         .await
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -867,21 +864,7 @@ async fn create_questions(
     State(app): State<Arc<App>>,
     Json(input): Json<questions::Questions>,
 ) -> Response {
-    if let Err(e) = questions::validate_all(&input) {
-        return error(StatusCode::BAD_REQUEST, e);
-    }
-    let saved = change_questions(&app, |qs| {
-        if let Some(key) = input.keys().find(|k| qs.contains_key(*k)) {
-            return Err((
-                StatusCode::CONFLICT,
-                format!("question '{key}' already exists"),
-            ));
-        }
-        qs.extend(input);
-        Ok(())
-    })
-    .await;
-    match saved {
+    match change_questions(&app, |qs| questions::create(qs, input)).await {
         Ok(qs) => (StatusCode::CREATED, Json(qs)).into_response(),
         Err(r) => r,
     }
@@ -892,30 +875,14 @@ async fn update_question(
     Path(key): Path<String>,
     Json(q): Json<Value>,
 ) -> Response {
-    if let Err(e) = questions::validate(&key, &q) {
-        return error(StatusCode::BAD_REQUEST, e);
-    }
-    let saved = change_questions(&app, |qs| match qs.get_mut(&key) {
-        Some(old) => {
-            *old = q;
-            Ok(())
-        }
-        None => Err(unknown_question(&key)),
-    })
-    .await;
-    match saved {
+    match change_questions(&app, |qs| questions::update(qs, &key, q)).await {
         Ok(qs) => Json(qs[&key].clone()).into_response(),
         Err(r) => r,
     }
 }
 
 async fn delete_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
-    let saved = change_questions(&app, |qs| match qs.remove(&key) {
-        Some(_) => Ok(()),
-        None => Err(unknown_question(&key)),
-    })
-    .await;
-    match saved {
+    match change_questions(&app, |qs| questions::remove(qs, &key)).await {
         Ok(qs) => Json(qs).into_response(),
         Err(r) => r,
     }
@@ -1164,6 +1131,35 @@ enum Command {
         #[arg(long, env = "JEFF_CONFIG", global = true)]
         config: Option<String>,
     },
+    /// Manage saved questions in the config file; a running server picks changes up on the next request
+    Questions {
+        #[command(subcommand)]
+        action: QuestionsAction,
+        /// The config file [default: ~/.jeff/jeff.json]
+        #[arg(long, env = "JEFF_CONFIG", global = true)]
+        config: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum QuestionsAction {
+    /// List saved questions: key, type, model and instructions
+    List,
+    /// Print one saved question as JSON
+    Get { key: String },
+    /// Save new questions from a JSON map of key to question; an existing key fails and saves nothing
+    Add {
+        /// A JSON file, or `-` for stdin
+        file: String,
+    },
+    /// Replace one saved question with the JSON question in a file
+    Update {
+        key: String,
+        /// A JSON file, or `-` for stdin
+        file: String,
+    },
+    /// Delete one saved question
+    Remove { key: String },
 }
 
 #[derive(Subcommand)]
@@ -1254,6 +1250,9 @@ async fn main() {
         }
         Some(Command::Remove { stack: Stack::Clm }) => return run_install(install::Action::Remove),
         Some(Command::Keys { action, config }) => return run_keys(action, &config_file(config)),
+        Some(Command::Questions { action, config }) => {
+            return run_questions(action, &config_file(config));
+        }
     };
     serve(args).await;
 }
@@ -1265,6 +1264,77 @@ fn config_file(arg: Option<String>) -> String {
             .to_string_lossy()
             .into_owned()
     })
+}
+
+/// Reads a whole file, or stdin for `-`.
+fn read_input(file: &str) -> Result<String, String> {
+    if file == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .map_err(|e| e.to_string())?;
+        Ok(text)
+    } else {
+        fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))
+    }
+}
+
+fn run_questions(action: QuestionsAction, path: &str) {
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1)
+    };
+    let mut config = load_config(path).unwrap_or_else(|e| fail(e));
+    let json = |file: &str| -> Value {
+        let text = read_input(file).unwrap_or_else(|e| fail(e));
+        serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{file}: {e}")))
+    };
+    let refused = |c: questions::Change| -> ! {
+        match c {
+            questions::Change::NotFound(m)
+            | questions::Change::Exists(m)
+            | questions::Change::Invalid(m) => fail(m),
+        }
+    };
+    match action {
+        QuestionsAction::List => {
+            if config.questions.is_empty() {
+                println!("no questions in {path}");
+            }
+            for (key, q) in &config.questions {
+                let field = |f: &str| q.get(f).and_then(Value::as_str).unwrap_or("-").to_owned();
+                println!(
+                    "{key:<24} {:<6} {:<24} {}",
+                    field("type"),
+                    field("model"),
+                    field("instructions")
+                );
+            }
+        }
+        QuestionsAction::Get { key } => match config.questions.get(&key) {
+            Some(q) => println!("{}", serde_json::to_string_pretty(q).unwrap()),
+            None => fail(format!("unknown question '{key}'")),
+        },
+        QuestionsAction::Add { file } => {
+            let Value::Object(input) = json(&file) else {
+                fail(format!("{file}: expected a JSON map of key to question"));
+            };
+            let keys: Vec<_> = input.keys().cloned().collect();
+            questions::create(&mut config.questions, input).unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("added {}", keys.join(", "));
+        }
+        QuestionsAction::Update { key, file } => {
+            questions::update(&mut config.questions, &key, json(&file))
+                .unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("updated {key}");
+        }
+        QuestionsAction::Remove { key } => {
+            questions::remove(&mut config.questions, &key).unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("removed {key}");
+        }
+    }
 }
 
 fn run_keys(action: KeysAction, path: &str) {

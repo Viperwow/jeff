@@ -64,6 +64,39 @@ pub fn validate_all(input: &Questions) -> Result<(), String> {
     input.iter().try_for_each(|(k, q)| validate(k, q))
 }
 
+/// Why a change to the saved questions was refused; each carries the message for the user.
+#[derive(Debug, PartialEq)]
+pub enum Change {
+    NotFound(String),
+    Exists(String),
+    Invalid(String),
+}
+
+fn not_found(key: &str) -> Change {
+    Change::NotFound(format!("unknown question '{key}'"))
+}
+
+/// Adds new questions; one invalid or existing key refuses them all.
+pub fn create(saved: &mut Questions, input: Questions) -> Result<(), Change> {
+    validate_all(&input).map_err(Change::Invalid)?;
+    if let Some(key) = input.keys().find(|k| saved.contains_key(*k)) {
+        return Err(Change::Exists(format!("question '{key}' already exists")));
+    }
+    saved.extend(input);
+    Ok(())
+}
+
+pub fn update(saved: &mut Questions, key: &str, q: Value) -> Result<(), Change> {
+    validate(key, &q).map_err(Change::Invalid)?;
+    let old = saved.get_mut(key).ok_or_else(|| not_found(key))?;
+    *old = q;
+    Ok(())
+}
+
+pub fn remove(saved: &mut Questions, key: &str) -> Result<(), Change> {
+    saved.remove(key).map(|_| ()).ok_or_else(|| not_found(key))
+}
+
 /// Turns the request's `questions` into a map of full questions: an array names saved questions, and a map entry
 /// without `type` overrides a saved one.
 pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
@@ -375,6 +408,41 @@ mod tests {
             merged["usage"],
             json!({"input_tokens": 15, "details": {"cached": 1}, "unit": "tok", "cost": 0.5, "note": "x"})
         );
+    }
+
+    #[test]
+    fn create_rejects_existing_and_invalid() {
+        let mut saved = map(json!({"u": {"type": "noul", "instructions": "x"}}));
+        let before = saved.clone();
+        let fresh = json!({"type": "noul", "instructions": "y"});
+        assert_eq!(
+            create(&mut saved, map(json!({"v": fresh, "u": fresh}))).unwrap_err(),
+            Change::Exists("question 'u' already exists".into())
+        );
+        assert!(matches!(
+            create(&mut saved, map(json!({"a b": fresh}))),
+            Err(Change::Invalid(_))
+        ));
+        assert_eq!(saved, before);
+        create(&mut saved, map(json!({"v": fresh}))).unwrap();
+        assert_eq!(saved["v"], fresh);
+    }
+
+    #[test]
+    fn update_and_remove_need_existing_key() {
+        let mut saved = map(json!({"u": {"type": "noul", "instructions": "x"}}));
+        let q = json!({"type": "noul", "instructions": "y"});
+        let missing = Change::NotFound("unknown question 'nope'".into());
+        assert_eq!(update(&mut saved, "nope", q.clone()).unwrap_err(), missing);
+        assert!(matches!(
+            update(&mut saved, "u", json!({"type": "noul"})),
+            Err(Change::Invalid(_))
+        ));
+        update(&mut saved, "u", q.clone()).unwrap();
+        assert_eq!(saved["u"], q);
+        assert_eq!(remove(&mut saved, "nope").unwrap_err(), missing);
+        remove(&mut saved, "u").unwrap();
+        assert!(saved.is_empty());
     }
 
     #[test]
