@@ -1,5 +1,6 @@
 mod install;
 mod keys;
+mod questions;
 
 use axum::{
     Json, Router,
@@ -11,7 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use futures_util::future::join_all;
+use futures_util::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -20,7 +21,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -39,6 +40,22 @@ struct Provider {
     /// Names a local stack jeff can install, such as "clm".
     #[serde(default)]
     installer: Option<String>,
+    /// Seconds jeff waits to connect [default: 10].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connect_timeout: Option<u64>,
+    /// Seconds jeff waits for an answer to `/v1/systemone` [default: 60].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_time: Option<u64>,
+}
+
+impl Provider {
+    fn connect_secs(&self) -> u64 {
+        self.connect_timeout.filter(|s| *s > 0).unwrap_or(10)
+    }
+
+    fn max_secs(&self) -> u64 {
+        self.max_time.filter(|s| *s > 0).unwrap_or(60)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -48,6 +65,8 @@ struct Config {
     /// jeff access keys, hashed.
     #[serde(default)]
     keys: Vec<keys::StoredKey>,
+    #[serde(default)]
+    questions: questions::Questions,
 }
 
 impl Default for Config {
@@ -64,6 +83,8 @@ impl Default for Config {
                     key: key("CLM_API_KEY"),
                     models: vec!["clm-latest".into()],
                     installer: Some("clm".into()),
+                    connect_timeout: None,
+                    max_time: None,
                 },
                 Provider {
                     id: "typesafe".into(),
@@ -72,9 +93,12 @@ impl Default for Config {
                     key: key("TYPESAFE_API_KEY"),
                     models: vec!["jev-latest".into()],
                     installer: None,
+                    connect_timeout: None,
+                    max_time: None,
                 },
             ],
             keys: Vec::new(),
+            questions: questions::Questions::new(),
         }
     }
 }
@@ -82,6 +106,16 @@ impl Default for Config {
 /// A missing file gives the defaults. A broken one is an error: falling back would drop every access key and
 /// open jeff to anyone.
 fn load_config(path: &str) -> Result<Config, String> {
+    let config = read_config(path)?;
+    for (key, q) in &config.questions {
+        questions::validate(key, q).map_err(|e| format!("{path}: {e}"))?;
+    }
+    Ok(config)
+}
+
+/// Parses the config without checking saved questions, so the CLI can still revoke a key or remove the broken
+/// question from a config that `serve` refuses.
+fn read_config(path: &str) -> Result<Config, String> {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {e}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
@@ -121,7 +155,8 @@ fn modified(path: &str) -> Option<SystemTime> {
 }
 
 struct App {
-    http: reqwest::Client,
+    /// HTTP clients by connect timeout in seconds; reqwest sets that timeout per client, not per request.
+    clients: Mutex<HashMap<u64, reqwest::Client>>,
     config: RwLock<Config>,
     config_path: String,
     /// Model lists last fetched from each provider, keyed by provider id.
@@ -153,17 +188,20 @@ const MIN_STATIC_KEY_LEN: usize = 32;
 /// The largest request body jeff accepts.
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
-async fn read_capped(mut resp: reqwest::Response) -> Result<Vec<u8>, String> {
+enum ReadError {
+    TooLarge,
+    Failed(reqwest::Error),
+}
+
+/// Reads a response while `total`, shared by every call of one request, stays within `MAX_UPSTREAM_BYTES`.
+async fn read_capped(
+    mut resp: reqwest::Response,
+    total: &AtomicUsize,
+) -> Result<Vec<u8>, ReadError> {
     let mut body = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| e.without_url().to_string())?
-    {
-        if body.len() + chunk.len() > MAX_UPSTREAM_BYTES {
-            return Err(format!(
-                "response is larger than {MAX_UPSTREAM_BYTES} bytes"
-            ));
+    while let Some(chunk) = resp.chunk().await.map_err(ReadError::Failed)? {
+        if total.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len() > MAX_UPSTREAM_BYTES {
+            return Err(ReadError::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
@@ -260,13 +298,21 @@ impl reqwest::dns::Resolve for GuardedResolver {
 }
 
 impl App {
-    /// A broken file keeps the config in memory, so the access keys stay in force until the file is fixed.
+    /// A file that does not parse keeps the config in memory, so the access keys stay in force until it is fixed.
+    /// An invalid question does not block the reload: a key revoked meanwhile must stop working.
     async fn refresh_from_disk(&self) {
         let now = modified(&self.config_path);
         let seen = *self.config_mtime.lock().unwrap();
         if now.is_some() && now != seen {
-            match load_config(&self.config_path) {
-                Ok(config) => *self.config.write().await = config,
+            match read_config(&self.config_path) {
+                Ok(config) => {
+                    for (key, q) in &config.questions {
+                        if let Err(e) = questions::validate(key, q) {
+                            eprintln!("{}: {e}; it cannot be asked until fixed", self.config_path);
+                        }
+                    }
+                    *self.config.write().await = config;
+                }
                 Err(e) => eprintln!("{e}; keeping the config loaded before"),
             }
             *self.config_mtime.lock().unwrap() = now;
@@ -313,6 +359,16 @@ fn resolve(
         .map(|p| (p.clone(), model.to_owned()))
 }
 
+fn http_client(connect_secs: u64, allow_private: bool) -> reqwest::Client {
+    // A provider that redirects could send the provider key on to a host jeff never checked.
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(connect_secs))
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(GuardedResolver { allow_private })
+        .build()
+        .expect("HTTP client")
+}
+
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({ "error": msg.into() }))).into_response()
 }
@@ -323,13 +379,148 @@ fn request(
     method: reqwest::Method,
     path: &str,
 ) -> reqwest::RequestBuilder {
-    let req = app
-        .http
-        .request(method, format!("{}{path}", p.url.trim_end_matches('/')));
+    let client = app
+        .clients
+        .lock()
+        .unwrap()
+        .entry(p.connect_secs())
+        .or_insert_with(|| http_client(p.connect_secs(), app.allow_private))
+        .clone();
+    let req = client.request(method, format!("{}{path}", p.url.trim_end_matches('/')));
     match &p.key {
         Some(key) => req.bearer_auth(key),
         None => req,
     }
+}
+
+/// One provider's answer to `/v1/systemone`, before it becomes a response.
+struct Upstream {
+    provider: String,
+    ms: u64,
+    status: StatusCode,
+    bytes: Vec<u8>,
+}
+
+impl Upstream {
+    fn reply(self) -> Response {
+        let mut res = (
+            self.status,
+            [(header::CONTENT_TYPE, "application/json")],
+            self.bytes,
+        )
+            .into_response();
+        let headers = res.headers_mut();
+        if let Ok(v) = HeaderValue::from_str(&self.provider) {
+            headers.insert("x-jeff-provider", v);
+        }
+        headers.insert("x-jeff-upstream-ms", HeaderValue::from(self.ms));
+        res
+    }
+}
+
+/// Finds the provider and its model name for `model`. A bare name refreshes the model lists unless `refreshed`
+/// says this request already did.
+async fn find_model(
+    app: &App,
+    config: &Config,
+    model: &str,
+    refreshed: &mut bool,
+) -> Result<(Provider, String), (StatusCode, String)> {
+    let mut found = resolve(config, &*app.listed.read().await, model);
+    if found.is_none() && !model.contains('/') && !*refreshed {
+        refresh_models(app, config).await;
+        *refreshed = true;
+        found = resolve(config, &*app.listed.read().await, model);
+    }
+    found.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unknown model '{model}': use provider/model, for example {}",
+                config.default_model
+            ),
+        )
+    })
+}
+
+/// Sends `body` to provider `p` as `upstream_model`; the error is the status and message for the client.
+async fn forward(
+    app: &App,
+    p: Provider,
+    upstream_model: String,
+    mut body: Value,
+    total: &AtomicUsize,
+) -> Result<Upstream, (StatusCode, String)> {
+    body["model"] = Value::String(upstream_model);
+
+    let t0 = Instant::now();
+    let max = p.max_secs();
+    let upstream = request(app, &p, reqwest::Method::POST, "/v1/systemone")
+        .json(&body)
+        .timeout(Duration::from_secs(max));
+    let late = || {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!("provider '{}' did not answer within {max}s", p.id),
+        )
+    };
+    // Clients get the provider id only; the provider URL and the transport error stay in the server log.
+    let resp = upstream.send().await.map_err(|e| {
+        // A connect timeout is a timeout too, but it means the provider is unreachable.
+        let timed_out = e.is_timeout() && !e.is_connect();
+        eprintln!("provider {}: {}", p.id, e.without_url());
+        if timed_out {
+            late()
+        } else {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("provider '{}' is unreachable", p.id),
+            )
+        }
+    })?;
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let bytes = read_capped(resp, total).await.map_err(|e| match e {
+        ReadError::TooLarge => (
+            StatusCode::BAD_GATEWAY,
+            format!("the answer is larger than {} MB", MAX_UPSTREAM_BYTES >> 20),
+        ),
+        ReadError::Failed(e) if e.is_timeout() => late(),
+        ReadError::Failed(e) => {
+            eprintln!("provider {}: {}", p.id, e.without_url());
+            unreadable(&p.id)
+        }
+    })?;
+    Ok(Upstream {
+        provider: p.id,
+        ms: t0.elapsed().as_millis() as u64,
+        status,
+        bytes,
+    })
+}
+
+type Batch = (Provider, String, Option<questions::Questions>);
+
+/// Groups whose models resolve to the same provider and model become one call.
+fn batch(resolved: Vec<Batch>) -> Vec<Batch> {
+    let mut out: Vec<Batch> = Vec::new();
+    for (p, model, qs) in resolved {
+        match out.iter_mut().find(|(q, m, _)| q.id == p.id && *m == model) {
+            Some((_, _, all)) => {
+                if let (Some(all), Some(qs)) = (all, qs) {
+                    all.extend(qs);
+                }
+            }
+            None => out.push((p, model, qs)),
+        }
+    }
+    out
+}
+
+fn unreadable(provider: &str) -> (StatusCode, String) {
+    (
+        StatusCode::BAD_GATEWAY,
+        format!("provider '{provider}' sent an unreadable response"),
+    )
 }
 
 async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> Response {
@@ -345,60 +536,66 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
         .and_then(Value::as_str)
         .unwrap_or(&config.default_model)
         .to_owned();
-    let mut found = resolve(&config, &*app.listed.read().await, &model);
-    if found.is_none() && !model.contains('/') {
-        refresh_models(&app, &config).await;
-        found = resolve(&config, &*app.listed.read().await, &model);
-    }
-    let Some((p, upstream_model)) = found else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "unknown model '{model}': use provider/model, for example {}",
-                config.default_model
-            ),
-        );
+    let groups = match obj.get("questions") {
+        // The provider reports a missing `questions` itself.
+        None => vec![(model, None)],
+        Some(input) => match questions::expand(input, &config.questions)
+            .and_then(|qs| questions::group(qs, &model))
+        {
+            Ok(groups) => groups.into_iter().map(|(m, qs)| (m, Some(qs))).collect(),
+            Err(e) => return error(StatusCode::BAD_REQUEST, e),
+        },
     };
-    obj.insert("model".into(), Value::String(upstream_model));
-
-    let t0 = Instant::now();
-    let upstream = request(&app, &p, reqwest::Method::POST, "/v1/systemone")
-        .json(&body)
-        .timeout(Duration::from_secs(120));
-    // Clients get the provider id only; the provider URL and the transport error stay in the server log.
-    let resp = match upstream.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("provider {}: {}", p.id, e.without_url());
-            return error(
-                StatusCode::BAD_GATEWAY,
-                format!("provider '{}' is unreachable", p.id),
-            );
+    // Every model resolves before any call, so a request bound to fail costs no provider anything.
+    let mut refreshed = false;
+    let mut resolved = Vec::new();
+    for (model, qs) in groups {
+        match find_model(&app, &config, &model, &mut refreshed).await {
+            Ok((p, upstream_model)) => resolved.push((p, upstream_model, qs)),
+            Err((status, msg)) => return error(status, msg),
         }
-    };
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    match read_capped(resp).await {
-        Ok(bytes) => {
-            let mut res =
-                (status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response();
-            let headers = res.headers_mut();
-            if let Ok(v) = HeaderValue::from_str(&p.id) {
-                headers.insert("x-jeff-provider", v);
+    }
+    let total = AtomicUsize::new(0);
+    let calls = batch(resolved).into_iter().map(|(p, upstream_model, qs)| {
+        let mut body = body.clone();
+        if let Some(qs) = qs {
+            body["questions"] = Value::Object(qs);
+        }
+        let (app, total) = (&app, &total);
+        async move {
+            match forward(app, p, upstream_model, body, total).await {
+                Ok(u) if u.status.is_success() => Ok(u),
+                Ok(u) => Err(u.reply()),
+                Err((status, msg)) => Err(error(status, msg)),
             }
-            headers.insert(
-                "x-jeff-upstream-ms",
-                HeaderValue::from(t0.elapsed().as_millis() as u64),
-            );
-            res
         }
-        Err(e) => {
-            eprintln!("provider {}: {e}", p.id);
-            error(
-                StatusCode::BAD_GATEWAY,
-                format!("provider '{}' sent an unreadable response", p.id),
-            )
+    });
+    // The first failure answers the request and drops the calls still running.
+    let mut parts = match try_join_all(calls).await {
+        Ok(parts) => parts,
+        Err(res) => return res,
+    };
+    if parts.len() == 1 {
+        return parts.pop().unwrap().reply();
+    }
+    let mut answers = Vec::new();
+    for u in &parts {
+        match serde_json::from_slice(&u.bytes) {
+            Ok(v) => answers.push(v),
+            Err(_) => {
+                let (status, msg) = unreadable(&u.provider);
+                return error(status, msg);
+            }
         }
     }
+    let providers: Vec<_> = parts.iter().map(|u| u.provider.as_str()).collect();
+    Upstream {
+        provider: providers.join(", "),
+        ms: parts.iter().map(|u| u.ms).max().unwrap_or(0),
+        status: StatusCode::OK,
+        bytes: serde_json::to_vec(&questions::merge(answers)).unwrap(),
+    }
+    .reply()
 }
 
 /// Lists one provider's models. A provider without `GET /v1/models` falls back to its configured list.
@@ -727,11 +924,71 @@ async fn revoke_key(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
     StatusCode::NO_CONTENT.into_response()
 }
 
+async fn list_questions(State(app): State<Arc<App>>) -> Json<questions::Questions> {
+    Json(app.config.read().await.questions.clone())
+}
+
+async fn get_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    match app.config.read().await.questions.get(&key) {
+        Some(q) => Json(q.clone()).into_response(),
+        None => error(StatusCode::NOT_FOUND, format!("unknown question '{key}'")),
+    }
+}
+
+/// Applies `change` to a copy of the saved questions and saves it; an `Err` leaves both file and memory as they were.
+async fn change_questions(
+    app: &App,
+    change: impl FnOnce(&mut questions::Questions) -> Result<(), questions::Change>,
+) -> Result<questions::Questions, Box<Response>> {
+    let mut config = app.config.write().await;
+    let mut next = config.clone();
+    change(&mut next.questions).map_err(|c| {
+        Box::new(match c {
+            questions::Change::NotFound(m) => error(StatusCode::NOT_FOUND, m),
+            questions::Change::Exists(m) => error(StatusCode::CONFLICT, m),
+            questions::Change::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
+        })
+    })?;
+    app.save(&next)
+        .await
+        .map_err(|e| Box::new(error(StatusCode::INTERNAL_SERVER_ERROR, e)))?;
+    *config = next;
+    Ok(config.questions.clone())
+}
+
+async fn create_questions(
+    State(app): State<Arc<App>>,
+    Json(input): Json<questions::Questions>,
+) -> Response {
+    match change_questions(&app, |qs| questions::create(qs, input)).await {
+        Ok(qs) => (StatusCode::CREATED, Json(qs)).into_response(),
+        Err(r) => *r,
+    }
+}
+
+async fn update_question(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+    Json(q): Json<Value>,
+) -> Response {
+    match change_questions(&app, |qs| questions::update(qs, &key, q)).await {
+        Ok(qs) => Json(qs[&key].clone()).into_response(),
+        Err(r) => *r,
+    }
+}
+
+async fn delete_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    match change_questions(&app, |qs| questions::remove(qs, &key)).await {
+        Ok(qs) => Json(qs).into_response(),
+        Err(r) => *r,
+    }
+}
+
 async fn get_config(State(app): State<Arc<App>>) -> Json<Value> {
     Json(public(&*app.config.read().await))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ProviderInput {
     id: String,
     name: String,
@@ -742,9 +999,15 @@ struct ProviderInput {
     models: Vec<String>,
     #[serde(default)]
     installer: Option<String>,
+    /// Absent keeps the stored value for this id; the admin page does not send it.
+    #[serde(default)]
+    connect_timeout: Option<u64>,
+    /// Absent keeps the stored value for this id; the admin page does not send it.
+    #[serde(default)]
+    max_time: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ConfigInput {
     default_model: String,
     providers: Vec<ProviderInput>,
@@ -793,7 +1056,15 @@ fn build_config(
         let name = Some(p.name.trim().to_owned())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| id.clone());
+        if p.connect_timeout == Some(0) || p.max_time == Some(0) {
+            return Err(format!(
+                "{id}: connect_timeout and max_time must be at least 1 second"
+            ));
+        }
+        let stored = current.providers.iter().find(|q| q.id == id);
         providers.push(Provider {
+            connect_timeout: p.connect_timeout.or(stored.and_then(|q| q.connect_timeout)),
+            max_time: p.max_time.or(stored.and_then(|q| q.max_time)),
             id,
             name,
             url,
@@ -813,6 +1084,7 @@ fn build_config(
         default_model,
         providers,
         keys: current.keys.clone(),
+        questions: current.questions.clone(),
     })
 }
 
@@ -836,10 +1108,11 @@ async fn check_provider_hosts(providers: &[Provider], allow_private: bool) -> Re
     Ok(())
 }
 
+/// Keys and questions have their own endpoints; a provider save built from an older snapshot must not undo them.
 async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>) -> Response {
     // The DNS checks run without the lock, so a slow resolver does not stall every request meanwhile.
     let snapshot = app.config.read().await.clone();
-    let next = match build_config(&snapshot, input, app.allow_private) {
+    let next = match build_config(&snapshot, input.clone(), app.allow_private) {
         Ok(c) => c,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -847,9 +1120,10 @@ async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>)
         return error(StatusCode::BAD_REQUEST, e);
     }
     let mut config = app.config.write().await;
-    let next = Config {
-        keys: config.keys.clone(),
-        ..next
+    // Built again on the live config: what the UI does not send, such as keys or timeouts, may have changed meanwhile.
+    let next = match build_config(&config, input, app.allow_private) {
+        Ok(c) => c,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     if let Err(e) = app.save(&next).await {
         return error(StatusCode::INTERNAL_SERVER_ERROR, e);
@@ -963,6 +1237,87 @@ enum Command {
         #[arg(long, env = "JEFF_CONFIG", global = true)]
         config: Option<String>,
     },
+    /// Ask saved or custom questions through a running jeff and print the answer JSON
+    Ask(AskArgs),
+    /// Manage saved questions in the config file; a running server picks changes up on the next request
+    Questions {
+        #[command(subcommand)]
+        action: QuestionsAction,
+        /// The config file [default: ~/.jeff/jeff.json]
+        #[arg(long, env = "JEFF_CONFIG", global = true)]
+        config: Option<String>,
+    },
+}
+
+#[derive(Args)]
+struct AskArgs {
+    /// Saved questions to ask, by key
+    #[arg(conflicts_with = "request")]
+    keys: Vec<String>,
+    /// The text the questions are about
+    #[arg(
+        long,
+        conflicts_with_all = ["state_file", "request"],
+        required_unless_present_any = ["state_file", "request"]
+    )]
+    state: Option<String>,
+    /// Read the state from a file, or `-` for stdin
+    #[arg(long, conflicts_with = "request")]
+    state_file: Option<String>,
+    /// A JSON map of key to question; an entry without `type` overrides that saved question
+    #[arg(long, conflicts_with_all = ["questions_file", "request"])]
+    questions: Option<String>,
+    /// Read the --questions map from a file, or `-` for stdin
+    #[arg(long, conflicts_with = "request")]
+    questions_file: Option<String>,
+    /// A whole /v1/systemone body with `state` and `questions`, from a file or `-` for stdin
+    #[arg(long)]
+    request: Option<String>,
+    /// The model for questions without their own; it replaces the `model` of --request
+    #[arg(long)]
+    model: Option<String>,
+    /// The jeff API to ask
+    #[arg(long, env = "JEFF_URL", default_value = "http://127.0.0.1:8080", value_parser = parse_url)]
+    url: String,
+    /// Seconds to wait for the connection to jeff
+    #[arg(long, default_value_t = 5)]
+    connect_timeout: u64,
+    /// Seconds to wait for the whole answer
+    #[arg(long, default_value_t = 60)]
+    max_time: u64,
+    /// Write the answer JSON to this file instead of printing it
+    #[arg(short, long)]
+    output: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum QuestionsAction {
+    /// List saved questions: key, type, model and instructions
+    List {
+        /// Write the questions as JSON to this file instead
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Print one saved question as JSON
+    Get {
+        key: String,
+        /// Write the question JSON to this file instead of printing it
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Save new questions from a JSON map of key to question; an existing key fails and saves nothing
+    Add {
+        /// A JSON file, or `-` for stdin
+        file: String,
+    },
+    /// Replace one saved question with the JSON question in a file
+    Update {
+        key: String,
+        /// A JSON file, or `-` for stdin
+        file: String,
+    },
+    /// Delete one saved question
+    Remove { key: String },
 }
 
 #[derive(Subcommand)]
@@ -1042,6 +1397,14 @@ fn parse_addr(s: &str) -> Result<String, String> {
         .map_err(|_| format!("'{s}' is not ADDR:PORT or PORT"))
 }
 
+fn parse_url(s: &str) -> Result<String, String> {
+    if s.starts_with("http://") || s.starts_with("https://") {
+        Ok(s.to_owned())
+    } else {
+        Err("must start with http:// or https://".into())
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -1053,6 +1416,10 @@ async fn main() {
         }
         Some(Command::Remove { stack: Stack::Clm }) => return run_install(install::Action::Remove),
         Some(Command::Keys { action, config }) => return run_keys(action, &config_file(config)),
+        Some(Command::Ask(args)) => return run_ask(args).await,
+        Some(Command::Questions { action, config }) => {
+            return run_questions(action, &config_file(config));
+        }
     };
     serve(args).await;
 }
@@ -1066,12 +1433,247 @@ fn config_file(arg: Option<String>) -> String {
     })
 }
 
+/// Reads a whole file, or stdin for `-`.
+fn read_input(file: &str) -> Result<String, String> {
+    if file == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .map_err(|e| e.to_string())?;
+        Ok(text)
+    } else {
+        fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))
+    }
+}
+
+/// Builds the `/v1/systemone` body: each key asks its saved question, and `--questions` entries go on top.
+fn ask_body(
+    keys: &[String],
+    questions: Option<Value>,
+    state: String,
+    model: Option<String>,
+) -> Result<Value, String> {
+    let mut map: questions::Questions = keys.iter().map(|k| (k.clone(), json!({}))).collect();
+    match questions {
+        None => {}
+        Some(Value::Object(extra)) => map.extend(extra),
+        Some(_) => return Err("--questions must be a JSON map of key to question".into()),
+    }
+    if map.is_empty() {
+        return Err("name a saved question or pass --questions".into());
+    }
+    let mut body = json!({ "state": state, "questions": map });
+    if let Some(m) = model {
+        body["model"] = Value::String(m);
+    }
+    Ok(body)
+}
+
+/// Builds the `/v1/systemone` body from the `jeff ask` arguments.
+fn ask_request(
+    args: &AskArgs,
+    read: impl Fn(&str) -> Result<String, String>,
+) -> Result<Value, String> {
+    if let Some(file) = &args.request {
+        let mut body: Value =
+            serde_json::from_str(&read(file)?).map_err(|e| format!("{file}: {e}"))?;
+        let Some(obj) = body.as_object_mut() else {
+            return Err("--request must be a JSON object with state and questions".into());
+        };
+        if let Some(m) = &args.model {
+            obj.insert("model".into(), json!(m));
+        }
+        return Ok(body);
+    }
+    if args.state_file.as_deref() == Some("-") && args.questions_file.as_deref() == Some("-") {
+        return Err(
+            "--state-file and --questions-file cannot both read stdin; use --request -".into(),
+        );
+    }
+    let state = match (&args.state, &args.state_file) {
+        (Some(text), _) => text.clone(),
+        (None, Some(file)) => read(file)?,
+        (None, None) => unreachable!("clap requires --state or --state-file"),
+    };
+    let questions = match (&args.questions, &args.questions_file) {
+        (Some(json), _) => Some(serde_json::from_str(json).map_err(|e| {
+            format!("--questions is not valid JSON: {e}; to read a file, use --questions-file")
+        })?),
+        (None, Some(file)) => {
+            Some(serde_json::from_str(&read(file)?).map_err(|e| format!("{file}: {e}"))?)
+        }
+        (None, None) => None,
+    };
+    ask_body(&args.keys, questions, state, args.model.clone())
+}
+
+/// Writes pretty JSON to `path` and prints the path.
+fn write_json(path: &str, value: &Value) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(value).unwrap() + "\n";
+    fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
+    println!("{path}");
+    Ok(())
+}
+
+/// One line per question: a boxed table for a terminal, tab-separated fields for a pipe.
+fn questions_table(qs: &questions::Questions, boxed: bool) -> String {
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let rows: Vec<[String; 4]> = qs
+        .iter()
+        .map(|(key, q)| {
+            let field = |f: &str| q.get(f).and_then(Value::as_str).map_or("-".into(), flat);
+            [
+                key.clone(),
+                field("type"),
+                field("model"),
+                field("instructions"),
+            ]
+        })
+        .collect();
+    if !boxed {
+        return rows.iter().map(|r| r.join("\t") + "\n").collect();
+    }
+    const WIDEST: usize = 60;
+    let cut = |s: &String| match s.chars().count() > WIDEST {
+        true => s.chars().take(WIDEST - 1).chain(['…']).collect(),
+        false => s.clone(),
+    };
+    let header = ["key", "type", "model", "instructions"].map(String::from);
+    let rows: Vec<[String; 4]> = std::iter::once(header)
+        .chain(rows.into_iter().map(|[k, t, m, i]| [k, t, m, cut(&i)]))
+        .collect();
+    let widths: Vec<usize> = (0..4)
+        .map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0))
+        .collect();
+    let rule = |l: &str, m: &str, r: &str| {
+        let cells: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
+        format!("{l}{}{r}\n", cells.join(m))
+    };
+    let line = |row: &[String; 4]| {
+        let cells: Vec<String> = row
+            .iter()
+            .zip(&widths)
+            .map(|(s, w)| format!(" {s}{} ", " ".repeat(w - s.chars().count())))
+            .collect();
+        format!("│{}│\n", cells.join("│"))
+    };
+    let mut out = rule("┌", "┬", "┐") + &line(&rows[0]) + &rule("├", "┼", "┤");
+    for row in &rows[1..] {
+        out += &line(row);
+    }
+    out + &rule("└", "┴", "┘")
+}
+
+/// The server accepts a comma-separated `JEFF_API_KEY`; a client sends the first key.
+fn client_key(env_value: Option<String>) -> Option<String> {
+    env_value?
+        .split(',')
+        .map(str::trim)
+        .find(|k| !k.is_empty())
+        .map(str::to_owned)
+}
+
+async fn run_ask(args: AskArgs) {
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1)
+    };
+    let body = ask_request(&args, read_input).unwrap_or_else(|e| fail(e));
+    let base = args.url.trim_end_matches('/');
+    let url = format!("{base}/v1/systemone");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(args.connect_timeout))
+        .timeout(Duration::from_secs(args.max_time))
+        .build()
+        .expect("HTTP client");
+    let mut req = client.post(&url).json(&body);
+    if let Some(key) = client_key(env::var("JEFF_API_KEY").ok()) {
+        req = req.bearer_auth(key);
+    }
+    let failed = |e: reqwest::Error| -> ! {
+        if e.is_connect() {
+            fail(format!("cannot connect to {base}"))
+        } else if e.is_timeout() {
+            fail(format!("jeff did not answer within {}s", args.max_time))
+        } else {
+            fail(format!("{url}: {}", e.without_url()))
+        }
+    };
+    let resp = req.send().await.unwrap_or_else(|e| failed(e));
+    let ok = resp.status().is_success();
+    let text = resp.text().await.unwrap_or_else(|e| failed(e));
+    let answer = serde_json::from_str::<Value>(&text);
+    if !ok {
+        fail(answer.map_or(text, |v| serde_json::to_string_pretty(&v).unwrap()));
+    }
+    match (answer, args.output) {
+        (Ok(v), Some(path)) => write_json(&path, &v).unwrap_or_else(|e| fail(e)),
+        (Ok(v), None) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
+        (Err(_), _) => fail(format!("jeff sent an answer that is not JSON: {text}")),
+    }
+}
+
+fn run_questions(action: QuestionsAction, path: &str) {
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1)
+    };
+    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
+    let json = |file: &str| -> Value {
+        let text = read_input(file).unwrap_or_else(|e| fail(e));
+        serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{file}: {e}")))
+    };
+    let refused = |c: questions::Change| -> ! {
+        match c {
+            questions::Change::NotFound(m)
+            | questions::Change::Exists(m)
+            | questions::Change::Invalid(m) => fail(m),
+        }
+    };
+    match action {
+        QuestionsAction::List { output: Some(file) } => {
+            write_json(&file, &Value::Object(config.questions)).unwrap_or_else(|e| fail(e));
+        }
+        QuestionsAction::List { output: None } => {
+            if config.questions.is_empty() {
+                eprintln!("no questions in {path}");
+            }
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            print!("{}", questions_table(&config.questions, terminal));
+        }
+        QuestionsAction::Get { key, output } => match (config.questions.get(&key), output) {
+            (Some(q), Some(file)) => write_json(&file, q).unwrap_or_else(|e| fail(e)),
+            (Some(q), None) => println!("{}", serde_json::to_string_pretty(q).unwrap()),
+            (None, _) => fail(format!("unknown question '{key}'")),
+        },
+        QuestionsAction::Add { file } => {
+            let Value::Object(input) = json(&file) else {
+                fail(format!("{file}: expected a JSON map of key to question"));
+            };
+            let keys: Vec<_> = input.keys().cloned().collect();
+            questions::create(&mut config.questions, input).unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("added {}", keys.join(", "));
+        }
+        QuestionsAction::Update { key, file } => {
+            questions::update(&mut config.questions, &key, json(&file))
+                .unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("updated {key}");
+        }
+        QuestionsAction::Remove { key } => {
+            questions::remove(&mut config.questions, &key).unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("removed {key}");
+        }
+    }
+}
+
 fn run_keys(action: KeysAction, path: &str) {
     let fail = |e: String| -> ! {
         eprintln!("{e}");
         std::process::exit(1)
     };
-    let mut config = load_config(path).unwrap_or_else(|e| fail(e));
+    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
     // The same rules as the admin page, so the CLI cannot lock that page out. A key in JEFF_API_KEY is an
     // admin key for a server started from this environment.
     let static_admin = env::var("JEFF_API_KEY").is_ok_and(|v| !v.trim().is_empty());
@@ -1176,20 +1778,13 @@ async fn serve(args: ServeArgs) {
         ));
     }
     let allow_private = args.allow_private_providers;
-    // A provider that redirects could send the provider key on to a host jeff never checked.
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(GuardedResolver { allow_private })
-        .build()
-        .expect("HTTP client");
     let loopback = |addr: &str| {
         addr.parse::<SocketAddr>()
             .is_ok_and(|a| a.ip().is_loopback())
     };
     let exposed = !loopback(&args.api) || (!args.no_ui && !loopback(&args.ui));
     let app = Arc::new(App {
-        http,
+        clients: Mutex::new(HashMap::new()),
         config: RwLock::new(config),
         config_path: config_path.clone(),
         listed: RwLock::new(HashMap::new()),
@@ -1228,6 +1823,8 @@ async fn serve(args: ServeArgs) {
     let api = Router::new()
         .route("/v1/systemone", post(systemone))
         .route("/v1/models", get(models))
+        .route("/v1/questions", get(list_questions))
+        .route("/v1/questions/{key}", get(get_question))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_client))
         .route("/health", get(health))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
@@ -1239,6 +1836,11 @@ async fn serve(args: ServeArgs) {
         .route("/api/clm/{action}", post(clm_action))
         .route("/api/keys", get(list_keys).post(create_key))
         .route("/api/keys/{id}", delete(revoke_key))
+        .route("/api/questions", post(create_questions))
+        .route(
+            "/api/questions/{key}",
+            axum::routing::put(update_question).delete(delete_question),
+        )
         .route_layer(middleware::from_fn_with_state(app.clone(), require_admin))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
     let info_app = app.clone();
@@ -1383,6 +1985,41 @@ mod tests {
     }
 
     #[test]
+    fn batches_groups_that_reach_the_same_model() {
+        let clm = Config::default().providers[0].clone();
+        let qs = |k: &str| {
+            Some(
+                json!({ k: {"type": "noul", "instructions": "x"} })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+        };
+        let batches = batch(vec![
+            (clm.clone(), "clm-latest".into(), qs("a")),
+            (clm.clone(), "clm-raw".into(), qs("b")),
+            (clm.clone(), "clm-latest".into(), qs("c")),
+        ]);
+        let shape: Vec<_> = batches
+            .iter()
+            .map(|(p, m, q)| {
+                (
+                    p.id.as_str(),
+                    m.as_str(),
+                    q.as_ref().unwrap().keys().cloned().collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("clm", "clm-latest", vec!["a".to_owned(), "c".to_owned()]),
+                ("clm", "clm-raw", vec!["b".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
     fn config_input_keeps_or_clears_keys() {
         let mut current = Config::default();
         current.providers[1].key = Some("secret".into());
@@ -1395,6 +2032,8 @@ mod tests {
                 key: key.map(String::from),
                 models: vec![],
                 installer: None,
+                connect_timeout: None,
+                max_time: None,
             }],
         };
         let key_of = |input| {
@@ -1410,5 +2049,230 @@ mod tests {
         let mut bad = input(None);
         bad.default_model = "clm/clm-latest".into();
         assert!(build_config(&current, bad, false).is_err());
+    }
+
+    #[test]
+    fn ask_questions_are_json_unless_read_from_a_file() {
+        let questions = |args: &[&str]| {
+            let args = ask_args(&[&["--state", "s"], args].concat()).map_err(|e| e.to_string())?;
+            ask_request(&args, stdin_is(r#"{"f": {}}"#)).map(|b| b["questions"].clone())
+        };
+        assert_eq!(
+            questions(&["--questions", r#"{"u": {}}"#]).unwrap(),
+            json!({"u": {}})
+        );
+        assert_eq!(
+            questions(&["--questions-file", "-"]).unwrap(),
+            json!({"f": {}})
+        );
+        let e = questions(&["--questions", "refund.json"]).unwrap_err();
+        assert!(
+            e.contains("--questions is not valid JSON") && e.contains("--questions-file"),
+            "{e}"
+        );
+        assert!(questions(&["--questions", "{}", "--questions-file", "-"]).is_err());
+    }
+
+    fn ask_args(args: &[&str]) -> Result<AskArgs, clap::Error> {
+        let argv = ["jeff", "ask"].iter().chain(args).copied();
+        match Cli::try_parse_from(argv)?.command {
+            Some(Command::Ask(a)) => Ok(a),
+            _ => unreachable!(),
+        }
+    }
+
+    fn stdin_is(text: &'static str) -> impl Fn(&str) -> Result<String, String> {
+        move |f: &str| match f {
+            "-" => Ok(text.to_owned()),
+            _ => fs::read_to_string(f).map_err(|e| format!("{f}: {e}")),
+        }
+    }
+
+    #[test]
+    fn ask_state_is_text_unless_read_from_a_file() {
+        let file = env::temp_dir().join(format!("jeff-test-state-{}.txt", std::process::id()));
+        fs::write(&file, "from file").unwrap();
+        let path = file.to_str().unwrap().to_owned();
+        let state = |args: &[&str]| {
+            let args = ask_args(args).unwrap();
+            ask_request(&args, stdin_is("from stdin")).unwrap()["state"].clone()
+        };
+        let from_file = state(&["u", "--state-file", &path]);
+        let text = state(&["u", "--state", &path]);
+        let _ = fs::remove_file(&file);
+        assert_eq!(from_file, "from file");
+        assert_eq!(text, path.as_str());
+        assert_eq!(state(&["u", "--state-file", "-"]), "from stdin");
+        assert_eq!(state(&["u", "--state", "-"]), "-");
+        assert!(ask_args(&["u"]).is_err());
+        assert!(ask_args(&["u", "--state", "x", "--state-file", "y"]).is_err());
+    }
+
+    #[test]
+    fn ask_reads_a_whole_request() {
+        let body = r#"{"state": "s", "questions": ["u"], "model": "p/a"}"#;
+        let args = ask_args(&["--request", "-", "--model", "p/b"]).unwrap();
+        assert_eq!(
+            ask_request(&args, stdin_is(body)).unwrap(),
+            json!({"state": "s", "questions": ["u"], "model": "p/b"})
+        );
+        let args = ask_args(&["--request", "-"]).unwrap();
+        assert!(ask_request(&args, stdin_is("[1]")).is_err());
+        assert!(ask_args(&["--request", "-", "--state", "x"]).is_err());
+        assert!(ask_args(&["u", "--request", "-"]).is_err());
+    }
+
+    #[test]
+    fn ask_refuses_two_readers_of_stdin() {
+        let args = ask_args(&["--state-file", "-", "--questions-file", "-"]).unwrap();
+        assert_eq!(
+            ask_request(&args, stdin_is("{}")).unwrap_err(),
+            "--state-file and --questions-file cannot both read stdin; use --request -"
+        );
+    }
+
+    #[test]
+    fn ask_url_needs_a_scheme() {
+        let e = ask_args(&["u", "--state", "x", "--url", "localhost:8080"])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(e.contains("must start with http:// or https://"), "{e}");
+        assert!(ask_args(&["u", "--state", "x", "--url", "https://jeff.example"]).is_ok());
+    }
+
+    #[test]
+    fn lists_questions_one_line_each() {
+        let qs = json!({
+            "refund": {"type": "noul", "model": "clm/clm-raw", "instructions": "Refund?\nIgnore\texchanges."},
+            "urgency": {"type": "score", "instructions": "x".repeat(70), "criteria": ["a", "b"]},
+        });
+        let qs = qs.as_object().unwrap();
+        assert_eq!(
+            questions_table(qs, false),
+            format!(
+                "refund\tnoul\tclm/clm-raw\tRefund? Ignore exchanges.\nurgency\tscore\t-\t{}\n",
+                "x".repeat(70)
+            )
+        );
+        let long = format!("{}…", "x".repeat(59));
+        let table = questions_table(qs, true);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 6);
+        assert_eq!(
+            lines[1],
+            format!("│ key     │ type  │ model       │ {:<60} │", "instructions")
+        );
+        assert_eq!(
+            lines[4],
+            format!("│ urgency │ score │ -           │ {long} │")
+        );
+        assert!(lines[0].starts_with("┌─────────┬") && lines[5].ends_with("┘"));
+    }
+
+    #[test]
+    fn client_key_takes_the_first_of_a_list() {
+        assert_eq!(client_key(Some(" k1 , k2".into())).as_deref(), Some("k1"));
+        assert_eq!(client_key(Some(" ".into())), None);
+        assert_eq!(client_key(None), None);
+    }
+
+    #[test]
+    fn cli_reads_a_config_that_serve_refuses() {
+        let path = env::temp_dir().join(format!("jeff-test-cli-{}.json", std::process::id()));
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["questions"] = json!({"a b": {"type": "noul", "instructions": "x"}});
+        fs::write(&path, config.to_string()).unwrap();
+        let path = path.to_str().unwrap().to_owned();
+        let read = read_config(&path);
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        assert!(read.unwrap().questions.contains_key("a b"));
+        assert!(loaded.is_err());
+    }
+
+    #[test]
+    fn ask_body_merges_keys_and_overrides() {
+        let body = ask_body(
+            &["a".into(), "b".into()],
+            Some(json!({"b": {"model": "p/m"}, "c": {"type": "noul", "instructions": "x"}})),
+            "s".into(),
+            Some("p/n".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            json!({"state": "s", "model": "p/n", "questions": {
+                "a": {}, "b": {"model": "p/m"}, "c": {"type": "noul", "instructions": "x"}}})
+        );
+        let bare = ask_body(&["a".into()], None, "s".into(), None).unwrap();
+        assert!(bare.get("model").is_none());
+        assert!(ask_body(&[], None, "s".into(), None).is_err());
+        assert!(ask_body(&[], Some(json!([1])), "s".into(), None).is_err());
+    }
+
+    #[test]
+    fn load_config_rejects_invalid_questions() {
+        let path = env::temp_dir().join(format!("jeff-test-{}.json", std::process::id()));
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["questions"] = json!({"a b": {"type": "noul", "instructions": "x"}});
+        fs::write(&path, config.to_string()).unwrap();
+        let result = load_config(path.to_str().unwrap());
+        let _ = fs::remove_file(&path);
+        let e = result.err().expect("an invalid question must be refused");
+        assert!(e.contains("question 'a b'"), "{e}");
+    }
+
+    #[test]
+    fn provider_save_keeps_timeouts_the_ui_does_not_send() {
+        let mut current = Config::default();
+        current.providers[0].connect_timeout = Some(3);
+        current.providers[0].max_time = Some(120);
+        let input = |max_time: Option<u64>| ConfigInput {
+            default_model: "clm/clm-latest".into(),
+            providers: vec![ProviderInput {
+                id: "clm".into(),
+                name: "CLM".into(),
+                url: "http://127.0.0.1:8700".into(),
+                key: None,
+                models: vec![],
+                installer: None,
+                connect_timeout: None,
+                max_time,
+            }],
+        };
+        let kept = &build_config(&current, input(None), false)
+            .unwrap()
+            .providers[0];
+        assert_eq!((kept.connect_timeout, kept.max_time), (Some(3), Some(120)));
+        let set = &build_config(&current, input(Some(30)), false)
+            .unwrap()
+            .providers[0];
+        assert_eq!(set.max_time, Some(30));
+        assert!(build_config(&current, input(Some(0)), false).is_err());
+    }
+
+    #[test]
+    fn build_config_keeps_questions() {
+        let mut current = Config::default();
+        current.questions.insert(
+            "urgency".into(),
+            json!({"type": "noul", "instructions": "Urgent?"}),
+        );
+        let input = ConfigInput {
+            default_model: "clm/clm-latest".into(),
+            providers: vec![ProviderInput {
+                id: "clm".into(),
+                name: "CLM".into(),
+                url: "http://127.0.0.1:8700".into(),
+                key: None,
+                models: vec![],
+                installer: None,
+                connect_timeout: None,
+                max_time: None,
+            }],
+        };
+        let next = build_config(&current, input, false).unwrap();
+        assert_eq!(next.questions, current.questions);
     }
 }
