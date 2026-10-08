@@ -150,17 +150,17 @@ From the command line, `jeff ask` does the same through a running jeff:
 
 ```sh
 jeff ask urgent department --state "My invoice was charged twice!"
-jeff ask urgent --questions refund.json --state ticket.txt
+jeff ask urgent --questions-file refund.json --state-file ticket.txt
 jeff ask urgent --questions '{"urgent": {"model": "clm/clm-raw"}}' --state "..."
 cat call.json | jeff ask --request - -o answer.json
 ```
 
-- `--state` takes the text, a file that holds it, or `-` for stdin.
-- `--questions` takes a JSON map of custom questions, a file that holds one, or `-` for stdin.
+- `--state` takes the text. `--state-file` reads it from a file, or from stdin for `-`.
+- `--questions` takes a JSON map of custom questions. `--questions-file` reads the map from a file, or from stdin for `-`.
 - `--request` takes a whole `/v1/systemone` body with `state` and `questions`, from a file or `-`.
 - `-o FILE` writes the answer JSON to the file and prints its path.
 
-Windows PowerShell 5.1 strips the inner quotes from JSON passed to a program, so there put the JSON in a file and pass its path.
+Windows PowerShell 5.1 strips the inner quotes from JSON passed to a program, so there put the JSON in a file and pass it with `--questions-file`.
 
 `jeff ask` calls `http://127.0.0.1:8080` unless `--url` or `JEFF_URL` says otherwise, and sends `JEFF_API_KEY` as its key. It waits 5 seconds to connect (`--connect-timeout`) and 60 seconds for the answer (`--max-time`). A custom question is saved only by `jeff questions add`, the admin page or `POST /api/questions`.
 
@@ -281,7 +281,8 @@ jeff remove clm          stop and remove the CLM containers; the weights stay
 jeff keys list           list keys without showing them
 jeff keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|never]
 jeff keys revoke ID
-jeff ask [KEY...] --state TEXT|FILE|- [--questions JSON|FILE|-] [--model MODEL] [--url URL]
+jeff ask [KEY...] (--state TEXT | --state-file FILE|-) [--questions JSON | --questions-file FILE|-]
+         [--model MODEL] [--url URL]
          [--connect-timeout SECONDS] [--max-time SECONDS] [-o FILE]
 jeff ask --request FILE|- [--model MODEL] [-o FILE]
                          ask through a running jeff and print the answer JSON

@@ -1248,13 +1248,22 @@ struct AskArgs {
     /// Saved questions to ask, by key
     #[arg(conflicts_with = "request")]
     keys: Vec<String>,
-    /// The text the questions are about, a file holding it, or `-` for stdin
-    #[arg(long, conflicts_with = "request", required_unless_present = "request")]
+    /// The text the questions are about
+    #[arg(
+        long,
+        conflicts_with_all = ["state_file", "request"],
+        required_unless_present_any = ["state_file", "request"]
+    )]
     state: Option<String>,
-    /// A JSON map of key to question, a file holding one, or `-` for stdin; an entry without `type` overrides that
-    /// saved question
+    /// Read the state from a file, or `-` for stdin
     #[arg(long, conflicts_with = "request")]
+    state_file: Option<String>,
+    /// A JSON map of key to question; an entry without `type` overrides that saved question
+    #[arg(long, conflicts_with_all = ["questions_file", "request"])]
     questions: Option<String>,
+    /// Read the --questions map from a file, or `-` for stdin
+    #[arg(long, conflicts_with = "request")]
+    questions_file: Option<String>,
     /// A whole /v1/systemone body with `state` and `questions`, from a file or `-` for stdin
     #[arg(long)]
     request: Option<String>,
@@ -1453,32 +1462,6 @@ fn ask_body(
     Ok(body)
 }
 
-/// `--questions` is JSON when it looks like JSON, else a file path, so a JSON typo is not reported as a missing file.
-fn questions_arg(
-    arg: &str,
-    read: impl Fn(&str) -> Result<String, String>,
-) -> Result<Value, String> {
-    let trimmed = arg.trim_start();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        return serde_json::from_str(arg).map_err(|e| {
-            format!(
-                "--questions is not valid JSON: {e}; in PowerShell, put the JSON in a file instead"
-            )
-        });
-    }
-    let text = read(arg)?;
-    serde_json::from_str(&text).map_err(|e| format!("{arg}: {e}"))
-}
-
-/// `--state` reads stdin for `-` and a file when one exists at that path; anything else is the text itself.
-fn state_arg(arg: &str, read: impl Fn(&str) -> Result<String, String>) -> Result<String, String> {
-    if arg == "-" || std::path::Path::new(arg).is_file() {
-        read(arg)
-    } else {
-        Ok(arg.to_owned())
-    }
-}
-
 /// Builds the `/v1/systemone` body from the `jeff ask` arguments.
 fn ask_request(
     args: &AskArgs,
@@ -1495,21 +1478,26 @@ fn ask_request(
         }
         return Ok(body);
     }
-    let state = args.state.as_deref().unwrap_or_default();
-    if state == "-" && args.questions.as_deref() == Some("-") {
-        return Err("--state and --questions cannot both read stdin; use --request -".into());
+    if args.state_file.as_deref() == Some("-") && args.questions_file.as_deref() == Some("-") {
+        return Err(
+            "--state-file and --questions-file cannot both read stdin; use --request -".into(),
+        );
     }
-    let questions = args
-        .questions
-        .as_deref()
-        .map(|q| questions_arg(q, &read))
-        .transpose()?;
-    ask_body(
-        &args.keys,
-        questions,
-        state_arg(state, &read)?,
-        args.model.clone(),
-    )
+    let state = match (&args.state, &args.state_file) {
+        (Some(text), _) => text.clone(),
+        (None, Some(file)) => read(file)?,
+        (None, None) => unreachable!("clap requires --state or --state-file"),
+    };
+    let questions = match (&args.questions, &args.questions_file) {
+        (Some(json), _) => Some(serde_json::from_str(json).map_err(|e| {
+            format!("--questions is not valid JSON: {e}; to read a file, use --questions-file")
+        })?),
+        (None, Some(file)) => {
+            Some(serde_json::from_str(&read(file)?).map_err(|e| format!("{file}: {e}"))?)
+        }
+        (None, None) => None,
+    };
+    ask_body(&args.keys, questions, state, args.model.clone())
 }
 
 /// Writes pretty JSON to `path` and prints the path.
@@ -2058,24 +2046,25 @@ mod tests {
     }
 
     #[test]
-    fn questions_arg_reports_broken_json_instead_of_a_file() {
-        let no_file = |p: &str| Err(format!("{p}: not found"));
-        let e = questions_arg("{\"u\": {}", no_file).unwrap_err();
-        assert!(e.contains("not valid JSON"), "{e}");
+    fn ask_questions_are_json_unless_read_from_a_file() {
+        let questions = |args: &[&str]| {
+            let args = ask_args(&[&["--state", "s"], args].concat()).map_err(|e| e.to_string())?;
+            ask_request(&args, stdin_is(r#"{"f": {}}"#)).map(|b| b["questions"].clone())
+        };
         assert_eq!(
-            questions_arg(" {\"u\": {}} ", no_file).unwrap(),
+            questions(&["--questions", r#"{"u": {}}"#]).unwrap(),
             json!({"u": {}})
         );
-        let from_file = |_: &str| Ok("{\"f\": {}}".to_owned());
         assert_eq!(
-            questions_arg("q.json", from_file).unwrap(),
+            questions(&["--questions-file", "-"]).unwrap(),
             json!({"f": {}})
         );
+        let e = questions(&["--questions", "refund.json"]).unwrap_err();
         assert!(
-            questions_arg("q.json", no_file)
-                .unwrap_err()
-                .contains("not found")
+            e.contains("--questions is not valid JSON") && e.contains("--questions-file"),
+            "{e}"
         );
+        assert!(questions(&["--questions", "{}", "--questions-file", "-"]).is_err());
     }
 
     fn ask_args(args: &[&str]) -> Result<AskArgs, clap::Error> {
@@ -2094,19 +2083,23 @@ mod tests {
     }
 
     #[test]
-    fn ask_state_is_text_a_file_or_stdin() {
+    fn ask_state_is_text_unless_read_from_a_file() {
         let file = env::temp_dir().join(format!("jeff-test-state-{}.txt", std::process::id()));
         fs::write(&file, "from file").unwrap();
-        let state = |arg: &str| {
-            let args = ask_args(&["u", "--state", arg]).unwrap();
+        let path = file.to_str().unwrap().to_owned();
+        let state = |args: &[&str]| {
+            let args = ask_args(args).unwrap();
             ask_request(&args, stdin_is("from stdin")).unwrap()["state"].clone()
         };
-        let from_file = state(file.to_str().unwrap());
+        let from_file = state(&["u", "--state-file", &path]);
+        let text = state(&["u", "--state", &path]);
         let _ = fs::remove_file(&file);
         assert_eq!(from_file, "from file");
-        assert_eq!(state("-"), "from stdin");
-        assert_eq!(state("Refund my order"), "Refund my order");
+        assert_eq!(text, path.as_str());
+        assert_eq!(state(&["u", "--state-file", "-"]), "from stdin");
+        assert_eq!(state(&["u", "--state", "-"]), "-");
         assert!(ask_args(&["u"]).is_err());
+        assert!(ask_args(&["u", "--state", "x", "--state-file", "y"]).is_err());
     }
 
     #[test]
@@ -2125,10 +2118,10 @@ mod tests {
 
     #[test]
     fn ask_refuses_two_readers_of_stdin() {
-        let args = ask_args(&["--state", "-", "--questions", "-"]).unwrap();
+        let args = ask_args(&["--state-file", "-", "--questions-file", "-"]).unwrap();
         assert_eq!(
             ask_request(&args, stdin_is("{}")).unwrap_err(),
-            "--state and --questions cannot both read stdin; use --request -"
+            "--state-file and --questions-file cannot both read stdin; use --request -"
         );
     }
 
