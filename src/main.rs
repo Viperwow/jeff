@@ -1,6 +1,7 @@
 mod classifiers;
 mod install;
 mod keys;
+mod log;
 mod questions;
 
 use axum::{
@@ -107,17 +108,26 @@ impl Default for Config {
     }
 }
 
-/// A missing file gives the defaults. A broken one is an error: falling back would drop every access key and
-/// open jeff to anyone.
-fn load_config(path: &str) -> Result<Config, String> {
-    let config = read_config(path)?;
-    for (key, q) in &config.questions {
-        questions::validate(key, q).map_err(|e| format!("{path}: {e}"))?;
+/// A missing file gives the defaults. A broken one is refused whole, with every problem found: falling back would
+/// drop every access key and open jeff to anyone, and a partial config would run on what the owner did not write.
+fn load_config(path: &str) -> Result<Config, Vec<String>> {
+    let config = read_config(path).map_err(|e| vec![e])?;
+    let problems: Vec<String> = config
+        .questions
+        .iter()
+        .filter_map(|(k, q)| questions::validate(k, q).err())
+        .chain(
+            config
+                .classifiers
+                .iter()
+                .filter_map(|(k, c)| classifiers::validate(k, c).err()),
+        )
+        .collect();
+    if problems.is_empty() {
+        Ok(config)
+    } else {
+        Err(problems)
     }
-    for (key, c) in &config.classifiers {
-        classifiers::validate(key, c).map_err(|e| format!("{path}: {e}"))?;
-    }
-    Ok(config)
 }
 
 /// Parses the config without checking saved questions and classifiers, so the CLI can still revoke a key or remove
@@ -173,6 +183,8 @@ struct App {
     clm_warm: AtomicU8,
     /// Keys from `--api-key` / `JEFF_API_KEY`; they never expire and are managed outside the UI.
     static_keys: Vec<String>,
+    /// Problems of a config file that failed to reload; the config read before stays in force while it is not empty.
+    problems: Mutex<Vec<String>>,
     /// When the config file was last read, so keys created or revoked by `jeff keys` apply without a restart.
     config_mtime: Mutex<Option<SystemTime>>,
     /// Host names the UI answers to besides localhost and IP literals.
@@ -305,34 +317,83 @@ impl reqwest::dns::Resolve for GuardedResolver {
 }
 
 impl App {
-    /// A file that does not parse keeps the config in memory, so the access keys stay in force until it is fixed.
-    /// An invalid question does not block the reload: a key revoked meanwhile must stop working.
+    /// A broken file is refused whole and the config read before stays in force, keys included, until it is fixed.
     async fn refresh_from_disk(&self) {
         let now = modified(&self.config_path);
         let seen = *self.config_mtime.lock().unwrap();
-        if now.is_some() && now != seen {
-            match read_config(&self.config_path) {
+        if now.is_none() {
+            // A deleted file leaves no hand edits to protect; the next save writes the config back.
+            if !std::mem::take(&mut *self.problems.lock().unwrap()).is_empty() {
+                let line = format!(
+                    "{} removed; the next save writes it again",
+                    self.config_path
+                );
+                eprintln!("{line}");
+                log::write(&self.config_path, "config_removed", &line, &[]);
+            }
+            *self.config_mtime.lock().unwrap() = None;
+            return;
+        }
+        if now != seen {
+            let path = &self.config_path;
+            match load_config(path) {
                 Ok(config) => {
-                    for (key, q) in &config.questions {
-                        if let Err(e) = questions::validate(key, q) {
-                            eprintln!("{}: {e}; it cannot be asked until fixed", self.config_path);
-                        }
-                    }
-                    for (key, c) in &config.classifiers {
-                        if let Err(e) = classifiers::validate(key, c) {
-                            eprintln!("{}: {e}; it cannot be called until fixed", self.config_path);
-                        }
-                    }
                     *self.config.write().await = config;
+                    let was = std::mem::take(&mut *self.problems.lock().unwrap());
+                    if !was.is_empty() {
+                        let line = format!("{path} fixed; config reloaded");
+                        eprintln!("{line}");
+                        log::write(path, "config_fixed", &line, &[]);
+                    }
                 }
-                Err(e) => eprintln!("{e}; keeping the config loaded before"),
+                Err(problems) => {
+                    let n = problems.len();
+                    let summary = format!(
+                        "{path}: {}; jeff keeps the previous config",
+                        count_problems(n)
+                    );
+                    log::write(path, "config_invalid", &summary, &problems);
+                    eprintln!(
+                        "error[config_invalid]: {}; jeff keeps the previous config",
+                        problems_text(path, n)
+                    );
+                    *self.problems.lock().unwrap() = problems;
+                }
             }
             *self.config_mtime.lock().unwrap() = now;
         }
     }
 
-    async fn save(&self, config: &Config) -> Result<(), String> {
-        save_config(&self.config_path, config)?;
+    /// Refuses to write over a file that is broken, or that changed since jeff last read it: either way the write
+    /// would lose a hand edit.
+    async fn save(&self, config: &Config) -> Result<(), Box<Response>> {
+        let path = &self.config_path;
+        let n = self.problems.lock().unwrap().len();
+        if n > 0 {
+            return Err(Box::new(config_invalid(path, n)));
+        }
+        if modified(path) != *self.config_mtime.lock().unwrap() {
+            return Err(Box::new(
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "code": "config_changed",
+                        "error": format!("{} changed on disk since jeff read it; try again", file_name(path)),
+                    })),
+                )
+                    .into_response(),
+            ));
+        }
+        save_config(path, config).map_err(|e| {
+            eprintln!("{e}");
+            Box::new(error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "could not save {}; the server console has the cause",
+                    file_name(path)
+                ),
+            ))
+        })?;
         *self.config_mtime.lock().unwrap() = modified(&self.config_path);
         Ok(())
     }
@@ -383,6 +444,46 @@ fn http_client(connect_secs: u64, allow_private: bool) -> reqwest::Client {
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({ "error": msg.into() }))).into_response()
+}
+
+/// `2 problems`, `1 problem`.
+fn count_problems(n: usize) -> String {
+    format!("{n} problem{}", if n == 1 { "" } else { "s" })
+}
+
+/// The config's file name only: API callers must not learn where the server keeps it.
+fn file_name(config_path: &str) -> String {
+    std::path::Path::new(config_path)
+        .file_name()
+        .map_or_else(|| config_path.into(), |n| n.to_string_lossy().into_owned())
+}
+
+fn problems_text(config_path: &str, n: usize) -> String {
+    format!("{} has {}", file_name(config_path), count_problems(n))
+}
+
+/// jeff saves the whole file, so a save while it is broken would overwrite the hand edits.
+fn config_invalid(config_path: &str, n: usize) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "code": "config_invalid",
+            "error": format!("{}; fix it before changing questions or classifiers", problems_text(config_path, n)),
+            "log": "jeff.log",
+        })),
+    )
+        .into_response()
+}
+
+fn status_body(config_path: &str, problems: &[String]) -> Value {
+    if problems.is_empty() {
+        return json!({ "config": "ok" });
+    }
+    json!({ "config": "invalid", "file": file_name(config_path), "problems": problems.len(), "log": "jeff.log" })
+}
+
+async fn status(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(status_body(&app.config_path, &app.problems.lock().unwrap()))
 }
 
 fn request(
@@ -918,8 +1019,8 @@ async fn create_key(State(app): State<Arc<App>>, Json(input): Json<KeyInput>) ->
     let (key, record) = keys::generate(name, input.role, input.expires_at);
     let mut next = config.clone();
     next.keys.push(record.clone());
-    if let Err(e) = app.save(&next).await {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Err(r) = app.save(&next).await {
+        return *r;
     }
     *config = next;
     let mut view = key_view(&record);
@@ -940,8 +1041,8 @@ async fn revoke_key(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
             "this is the last admin key; create another admin key or revoke the client keys first",
         );
     }
-    if let Err(e) = app.save(&next).await {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Err(r) = app.save(&next).await {
+        return *r;
     }
     *config = next;
     StatusCode::NO_CONTENT.into_response()
@@ -972,9 +1073,7 @@ async fn change_config(
             questions::Change::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
         })
     })?;
-    app.save(&next)
-        .await
-        .map_err(|e| Box::new(error(StatusCode::INTERNAL_SERVER_ERROR, e)))?;
+    app.save(&next).await?;
     *config = next;
     Ok(config.clone())
 }
@@ -1246,8 +1345,8 @@ async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>)
         Ok(c) => c,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    if let Err(e) = app.save(&next).await {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Err(r) = app.save(&next).await {
+        return *r;
     }
     *config = next;
     Json(public(&config)).into_response()
@@ -1360,21 +1459,21 @@ enum Command {
     },
     /// Ask saved or custom questions through a running jeff and print the answer JSON
     Ask(AskArgs),
-    /// Manage saved questions in the config file; a running server picks changes up on the next request
+    /// Manage saved questions through a running jeff; JEFF_API_KEY must hold an admin key
     Questions {
         #[command(subcommand)]
         action: QuestionsAction,
-        /// The config file [default: ~/.jeff/jeff.json]
-        #[arg(long, env = "JEFF_CONFIG", global = true)]
-        config: Option<String>,
+        /// The jeff admin page address, where questions are managed
+        #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url, global = true)]
+        url: String,
     },
-    /// Manage classifiers in the config file; a running server picks changes up on the next request
+    /// Manage classifiers through a running jeff; JEFF_API_KEY must hold an admin key
     Classifiers {
         #[command(subcommand)]
         action: ClassifiersAction,
-        /// The config file [default: ~/.jeff/jeff.json]
-        #[arg(long, env = "JEFF_CONFIG", global = true)]
-        config: Option<String>,
+        /// The jeff admin page address, where classifiers are managed
+        #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url, global = true)]
+        url: String,
     },
 }
 
@@ -1467,23 +1566,47 @@ enum ClassifiersAction {
         #[arg(short, long)]
         output: Option<String>,
     },
-    /// Save a new classifier; an existing key fails
-    Add(ClassifierArgs),
+    /// Save a new classifier, or every classifier of a JSON map in --file; an existing key fails
+    Add(AddClassifierArgs),
     /// Replace a classifier; without --model its override is removed
-    Update(ClassifierArgs),
+    Update(UpdateClassifierArgs),
     /// Delete one classifier
     Remove { key: String },
 }
 
 #[derive(Args)]
-struct ClassifierArgs {
-    key: String,
+struct AddClassifierArgs {
+    #[arg(required_unless_present = "file")]
+    key: Option<String>,
     /// Saved question keys, in the order to ask them
-    #[arg(required = true)]
+    #[arg(required_unless_present = "file")]
     questions: Vec<String>,
     /// The model for every question of the classifier, in place of their own
     #[arg(long)]
     model: Option<String>,
+    /// What the classifier is for
+    #[arg(long)]
+    description: Option<String>,
+    /// A JSON map of key to classifier, or `-` for stdin
+    #[arg(long, conflicts_with_all = ["key", "questions", "model", "description"])]
+    file: Option<String>,
+}
+
+#[derive(Args)]
+struct UpdateClassifierArgs {
+    key: String,
+    /// Saved question keys, in the order to ask them
+    #[arg(required_unless_present = "file")]
+    questions: Vec<String>,
+    /// The model for every question of the classifier, in place of their own
+    #[arg(long)]
+    model: Option<String>,
+    /// What the classifier is for
+    #[arg(long)]
+    description: Option<String>,
+    /// A JSON classifier, or `-` for stdin
+    #[arg(long, conflicts_with_all = ["questions", "model", "description"])]
+    file: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1583,11 +1706,9 @@ async fn main() {
         Some(Command::Remove { stack: Stack::Clm }) => return run_install(install::Action::Remove),
         Some(Command::Keys { action, config }) => return run_keys(action, &config_file(config)),
         Some(Command::Ask(args)) => return run_ask(args).await,
-        Some(Command::Questions { action, config }) => {
-            return run_questions(action, &config_file(config));
-        }
-        Some(Command::Classifiers { action, config }) => {
-            return run_classifiers(action, &config_file(config));
+        Some(Command::Questions { action, url }) => return run_questions(action, &url).await,
+        Some(Command::Classifiers { action, url }) => {
+            return run_classifiers(action, &url).await;
         }
     };
     serve(args).await;
@@ -1729,11 +1850,15 @@ fn classifiers_table(
                     false => k.to_owned(),
                 })
                 .collect();
-            let model = c.get("model").and_then(Value::as_str).unwrap_or("-");
-            [key.clone(), model.to_owned(), keys.join(", ")]
+            let field = |f: &str| c.get(f).and_then(Value::as_str).unwrap_or("-").to_owned();
+            let description = field("description")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            [key.clone(), field("model"), keys.join(", "), description]
         })
         .collect();
-    table(["key", "model", "questions"], rows, boxed)
+    table(["key", "model", "questions", "description"], rows, boxed)
 }
 
 /// A boxed table for a terminal, tab-separated fields for a pipe. The last column is cut to fit a terminal.
@@ -1834,122 +1959,225 @@ fn ask_target(args: &AskArgs) -> String {
     }
 }
 
-fn run_classifiers(action: ClassifiersAction, path: &str) {
+/// An API error as the CLI prints it: `error[code]: message`, then `log: jeff.log` when the server names its log.
+fn error_lines(status: u16, text: &str) -> String {
+    let body: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+    let Some(msg) = body["error"].as_str() else {
+        return format!("error: HTTP {status}: {}", text.trim());
+    };
+    let mut out = match body["code"].as_str() {
+        Some(code) => format!("error[{code}]: {msg}"),
+        None => format!("error: {msg}"),
+    };
+    if let Some(log) = body["log"].as_str() {
+        out.push_str(&format!("\nlog: {log}"));
+    }
+    out
+}
+
+/// Calls the management API of a running jeff and returns its JSON, or `None` for an empty body. Any failure
+/// prints the error and exits.
+async fn admin_call(
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&Value>,
+) -> Option<Value> {
     let fail = |e: String| -> ! {
         eprintln!("{e}");
         std::process::exit(1)
     };
-    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
-    let refused = |c: questions::Change| -> ! {
-        match c {
-            questions::Change::NotFound(m)
-            | questions::Change::Exists(m)
-            | questions::Change::Invalid(m) => fail(m),
+    let base = base.trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("HTTP client");
+    let mut req = client.request(method, format!("{base}{path}"));
+    if let Some(body) = body {
+        req = req.json(body);
+    }
+    if let Some(key) = client_key(env::var("JEFF_API_KEY").ok()) {
+        req = req.bearer_auth(key);
+    }
+    let failed = |e: reqwest::Error| -> ! {
+        match e.is_connect() {
+            true => fail(format!("cannot connect to {base}; start jeff first")),
+            false => fail(format!("{base}{path}: {}", e.without_url())),
         }
     };
-    let build = |args: &ClassifierArgs| -> Value {
-        let mut c = json!({ "questions": args.questions });
-        if let Some(m) = &args.model {
-            c["model"] = json!(m);
-        }
-        for k in classifiers::skipped(&c, &config.questions) {
-            eprintln!("{}", classifiers::skip_reason(&k, &config.questions));
-        }
-        c
+    let resp = req.send().await.unwrap_or_else(|e| failed(e));
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_else(|e| failed(e));
+    if !status.is_success() {
+        fail(error_lines(status.as_u16(), &text));
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(
+        serde_json::from_str(&text)
+            .unwrap_or_else(|_| fail(format!("jeff sent a reply that is not JSON: {text}"))),
+    )
+}
+
+fn print_json(value: &Value, output: Option<String>) {
+    match output {
+        Some(path) => write_json(&path, value).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        }),
+        None => println!("{}", serde_json::to_string_pretty(value).unwrap()),
+    }
+}
+
+fn read_json(file: &str) -> Value {
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1)
     };
+    let text = read_input(file).unwrap_or_else(|e| fail(e));
+    serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{file}: {e}")))
+}
+
+/// A key as one URL path segment; the server refuses keys that need more than this, but the CLI must not build a
+/// different path from them.
+fn segment(key: &str) -> String {
+    url::form_urlencoded::byte_serialize(key.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20")
+}
+
+async fn saved_questions(url: &str) -> questions::Questions {
+    match admin_call(url, reqwest::Method::GET, "/v1/questions", None).await {
+        Some(Value::Object(q)) => q,
+        _ => questions::Questions::new(),
+    }
+}
+
+async fn warn_skipped(url: &str, c: &Value) {
+    let saved = saved_questions(url).await;
+    for k in classifiers::skipped(c, &saved) {
+        eprintln!("{}", classifiers::skip_reason(&k, &saved));
+    }
+}
+
+fn classifier_body(
+    questions: &[String],
+    model: Option<String>,
+    description: Option<String>,
+) -> Value {
+    let mut c = json!({ "questions": questions });
+    if let Some(m) = model {
+        c["model"] = json!(m);
+    }
+    if let Some(d) = description {
+        c["description"] = json!(d);
+    }
+    c
+}
+
+async fn run_classifiers(action: ClassifiersAction, url: &str) {
+    use reqwest::Method;
     match action {
-        ClassifiersAction::List { output: Some(file) } => {
-            write_json(&file, &Value::Object(config.classifiers)).unwrap_or_else(|e| fail(e));
-        }
-        ClassifiersAction::List { output: None } => {
-            if config.classifiers.is_empty() {
-                eprintln!("no classifiers in {path}");
+        ClassifiersAction::List { output } => {
+            let cs = admin_call(url, Method::GET, "/v1/classifiers", None)
+                .await
+                .unwrap_or_default();
+            if output.is_some() {
+                return print_json(&cs, output);
             }
+            let cs = cs.as_object().cloned().unwrap_or_default();
+            if cs.is_empty() {
+                eprintln!("no classifiers");
+            }
+            let saved = saved_questions(url).await;
             let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
-            print!(
-                "{}",
-                classifiers_table(&config.classifiers, &config.questions, terminal)
-            );
+            print!("{}", classifiers_table(&cs, &saved, terminal));
         }
-        ClassifiersAction::Get { key, output } => match (config.classifiers.get(&key), output) {
-            (Some(c), Some(file)) => write_json(&file, c).unwrap_or_else(|e| fail(e)),
-            (Some(c), None) => println!("{}", serde_json::to_string_pretty(c).unwrap()),
-            (None, _) => fail(format!("unknown classifier '{key}'")),
-        },
+        ClassifiersAction::Get { key, output } => {
+            let path = format!("/v1/classifiers/{}", segment(&key));
+            let c = admin_call(url, Method::GET, &path, None)
+                .await
+                .unwrap_or_default();
+            print_json(&c, output);
+        }
         ClassifiersAction::Add(args) => {
-            let c = build(&args);
-            let input = classifiers::Classifiers::from_iter([(args.key.clone(), c)]);
-            classifiers::create(&mut config.classifiers, input).unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("added {}", args.key);
+            let input = match (args.file, args.key) {
+                (Some(file), _) => read_json(&file),
+                (None, Some(key)) => {
+                    json!({ key: classifier_body(&args.questions, args.model, args.description) })
+                }
+                (None, None) => unreachable!("clap requires a key without --file"),
+            };
+            let saved = admin_call(url, Method::POST, "/api/classifiers", Some(&input))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
+            for c in input.as_object().into_iter().flat_map(|m| m.values()) {
+                warn_skipped(url, c).await;
+            }
         }
         ClassifiersAction::Update(args) => {
-            let c = build(&args);
-            classifiers::update(&mut config.classifiers, &args.key, c)
-                .unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("updated {}", args.key);
+            let input = match args.file {
+                Some(file) => read_json(&file),
+                None => classifier_body(&args.questions, args.model, args.description),
+            };
+            let path = format!("/api/classifiers/{}", segment(&args.key));
+            let saved = admin_call(url, Method::PUT, &path, Some(&input))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
+            warn_skipped(url, &saved).await;
         }
         ClassifiersAction::Remove { key } => {
-            classifiers::remove(&mut config.classifiers, &key).unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("removed {key}");
+            let path = format!("/api/classifiers/{}", segment(&key));
+            admin_call(url, Method::DELETE, &path, None).await;
         }
     }
 }
 
-fn run_questions(action: QuestionsAction, path: &str) {
-    let fail = |e: String| -> ! {
-        eprintln!("{e}");
-        std::process::exit(1)
-    };
-    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
-    let json = |file: &str| -> Value {
-        let text = read_input(file).unwrap_or_else(|e| fail(e));
-        serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{file}: {e}")))
-    };
-    let refused = |c: questions::Change| -> ! {
-        match c {
-            questions::Change::NotFound(m)
-            | questions::Change::Exists(m)
-            | questions::Change::Invalid(m) => fail(m),
-        }
-    };
+async fn run_questions(action: QuestionsAction, url: &str) {
+    use reqwest::Method;
     match action {
-        QuestionsAction::List { output: Some(file) } => {
-            write_json(&file, &Value::Object(config.questions)).unwrap_or_else(|e| fail(e));
-        }
-        QuestionsAction::List { output: None } => {
-            if config.questions.is_empty() {
-                eprintln!("no questions in {path}");
+        QuestionsAction::List { output } => {
+            let qs = admin_call(url, Method::GET, "/v1/questions", None)
+                .await
+                .unwrap_or_default();
+            if output.is_some() {
+                return print_json(&qs, output);
+            }
+            let qs = qs.as_object().cloned().unwrap_or_default();
+            if qs.is_empty() {
+                eprintln!("no questions");
             }
             let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
-            print!("{}", questions_table(&config.questions, terminal));
+            print!("{}", questions_table(&qs, terminal));
         }
-        QuestionsAction::Get { key, output } => match (config.questions.get(&key), output) {
-            (Some(q), Some(file)) => write_json(&file, q).unwrap_or_else(|e| fail(e)),
-            (Some(q), None) => println!("{}", serde_json::to_string_pretty(q).unwrap()),
-            (None, _) => fail(format!("unknown question '{key}'")),
-        },
+        QuestionsAction::Get { key, output } => {
+            let path = format!("/v1/questions/{}", segment(&key));
+            let q = admin_call(url, Method::GET, &path, None)
+                .await
+                .unwrap_or_default();
+            print_json(&q, output);
+        }
         QuestionsAction::Add { file } => {
-            let Value::Object(input) = json(&file) else {
-                fail(format!("{file}: expected a JSON map of key to question"));
-            };
-            let keys: Vec<_> = input.keys().cloned().collect();
-            questions::create(&mut config.questions, input).unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("added {}", keys.join(", "));
+            let input = read_json(&file);
+            let saved = admin_call(url, Method::POST, "/api/questions", Some(&input))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
         }
         QuestionsAction::Update { key, file } => {
-            questions::update(&mut config.questions, &key, json(&file))
-                .unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("updated {key}");
+            let path = format!("/api/questions/{}", segment(&key));
+            let saved = admin_call(url, Method::PUT, &path, Some(&read_json(&file)))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
         }
         QuestionsAction::Remove { key } => {
-            questions::remove(&mut config.questions, &key).unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("removed {key}");
+            let path = format!("/api/questions/{}", segment(&key));
+            admin_call(url, Method::DELETE, &path, None).await;
         }
     }
 }
@@ -2047,9 +2275,14 @@ fn run_install(action: install::Action) {
 
 async fn serve(args: ServeArgs) {
     let config_path = config_file(args.config.clone());
-    let config = load_config(&config_path).unwrap_or_else(|e| {
+    let config = load_config(&config_path).unwrap_or_else(|problems| {
+        let n = problems.len();
+        let summary = format!("{config_path}: {}; jeff did not start", count_problems(n));
+        log::write(&config_path, "config_invalid", &summary, &problems);
         fail_with(&format!(
-            "{e}\nfix or remove the file; jeff does not start on a broken config"
+            "error[config_invalid]: {}\nlog: {}",
+            problems_text(&config_path, n),
+            log::path(&config_path).display()
         ))
     });
     if let Some(short) = args
@@ -2083,6 +2316,7 @@ async fn serve(args: ServeArgs) {
             .filter(|k| !k.is_empty())
             .collect(),
         config_mtime: Mutex::new(modified(&config_path)),
+        problems: Mutex::new(Vec::new()),
         allowed_hosts: args
             .allowed_hosts
             .iter()
@@ -2126,6 +2360,7 @@ async fn serve(args: ServeArgs) {
     let api_addr = args.api.clone();
     let manage = Router::new()
         .route("/api/config", get(get_config).put(put_config))
+        .route("/api/status", get(status))
         .route("/api/clm", get(clm_status))
         .route("/api/clm/{action}", post(clm_action))
         .route("/api/keys", get(list_keys).post(create_key))
@@ -2216,6 +2451,187 @@ fn fail_with(message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_lines_formats_api_errors() {
+        assert_eq!(
+            error_lines(
+                409,
+                r#"{"code":"config_invalid","error":"jeff.json has 2 problems; fix it before changing questions or classifiers","log":"jeff.log"}"#
+            ),
+            "error[config_invalid]: jeff.json has 2 problems; fix it before changing questions or classifiers\nlog: jeff.log"
+        );
+        assert_eq!(
+            error_lines(404, r#"{"error":"unknown classifier 'x'"}"#),
+            "error: unknown classifier 'x'"
+        );
+        assert_eq!(
+            error_lines(502, "Bad Gateway"),
+            "error: HTTP 502: Bad Gateway"
+        );
+    }
+
+    #[test]
+    fn classifiers_add_takes_flags_or_a_file() {
+        let parse = |a: &[&str]| Cli::try_parse_from(a).is_ok();
+        assert!(parse(&[
+            "jeff",
+            "classifiers",
+            "add",
+            "t",
+            "a",
+            "b",
+            "--model",
+            "m"
+        ]));
+        assert!(parse(&["jeff", "classifiers", "add", "--file", "c.json"]));
+        assert!(!parse(&[
+            "jeff",
+            "classifiers",
+            "add",
+            "t",
+            "a",
+            "--file",
+            "c.json"
+        ]));
+        assert!(!parse(&["jeff", "classifiers", "add"]));
+        assert!(parse(&[
+            "jeff",
+            "classifiers",
+            "update",
+            "t",
+            "--file",
+            "-"
+        ]));
+        assert!(!parse(&[
+            "jeff",
+            "classifiers",
+            "update",
+            "t",
+            "--file",
+            "-",
+            "--model",
+            "m"
+        ]));
+        assert!(!parse(&["jeff", "classifiers", "update", "t"]));
+        assert!(parse(&[
+            "jeff",
+            "classifiers",
+            "add",
+            "t",
+            "a",
+            "--description",
+            "d"
+        ]));
+        assert!(!parse(&[
+            "jeff",
+            "classifiers",
+            "update",
+            "t",
+            "--file",
+            "-",
+            "--description",
+            "d"
+        ]));
+    }
+
+    fn test_app(config_path: &str) -> App {
+        App {
+            clients: Mutex::new(HashMap::new()),
+            config: RwLock::new(Config::default()),
+            config_path: config_path.into(),
+            listed: RwLock::new(HashMap::new()),
+            clm_task: Mutex::new(json!({ "state": "idle" })),
+            clm_warm: AtomicU8::new(0),
+            static_keys: Vec::new(),
+            problems: Mutex::new(Vec::new()),
+            config_mtime: Mutex::new(modified(config_path)),
+            allowed_hosts: Vec::new(),
+            failures: Mutex::new(HashMap::new()),
+            exposed: false,
+            allow_private: false,
+        }
+    }
+
+    async fn body_of(r: Response) -> Value {
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_refuses_a_file_changed_on_disk() {
+        let path = temp_config(
+            "changed",
+            &serde_json::to_string(&Config::default()).unwrap(),
+        );
+        let app = test_app(&path);
+        *app.config_mtime.lock().unwrap() = Some(SystemTime::UNIX_EPOCH);
+        let r = app.save(&Config::default()).await.unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        assert_eq!(body_of(*r).await["code"], "config_changed");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_broken_file_clears_its_problems() {
+        let path = temp_config("deleted", "{");
+        let app = test_app(&path);
+        *app.config_mtime.lock().unwrap() = Some(SystemTime::UNIX_EPOCH);
+        app.refresh_from_disk().await;
+        assert_eq!(app.problems.lock().unwrap().len(), 1);
+        fs::remove_file(&path).unwrap();
+        app.refresh_from_disk().await;
+        assert!(app.problems.lock().unwrap().is_empty());
+        assert!(app.save(&Config::default()).await.is_ok());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_names_no_server_path() {
+        let blocker = env::temp_dir().join(format!("jeff-test-blocker-{}", std::process::id()));
+        fs::write(&blocker, "").unwrap();
+        let path = blocker.join("jeff.json");
+        let app = test_app(path.to_str().unwrap());
+        let r = app.save(&Config::default()).await.unwrap_err();
+        let _ = fs::remove_file(&blocker);
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_of(*r).await;
+        assert_eq!(
+            body["error"],
+            "could not save jeff.json; the server console has the cause"
+        );
+    }
+
+    #[test]
+    fn problems_text_counts() {
+        assert_eq!(problems_text("x/jeff.json", 1), "jeff.json has 1 problem");
+        assert_eq!(problems_text("x/jeff.json", 2), "jeff.json has 2 problems");
+    }
+
+    #[tokio::test]
+    async fn config_invalid_names_the_log_only() {
+        let r = config_invalid("C:/Users/u/.jeff/jeff.json", 2);
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            json!({"code": "config_invalid", "error": "jeff.json has 2 problems; fix it before changing questions or classifiers", "log": "jeff.log"})
+        );
+    }
+
+    #[test]
+    fn status_body_shapes() {
+        assert_eq!(status_body("x/jeff.json", &[]), json!({"config": "ok"}));
+        assert_eq!(
+            status_body("x/jeff.json", &["a".into(), "b".into()]),
+            json!({"config": "invalid", "file": "jeff.json", "problems": 2, "log": "jeff.log"})
+        );
+    }
 
     #[test]
     fn detects_loopback_urls() {
@@ -2519,7 +2935,7 @@ mod tests {
         let result = load_config(path.to_str().unwrap());
         let _ = fs::remove_file(&path);
         let e = result.err().expect("an invalid question must be refused");
-        assert!(e.contains("question 'a b'"), "{e}");
+        assert!(e[0].contains("question 'a b'"), "{e:?}");
     }
 
     #[test]
@@ -2533,8 +2949,48 @@ mod tests {
         let read = read_config(path);
         let _ = fs::remove_file(path);
         let e = loaded.err().expect("an invalid classifier must be refused");
-        assert!(e.contains("classifier 'k'"), "{e}");
+        assert!(e[0].contains("classifier 'k'"), "{e:?}");
         assert!(read.unwrap().classifiers.contains_key("k"));
+    }
+
+    fn temp_config(name: &str, text: &str) -> String {
+        let path = env::temp_dir().join(format!("jeff-test-{name}-{}.json", std::process::id()));
+        fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn load_config_lists_every_problem() {
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["questions"] = json!({"a b": {"type": "noul", "instructions": "x"}});
+        config["classifiers"] = json!({"triage": {"questions": ["x"], "modle": "m"}});
+        let path = temp_config("every", &config.to_string());
+        let problems = load_config(&path).err().unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].starts_with("question 'a b': "), "{problems:?}");
+        assert_eq!(
+            problems[1],
+            "classifier 'triage': unknown field 'modle'; a classifier has questions, model and description"
+        );
+    }
+
+    #[test]
+    fn load_config_accepts_a_classifier_naming_a_deleted_question() {
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["classifiers"] = json!({"triage": {"questions": ["gone"]}});
+        let path = temp_config("gone", &config.to_string());
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        assert!(loaded.is_ok(), "{:?}", loaded.err());
+    }
+
+    #[test]
+    fn load_config_reports_bad_json_as_one_problem() {
+        let path = temp_config("json", "{");
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(loaded.err().map(|p| p.len()), Some(1));
     }
 
     #[test]
@@ -2633,13 +3089,11 @@ mod tests {
 
     #[test]
     fn lists_classifiers_one_line_each() {
-        let cs = json!({"triage": {"questions": ["a", "gone"], "model": "p/m"}, "plain": {"questions": ["a"]}});
+        let cs = json!({"triage": {"questions": ["a", "gone"], "model": "p/m", "description": "Routes\n tickets"}, "plain": {"questions": ["a"]}});
         let saved = json!({"a": {"type": "noul", "instructions": "x"}});
         assert_eq!(
             classifiers_table(cs.as_object().unwrap(), saved.as_object().unwrap(), false),
-            "plain	-	a
-triage	p/m	a, gone (deleted)
-"
+            "plain\t-\ta\t-\ntriage\tp/m\ta, gone (deleted)\tRoutes tickets\n"
         );
     }
 

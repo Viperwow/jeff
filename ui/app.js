@@ -57,6 +57,37 @@ const store = {
   set(k, v) { try { localStorage.setItem("jeff." + k, JSON.stringify(v)); } catch {} },
 };
 
+/**
+ * Unsaved form input, kept in this browser until the form is saved, cancelled or discarded. A form whose fields match
+ * what it opened with keeps no draft. Provider keys and created access keys never get here.
+ *
+ * A draft remembers the saved data it started from. When that data has changed since, the draft is dropped instead
+ * of restored: saving it would overwrite the newer data, for providers even removing one added meanwhile.
+ */
+const drafts = {
+  baseline: {},
+  drop(id) { try { localStorage.removeItem("jeff.draft:" + id); } catch {} },
+  /** Records what form `id` opened with, then returns its draft, if any, and says in `status` when it was stale. */
+  open(id, snapshot, status) {
+    const base = JSON.stringify(snapshot);
+    this.baseline[id] = base;
+    const d = store.get("draft:" + id);
+    if (!d) return null;
+    if (d.base === base) return d.value;
+    this.drop(id);
+    say(status, "Draft discarded: the saved data changed since it was written.", "err");
+    return null;
+  },
+  track(id, snapshot) {
+    const base = this.baseline[id];
+    if (JSON.stringify(snapshot) === base) this.drop(id);
+    else store.set("draft:" + id, { base, value: snapshot });
+  },
+};
+
+/** Runs `track` after the click that changed a form, such as adding or removing a row, has done its work. */
+const afterClick = (track) => () => setTimeout(track);
+
 function authHeaders(headers = {}) {
   const key = store.get("key");
   return key ? { ...headers, authorization: `Bearer ${key}` } : headers;
@@ -67,9 +98,29 @@ async function api(path, opts = {}) {
   const body = await r.json().catch(() => ({}));
   $("#auth-error").hidden = r.status !== 401;
   if (r.status === 401) $("#auth-error").textContent = body.error || "jeff rejected the access key.";
-  if (!r.ok) throw new Error(body.error || body.detail?.message || body.detail || `HTTP ${r.status}`);
+  if (!r.ok) {
+    if (body.code === "config_invalid") checkStatus();
+    const err = new Error((body.error || body.detail?.message || body.detail || `HTTP ${r.status}`) + (body.log ? `. Log: ${body.log}` : ""));
+    err.code = body.code;
+    err.log = body.log;
+    throw err;
+  }
   return { body, headers: r.headers };
 }
+
+/** Shows the banner while jeff.json is broken and jeff runs on the config it read before. */
+async function checkStatus() {
+  try {
+    const { body } = await api("/api/status");
+    const bad = body.config === "invalid";
+    $("#config-banner").hidden = !bad;
+    if (!bad) return;
+    $("#config-problems").textContent = `${body.file} has ${body.problems} problem${body.problems === 1 ? "" : "s"}.`;
+    $("#config-log").textContent = body.log;
+  } catch {}
+}
+
+$("#config-recheck").onclick = (e) => busy(e.currentTarget, checkStatus);
 
 /* ---------- tabs ---------- */
 
@@ -223,8 +274,35 @@ function providerCard(p) {
   return card;
 }
 
+function providersSnapshot() {
+  return {
+    default_model: $("#default-model").value,
+    providers: $$("#provider-list [data-provider]").map((card) => ({
+      id: $(".p-id", card).value,
+      name: $(".p-name", card).value,
+      url: $(".p-url", card).value,
+      models: $(".p-models", card).value,
+      installer: card.dataset.installer || null,
+    })),
+  };
+}
+
+const trackProviders = () => drafts.track("providers", providersSnapshot());
+
 function renderProviders() {
-  $("#provider-list").replaceChildren(...config.providers.map(providerCard));
+  $("#default-model").value = "";
+  renderProviderCards(config.providers);
+  const d = drafts.open("providers", providersSnapshot(), $("#save-status"));
+  $("#p-draft").hidden = !d;
+  if (!d) return;
+  const saved = new Map(config.providers.map((p) => [p.id, p]));
+  renderProviderCards(d.providers.map((p) => ({ ...p, models: p.models.split(",").map((m) => m.trim()), key_set: saved.get(p.id)?.key_set })));
+  $("#default-model").value = d.default_model;
+  fillDefaultModel();
+}
+
+function renderProviderCards(providers) {
+  $("#provider-list").replaceChildren(...providers.map(providerCard));
   for (const card of $$("[data-installer=clm]")) clmTask(card).catch(() => {});
   const used = new Set(config.providers.map((p) => p.id));
   $("#preset").replaceChildren(...Object.entries(PRESET_LABELS).map(([k, label]) => {
@@ -235,6 +313,10 @@ function renderProviders() {
   $("#preset").value = Object.keys(PRESET_LABELS).find((k) => k === "custom" || !used.has(k));
   fillDefaultModel();
 }
+
+$("#page-providers").addEventListener("input", (e) => { if (!e.target.matches(".p-key")) trackProviders(); });
+$("#page-providers").addEventListener("change", (e) => { if (!e.target.matches(".p-key")) trackProviders(); });
+$("#page-providers").addEventListener("click", afterClick(trackProviders));
 
 $("#add-provider").onclick = () => {
   const preset = PRESETS[$("#preset").value];
@@ -291,6 +373,7 @@ async function saveProviders() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ default_model: $("#default-model").value, providers }),
     });
+    drafts.drop("providers");
     flash($("#save-status"), "Saved");
     await loadConfig();
   } catch (e) {
@@ -458,6 +541,28 @@ $("#key-date").addEventListener("input", syncExpiry);
 $("#key-exp").addEventListener("change", syncExpiry);
 syncExpiry();
 
+const keySnapshot = () => ({ name: $("#key-name").value, role: $("#key-role").value, exp: $("#key-exp").value, date: $("#key-date").value });
+const trackKey = () => drafts.track("key:new", keySnapshot());
+
+function restoreKeyDraft() {
+  const d = drafts.open("key:new", keySnapshot(), $("#key-status"));
+  $("#k-draft").hidden = !d;
+  if (d) fillKeyForm(d);
+}
+
+function fillKeyForm(d) {
+  $("#key-name").value = d.name;
+  $("#key-role").value = d.role;
+  $("#key-exp").value = d.exp;
+  $("#key-date").value = d.date;
+  syncRole();
+  syncExpiry();
+}
+
+$("#key-form").addEventListener("input", trackKey);
+$("#key-form").addEventListener("change", trackKey);
+restoreKeyDraft();
+
 $("#key-form").onsubmit = (e) => {
   e.preventDefault();
   busy(e.submitter ?? $("#key-form [type=submit]"), createKey);
@@ -479,6 +584,8 @@ async function createKey() {
     if (kept) store.set("key", body.key);
     $("#key-saved-note").textContent = kept ? "This browser now uses this key for the admin page." : "";
     $("#key-name").value = "";
+    drafts.drop("key:new");
+    $("#k-draft").hidden = true;
     flash($("#key-status"), "Key created");
     await refreshInfo();
     await loadKeys();
@@ -915,6 +1022,19 @@ function fillFormModel(want = $("#q-form-model").value) {
   sel.value = want;
 }
 
+const questionDraftId = () => `question:${editing ?? "new"}`;
+
+/** The form as typed, unchecked: what `addQuestion` takes, plus the model. */
+function questionSnapshot() {
+  const card = $("#q-form-card .q");
+  const type = card.dataset.type;
+  const rows = type === "choice" ? $$(".q-row", card).map((r) => [$(".q-opt-key", r).value, $(".q-opt-desc", r).value])
+    : type === "score" ? $$(".q-level", card).map((i) => [i.value]) : undefined;
+  return { q: { key: $(".q-key", card).value, type, instructions: $(".q-instr", card).value, rows }, model: $("#q-form-model").value };
+}
+
+const trackQuestion = () => { if (!$("#q-form-view").hidden) drafts.track(questionDraftId(), questionSnapshot()); };
+
 function showForm(open) {
   $("#q-list-view").hidden = open;
   $("#q-form-view").hidden = !open;
@@ -927,11 +1047,17 @@ function openForm(key = null) {
   const card = addQuestion(key ? builderOf(key, q) : { type: "noul", key: "" });
   $(".q-key", card).readOnly = !!key;
   fillFormModel(q.model || "");
+  say($("#q-form-status"), "");
+  const d = drafts.open(questionDraftId(), questionSnapshot(), $("#q-form-status"));
+  $("#q-draft").hidden = !d;
+  if (d) {
+    $(".q-key", addQuestion(d.q)).readOnly = !!key;
+    fillFormModel(d.model);
+  }
   $("#q-try-state").value = $("#pg-state").value;
   $("#q-try-answer").replaceChildren(el("p", "note py-12 text-center", "Try runs the draft against this state. Nothing is saved."));
-  say($("#q-form-status"), "");
   showForm(true);
-  (key ? $(".q-instr", card) : $(".q-key", card)).focus();
+  (key ? $(".q-instr") : $(".q-key")).focus();
 }
 
 /** The form's question as `[key, native question]`, with its model when one is picked. */
@@ -952,6 +1078,7 @@ async function saveForm() {
     if (editing) await api(`/api/questions/${encodeURIComponent(editing)}`, { method: "PUT", headers: json, body: JSON.stringify(q) });
     else await api("/api/questions", { method: "POST", headers: json, body: JSON.stringify({ [key]: q }) });
     checked.add(key);
+    drafts.drop(questionDraftId());
     await loadQuestions();
     showForm(false);
   } catch (err) {
@@ -975,8 +1102,11 @@ async function tryDraft() {
 
 $("#q-new").onclick = () => openForm();
 $("#q-empty-new").onclick = () => openForm();
-$("#q-back").onclick = () => showForm(false);
-$("#q-cancel").onclick = () => showForm(false);
+const closeQuestionForm = () => { drafts.drop(questionDraftId()); showForm(false); };
+$("#q-back").onclick = closeQuestionForm;
+$("#q-cancel").onclick = closeQuestionForm;
+for (const type of ["input", "change"]) $("#q-form-view").addEventListener(type, (e) => { if (!e.target.closest("#q-try-state")) trackQuestion(); });
+$("#q-form-card").addEventListener("click", afterClick(trackQuestion));
 $("#q-save").onclick = (e) => busy(e.currentTarget, saveForm);
 $("#q-try").onclick = tryDraft;
 
@@ -1005,7 +1135,7 @@ function skippedNotice(keys) {
 
 function questionChip(key) {
   if (key in saved) return el("span", "rounded border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 font-mono text-[11px] text-neutral-700 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-300", key);
-  const c = el("span", "rounded border border-red-300 bg-red-50 px-1.5 py-0.5 font-mono text-[11px] text-red-800 line-through dark:border-red-900 dark:bg-red-950/40 dark:text-red-300", key);
+  const c = el("span", "rounded border border-red-300 bg-red-50 px-1.5 py-0.5 font-mono text-[11px] text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300", key);
   c.title = deletedTip(key);
   return c;
 }
@@ -1035,7 +1165,9 @@ function classifierRow(key, c) {
     bad.title = "questions must be an array of question keys. Edit the classifier to fix it, or delete it.";
     chips.append(bad);
   }
-  main.append(head, chips);
+  main.append(head);
+  if (typeof c.description === "string") main.append(el("p", "note mt-0.5 line-clamp-2", c.description));
+  main.append(chips);
   const edit = el("button", "btn min-w-0", "Edit");
   edit.type = "button";
   edit.onclick = () => openClassifierForm(key);
@@ -1126,15 +1258,17 @@ function pickedRow(key) {
     }
     main.append(head, el("p", "note mt-0.5 truncate", q.instructions));
   } else {
-    head.append(el("span", "font-mono font-medium text-red-800 line-through dark:text-red-300", key), el("span", "badge bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200", "deleted"));
-    main.append(head, el("p", "mt-0.5 text-xs text-red-700 dark:text-red-300", "Deleted. The classifier skips it."));
+    head.append(el("span", "font-mono font-medium text-red-800 dark:text-red-300", key), el("span", "badge bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200", "deleted"));
+    main.append(head, el("p", "mt-0.5 text-xs text-red-700 dark:text-red-300", "The classifier skips this question"));
   }
-  li.append(handle, main, removeButton(() => {
+  const remove = removeButton(() => {
     const i = picked.indexOf(key);
     picked = picked.filter((k) => k !== key);
     renderPicked();
     ($$("#c-picked li")[Math.min(i, picked.length - 1)] || $("#c-search")).focus();
-  }, `Remove ${key}`));
+  }, `Remove ${key}`);
+  if (!q) remove.classList.add("text-red-700", "dark:text-red-300");
+  li.append(handle, main, remove);
   li.onkeydown = (e) => {
     if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
     e.preventDefault();
@@ -1154,6 +1288,7 @@ function renderPicked() {
   const gone = missing(picked).length;
   $("#c-count").textContent = picked.length ? `${picked.length}${gone ? ` · ${gone} deleted` : ""}` : "";
   if (!$("#c-options").hidden) renderOptions();
+  trackClassifier();
 }
 
 let dragKey = null;
@@ -1238,19 +1373,32 @@ $("#c-search").onkeydown = (e) => {
 };
 $("#c-form-model").onchange = renderPicked;
 
+const classifierDraftId = () => `classifier:${cEditing ?? "new"}`;
+const classifierSnapshot = () => ({ key: $("#c-key").value, description: $("#c-description").value, picked: [...picked], model: $("#c-form-model").value });
+const trackClassifier = () => { if (!$("#c-form-view").hidden) drafts.track(classifierDraftId(), classifierSnapshot()); };
+
 function openClassifierForm(key = null) {
   cEditing = key;
   const c = key ? classifiers[key] : {};
   $("#c-form-title").textContent = key ? "Edit classifier" : "New classifier";
   $("#c-key").value = key || "";
   $("#c-key").readOnly = !!key;
+  $("#c-description").value = typeof c.description === "string" ? c.description : "";
   picked = keysOf(c);
   fillClassifierModel(typeof c.model === "string" ? c.model : "");
+  say($("#c-form-status"), "");
+  const d = drafts.open(classifierDraftId(), classifierSnapshot(), $("#c-form-status"));
+  $("#c-draft").hidden = !d;
+  if (d) {
+    if (!key) $("#c-key").value = d.key;
+    $("#c-description").value = d.description ?? "";
+    picked = d.picked;
+    fillClassifierModel(d.model);
+  }
   renderPicked();
   $("#c-delete").hidden = !key;
   $("#c-try-state").value = $("#pg-state").value;
   $("#c-try-answer").replaceChildren(el("p", "note py-12 text-center", "Try runs the draft against this state. Nothing is saved."));
-  say($("#c-form-status"), "");
   closeOptions();
   showClassifierForm(true);
   (key ? $("#c-search") : $("#c-key")).focus();
@@ -1259,9 +1407,10 @@ function openClassifierForm(key = null) {
 /** The form's classifier, without its key. */
 function classifierDraft() {
   if (!picked.length) throw new Error("Add at least one question.");
-  // A save refuses any other field, so one written by hand is dropped here instead of blocking the save.
   const c = { questions: [...picked] };
   if ($("#c-form-model").value) c.model = $("#c-form-model").value;
+  const description = $("#c-description").value.trim();
+  if (description) c.description = description;
   return c;
 }
 
@@ -1275,6 +1424,7 @@ async function saveClassifier() {
     if (cEditing) await api(`/api/classifiers/${encodeURIComponent(key)}`, { method: "PUT", headers: json, body: JSON.stringify(c) });
     else await api("/api/classifiers", { method: "POST", headers: json, body: JSON.stringify({ [key]: c }) });
     store.set("classifier", key);
+    drafts.drop(classifierDraftId());
     await loadClassifiers();
     showClassifierForm(false);
   } catch (err) {
@@ -1307,8 +1457,20 @@ confirmClick($("#c-delete"), "Confirm delete", async () => {
 });
 $("#c-new").onclick = () => openClassifierForm();
 $("#c-empty-new").onclick = () => openClassifierForm();
-$("#c-back").onclick = () => showClassifierForm(false);
-$("#c-cancel").onclick = () => showClassifierForm(false);
+const closeClassifierForm = () => { drafts.drop(classifierDraftId()); showClassifierForm(false); };
+$("#c-back").onclick = closeClassifierForm;
+$("#c-cancel").onclick = closeClassifierForm;
+$("#c-key").addEventListener("input", trackClassifier);
+$("#c-description").addEventListener("input", trackClassifier);
+$("#c-form-model").addEventListener("change", trackClassifier);
+
+for (const b of $$("[data-discard]")) b.onclick = () => {
+  const form = b.dataset.discard;
+  if (form === "q") { drafts.drop(questionDraftId()); openForm(editing); }
+  if (form === "c") { drafts.drop(classifierDraftId()); openClassifierForm(cEditing); }
+  if (form === "p") { drafts.drop("providers"); renderProviders(); }
+  if (form === "k") { drafts.drop("key:new"); fillKeyForm(JSON.parse(drafts.baseline["key:new"])); $("#k-draft").hidden = true; }
+};
 $("#c-save").onclick = (e) => busy(e.currentTarget, saveClassifier);
 $("#c-try").onclick = tryClassifier;
 $("#c-run").onclick = runClassifier;
@@ -1320,3 +1482,4 @@ setView(view);
 loadQuestions().catch((e) => say($("#pg-status"), e.message, "err"));
 loadClassifiers().catch((e) => say($("#c-status"), e.message, "err"));
 loadConfig().catch((e) => say($("#pg-status"), e.message, "err"));
+checkStatus();

@@ -16,11 +16,15 @@
     <a class="tab" href="#keys">Access keys</a>
   </nav>
 
-  <main class="min-w-0 flex-1">
+  <main class="min-w-0 flex-1 lg:flex lg:h-screen lg:flex-col">
     <p id="auth-error" role="alert" class="m-6 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-red-800 max-sm:m-4 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200" hidden></p>
+    <div id="config-banner" role="status" class="m-6 flex flex-wrap items-center gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-2 text-amber-900 max-sm:m-4 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200" hidden>
+      <p class="min-w-0 flex-1"><strong id="config-problems"></strong> jeff keeps running on the previous config. Log: <code id="config-log">jeff.log</code></p>
+      <button id="config-recheck" type="button" class="btn">Recheck</button>
+    </div>
     <!-- Questions -->
-    <div id="page-questions">
-      <div id="q-list-view" class="grid lg:h-screen lg:grid-cols-2">
+    <div id="page-questions" class="lg:min-h-0 lg:flex-1">
+      <div id="q-list-view" class="grid lg:h-full lg:grid-cols-2">
         <section class="flex min-w-0 flex-col gap-5 border-neutral-200 p-6 lg:overflow-y-auto lg:border-r max-sm:p-4 dark:border-neutral-800">
           <header class="flex flex-wrap items-start justify-between gap-4">
             <div>
@@ -76,12 +80,13 @@
         </section>
       </div>
 
-      <div id="q-form-view" class="grid lg:h-screen lg:grid-cols-2" hidden>
+      <div id="q-form-view" class="grid lg:h-full lg:grid-cols-2" hidden>
         <section class="flex min-w-0 flex-col gap-5 border-neutral-200 p-6 lg:overflow-y-auto lg:border-r max-sm:p-4 dark:border-neutral-800">
           <header>
             <button id="q-back" type="button" class="note cursor-pointer hover:underline">&larr; Questions</button>
             <h1 id="q-form-title" class="mt-1 text-2xl font-semibold tracking-tight">New question</h1>
           </header>
+          <p id="q-draft" class="note flex items-center gap-3" hidden>Draft restored <button type="button" class="btn" data-discard="q">Discard</button></p>
           <div id="q-form-card"></div>
           <label class="block space-y-1">
             <span class="block font-medium">Model</span>
@@ -108,8 +113,8 @@
     </div>
 
     <!-- Classifiers -->
-    <div id="page-classifiers" hidden>
-      <div id="c-list-view" class="grid lg:h-screen lg:grid-cols-2">
+    <div id="page-classifiers" class="lg:min-h-0 lg:flex-1" hidden>
+      <div id="c-list-view" class="grid lg:h-full lg:grid-cols-2">
         <section class="flex min-w-0 flex-col gap-5 border-neutral-200 p-6 lg:overflow-y-auto lg:border-r max-sm:p-4 dark:border-neutral-800">
           <header class="flex flex-wrap items-start justify-between gap-4">
             <div>
@@ -162,15 +167,20 @@
         </section>
       </div>
 
-      <div id="c-form-view" class="grid lg:h-screen lg:grid-cols-2" hidden>
+      <div id="c-form-view" class="grid lg:h-full lg:grid-cols-2" hidden>
         <section class="flex min-w-0 flex-col gap-5 border-neutral-200 p-6 lg:overflow-y-auto lg:border-r max-sm:p-4 dark:border-neutral-800">
           <header>
             <button id="c-back" type="button" class="note cursor-pointer hover:underline">&larr; Classifiers</button>
             <h1 id="c-form-title" class="mt-1 text-2xl font-semibold tracking-tight">New classifier</h1>
           </header>
+          <p id="c-draft" class="note flex items-center gap-3" hidden>Draft restored <button type="button" class="btn" data-discard="c">Discard</button></p>
           <label class="block space-y-1">
             <span class="block font-medium">Key</span>
             <input id="c-key" class="control font-mono" placeholder="support-triage" spellcheck="false">
+          </label>
+          <label class="block space-y-1">
+            <span class="block font-medium">Description <span class="note font-normal">optional</span></span>
+            <textarea id="c-description" class="control" rows="2" maxlength="1000" placeholder="What this classifier is for"></textarea>
           </label>
           <div class="space-y-2">
             <p class="flex items-baseline gap-2 font-medium">Questions <span id="c-count" class="note font-normal tabular-nums"></span></p>
@@ -205,7 +215,7 @@
     </div>
 
     <!-- Providers -->
-    <div id="page-providers" class="mx-auto max-w-4xl space-y-4 p-8 max-sm:p-4" hidden>
+    <div id="page-providers" class="lg:min-h-0 lg:flex-1 lg:overflow-y-auto" hidden><div class="mx-auto max-w-4xl space-y-4 p-8 max-sm:p-4">
       <header class="mb-6">
         <h1 class="text-2xl font-semibold tracking-tight">Providers</h1>
         <p class="mt-1 text-neutral-600 dark:text-neutral-400">Any server with <code class="font-mono text-[13px]">POST /v1/systemone</code>. Address a model as <code class="font-mono text-[13px]">provider/model</code>.</p>
@@ -222,6 +232,7 @@
         </div>
       </section>
 
+      <p id="p-draft" class="note flex items-center gap-3" hidden>Draft restored <button type="button" class="btn" data-discard="p">Discard</button></p>
       <div id="provider-list" class="space-y-4"></div>
 
       <section class="card flex flex-wrap items-center gap-3">
@@ -234,10 +245,10 @@
         <button id="save" type="button" class="btn btn-primary">Save</button>
         <span id="save-status" class="note" aria-live="polite"></span>
       </div>
-    </div>
+    </div></div>
 
     <!-- Access keys -->
-    <div id="page-keys" class="mx-auto max-w-4xl space-y-4 p-8 max-sm:p-4" hidden>
+    <div id="page-keys" class="lg:min-h-0 lg:flex-1 lg:overflow-y-auto" hidden><div class="mx-auto max-w-4xl space-y-4 p-8 max-sm:p-4">
       <header class="mb-6">
         <h1 class="text-2xl font-semibold tracking-tight">Access keys</h1>
         <p class="mt-1 text-neutral-600 dark:text-neutral-400">Clients send a key as <code class="font-mono text-[13px]">Authorization: Bearer &lt;key&gt;</code>. Once any key exists, jeff refuses every request without a valid one.</p>
@@ -245,6 +256,7 @@
 
       <form id="key-form" class="card space-y-4">
         <h2 class="text-base font-semibold">New key</h2>
+        <p id="k-draft" class="note flex items-center gap-3" hidden>Draft restored <button type="button" class="btn" data-discard="k">Discard</button></p>
         <div class="grid gap-4 sm:grid-cols-3">
           <label class="block space-y-1">
             <span class="block font-medium">Name</span>
@@ -295,7 +307,7 @@
         <p id="key-static" class="note" hidden></p>
         <ul id="key-list" class="divide-y divide-neutral-200 dark:divide-neutral-800"></ul>
       </section>
-    </div>
+    </div></div>
   </main>
 </div>
 

@@ -293,7 +293,25 @@ jeff questions get KEY [-o FILE]
 jeff questions add FILE  save new questions from a JSON map of key to question; `-` reads stdin
 jeff questions update KEY FILE
 jeff questions remove KEY
+jeff classifiers list [-o FILE]
+jeff classifiers get KEY [-o FILE]
+jeff classifiers add KEY QUESTION... [--model MODEL] [--description TEXT]
+jeff classifiers add --file FILE
+                         save new classifiers from a JSON map of key to classifier; `-` reads stdin
+jeff classifiers update KEY (QUESTION... [--model MODEL] [--description TEXT] | --file FILE)
+jeff classifiers remove KEY
 ```
+
+`jeff questions` and `jeff classifiers` call a running jeff on `http://127.0.0.1:8081` unless `--url` or `JEFF_ADMIN_URL` says otherwise. They send `JEFF_API_KEY`, which must be an admin key once any key exists.
+
+An error exits with code 1 and prints the API error, for example:
+
+```
+error[config_invalid]: jeff.json has 2 problems; fix it before changing questions or classifiers
+log: jeff.log
+```
+
+jeff refuses to start on a broken `jeff.json`. If the file breaks while jeff runs, jeff keeps the last working config, refuses changes and writes the problems to `jeff.log` next to the config.
 
 Add `--help` to any command for details.
 
