@@ -1,6 +1,7 @@
 mod classifiers;
 mod install;
 mod keys;
+mod log;
 mod questions;
 
 use axum::{
