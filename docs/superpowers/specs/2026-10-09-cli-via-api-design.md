@@ -103,7 +103,7 @@ input.
 
 The row of a deleted question:
 
-- has a soft red background (`red-50` at about 70% opacity);
+- has a red background (`red-50`);
 - shows its key in red, without strikethrough;
 - shows a red `deleted` tag;
 - shows the red caption "The classifier skips this question";
