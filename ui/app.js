@@ -1155,7 +1155,9 @@ function classifierRow(key, c) {
     bad.title = "questions must be an array of question keys. Edit the classifier to fix it, or delete it.";
     chips.append(bad);
   }
-  main.append(head, chips);
+  main.append(head);
+  if (typeof c.description === "string") main.append(el("p", "note mt-0.5 line-clamp-2", c.description));
+  main.append(chips);
   const edit = el("button", "btn min-w-0", "Edit");
   edit.type = "button";
   edit.onclick = () => openClassifierForm(key);
@@ -1362,7 +1364,7 @@ $("#c-search").onkeydown = (e) => {
 $("#c-form-model").onchange = renderPicked;
 
 const classifierDraftId = () => `classifier:${cEditing ?? "new"}`;
-const classifierSnapshot = () => ({ key: $("#c-key").value, picked: [...picked], model: $("#c-form-model").value });
+const classifierSnapshot = () => ({ key: $("#c-key").value, description: $("#c-description").value, picked: [...picked], model: $("#c-form-model").value });
 const trackClassifier = () => { if (!$("#c-form-view").hidden) drafts.track(classifierDraftId(), classifierSnapshot()); };
 
 function openClassifierForm(key = null) {
@@ -1371,12 +1373,14 @@ function openClassifierForm(key = null) {
   $("#c-form-title").textContent = key ? "Edit classifier" : "New classifier";
   $("#c-key").value = key || "";
   $("#c-key").readOnly = !!key;
+  $("#c-description").value = typeof c.description === "string" ? c.description : "";
   picked = keysOf(c);
   fillClassifierModel(typeof c.model === "string" ? c.model : "");
   const d = drafts.open(classifierDraftId(), classifierSnapshot());
   $("#c-draft").hidden = !d;
   if (d) {
     if (!key) $("#c-key").value = d.key;
+    $("#c-description").value = d.description ?? "";
     picked = d.picked;
     fillClassifierModel(d.model);
   }
@@ -1393,9 +1397,10 @@ function openClassifierForm(key = null) {
 /** The form's classifier, without its key. */
 function classifierDraft() {
   if (!picked.length) throw new Error("Add at least one question.");
-  // A save refuses any other field, so one written by hand is dropped here instead of blocking the save.
   const c = { questions: [...picked] };
   if ($("#c-form-model").value) c.model = $("#c-form-model").value;
+  const description = $("#c-description").value.trim();
+  if (description) c.description = description;
   return c;
 }
 
@@ -1446,6 +1451,7 @@ const closeClassifierForm = () => { drafts.drop(classifierDraftId()); showClassi
 $("#c-back").onclick = closeClassifierForm;
 $("#c-cancel").onclick = closeClassifierForm;
 $("#c-key").addEventListener("input", trackClassifier);
+$("#c-description").addEventListener("input", trackClassifier);
 $("#c-form-model").addEventListener("change", trackClassifier);
 
 for (const b of $$("[data-discard]")) b.onclick = () => {

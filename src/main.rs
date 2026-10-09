@@ -1548,8 +1548,11 @@ struct AddClassifierArgs {
     /// The model for every question of the classifier, in place of their own
     #[arg(long)]
     model: Option<String>,
+    /// What the classifier is for
+    #[arg(long)]
+    description: Option<String>,
     /// A JSON map of key to classifier, or `-` for stdin
-    #[arg(long, conflicts_with_all = ["key", "questions", "model"])]
+    #[arg(long, conflicts_with_all = ["key", "questions", "model", "description"])]
     file: Option<String>,
 }
 
@@ -1562,8 +1565,11 @@ struct UpdateClassifierArgs {
     /// The model for every question of the classifier, in place of their own
     #[arg(long)]
     model: Option<String>,
+    /// What the classifier is for
+    #[arg(long)]
+    description: Option<String>,
     /// A JSON classifier, or `-` for stdin
-    #[arg(long, conflicts_with_all = ["questions", "model"])]
+    #[arg(long, conflicts_with_all = ["questions", "model", "description"])]
     file: Option<String>,
 }
 
@@ -1808,11 +1814,15 @@ fn classifiers_table(
                     false => k.to_owned(),
                 })
                 .collect();
-            let model = c.get("model").and_then(Value::as_str).unwrap_or("-");
-            [key.clone(), model.to_owned(), keys.join(", ")]
+            let field = |f: &str| c.get(f).and_then(Value::as_str).unwrap_or("-").to_owned();
+            let description = field("description")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            [key.clone(), field("model"), keys.join(", "), description]
         })
         .collect();
-    table(["key", "model", "questions"], rows, boxed)
+    table(["key", "model", "questions", "description"], rows, boxed)
 }
 
 /// A boxed table for a terminal, tab-separated fields for a pipe. The last column is cut to fit a terminal.
@@ -2016,10 +2026,17 @@ async fn warn_skipped(url: &str, c: &Value) {
     }
 }
 
-fn classifier_body(questions: &[String], model: Option<String>) -> Value {
+fn classifier_body(
+    questions: &[String],
+    model: Option<String>,
+    description: Option<String>,
+) -> Value {
     let mut c = json!({ "questions": questions });
     if let Some(m) = model {
         c["model"] = json!(m);
+    }
+    if let Some(d) = description {
+        c["description"] = json!(d);
     }
     c
 }
@@ -2052,7 +2069,9 @@ async fn run_classifiers(action: ClassifiersAction, url: &str) {
         ClassifiersAction::Add(args) => {
             let input = match (args.file, args.key) {
                 (Some(file), _) => read_json(&file),
-                (None, Some(key)) => json!({ key: classifier_body(&args.questions, args.model) }),
+                (None, Some(key)) => {
+                    json!({ key: classifier_body(&args.questions, args.model, args.description) })
+                }
                 (None, None) => unreachable!("clap requires a key without --file"),
             };
             let saved = admin_call(url, Method::POST, "/api/classifiers", Some(&input))
@@ -2066,7 +2085,7 @@ async fn run_classifiers(action: ClassifiersAction, url: &str) {
         ClassifiersAction::Update(args) => {
             let input = match args.file {
                 Some(file) => read_json(&file),
-                None => classifier_body(&args.questions, args.model),
+                None => classifier_body(&args.questions, args.model, args.description),
             };
             let path = format!("/api/classifiers/{}", segment(&args.key));
             let saved = admin_call(url, Method::PUT, &path, Some(&input))
@@ -2459,6 +2478,25 @@ mod tests {
             "m"
         ]));
         assert!(!parse(&["jeff", "classifiers", "update", "t"]));
+        assert!(parse(&[
+            "jeff",
+            "classifiers",
+            "add",
+            "t",
+            "a",
+            "--description",
+            "d"
+        ]));
+        assert!(!parse(&[
+            "jeff",
+            "classifiers",
+            "update",
+            "t",
+            "--file",
+            "-",
+            "--description",
+            "d"
+        ]));
     }
 
     #[test]
@@ -2828,7 +2866,7 @@ mod tests {
         assert!(problems[0].starts_with("question 'a b': "), "{problems:?}");
         assert_eq!(
             problems[1],
-            "classifier 'triage': unknown field 'modle'; a classifier has questions and model"
+            "classifier 'triage': unknown field 'modle'; a classifier has questions, model and description"
         );
     }
 
@@ -2946,13 +2984,11 @@ mod tests {
 
     #[test]
     fn lists_classifiers_one_line_each() {
-        let cs = json!({"triage": {"questions": ["a", "gone"], "model": "p/m"}, "plain": {"questions": ["a"]}});
+        let cs = json!({"triage": {"questions": ["a", "gone"], "model": "p/m", "description": "Routes\n tickets"}, "plain": {"questions": ["a"]}});
         let saved = json!({"a": {"type": "noul", "instructions": "x"}});
         assert_eq!(
             classifiers_table(cs.as_object().unwrap(), saved.as_object().unwrap(), false),
-            "plain	-	a
-triage	p/m	a, gone (deleted)
-"
+            "plain\t-\ta\t-\ntriage\tp/m\ta, gone (deleted)\tRoutes tickets\n"
         );
     }
 

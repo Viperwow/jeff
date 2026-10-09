@@ -4,20 +4,20 @@ use serde_json::{Map, Value, json};
 
 use crate::questions::{self, Change, Questions};
 
-/// Saved classifiers by key: `{"questions": [keys], "model"?: "provider/model"}`.
+/// Saved classifiers by key: `{"questions": [keys], "model"?: "provider/model", "description"?: "text"}`.
 pub type Classifiers = Map<String, Value>;
 
-/// Fields beyond `questions` and `model` are refused, so a typo such as `modle` does not pass silently.
+/// Fields beyond `questions`, `model` and `description` are refused, so a typo such as `modle` does not pass silently.
 pub fn validate(key: &str, c: &Value) -> Result<(), String> {
     check(key, c).map_err(|e| format!("classifier '{key}': {e}"))?;
     let unknown = c
         .as_object()
         .into_iter()
         .flat_map(|o| o.keys())
-        .find(|f| *f != "questions" && *f != "model");
+        .find(|f| !["questions", "model", "description"].contains(&f.as_str()));
     match unknown {
         Some(f) => Err(format!(
-            "classifier '{key}': unknown field '{f}'; a classifier has questions and model"
+            "classifier '{key}': unknown field '{f}'; a classifier has questions, model and description"
         )),
         None => Ok(()),
     }
@@ -48,6 +48,12 @@ fn check(key: &str, c: &Value) -> Result<(), &'static str> {
         .is_some_and(|m| m.as_str().is_none_or(|m| m.trim().is_empty()))
     {
         return Err("model must be a non-empty string");
+    }
+    if c.get("description").is_some_and(|d| {
+        d.as_str()
+            .is_none_or(|d| d.trim().is_empty() || d.chars().count() > 1000)
+    }) {
+        return Err("description must be a non-empty string of up to 1000 characters");
     }
     Ok(())
 }
@@ -252,7 +258,7 @@ mod tests {
         assert_eq!(
             e,
             Change::Invalid(
-                "classifier 'k': unknown field 'modle'; a classifier has questions and model"
+                "classifier 'k': unknown field 'modle'; a classifier has questions, model and description"
                     .into()
             )
         );
@@ -262,6 +268,19 @@ mod tests {
             Err(Change::Invalid(_))
         ));
         assert!(validate("k", &json!({"questions": ["u"], "modle": "p/m"})).is_err());
+    }
+
+    #[test]
+    fn description_is_an_optional_text() {
+        let with = |d: Value| validate("k", &json!({"questions": ["u"], "description": d}));
+        assert!(with(json!("Routes incoming tickets")).is_ok());
+        assert!(with(json!("x".repeat(1000))).is_ok());
+        for bad in [json!(""), json!("  "), json!(1), json!("x".repeat(1001))] {
+            assert_eq!(
+                with(bad).unwrap_err(),
+                "classifier 'k': description must be a non-empty string of up to 1000 characters"
+            );
+        }
     }
 
     #[test]

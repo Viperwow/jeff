@@ -295,10 +295,10 @@ jeff questions update KEY FILE
 jeff questions remove KEY
 jeff classifiers list [-o FILE]
 jeff classifiers get KEY [-o FILE]
-jeff classifiers add KEY QUESTION... [--model MODEL]
+jeff classifiers add KEY QUESTION... [--model MODEL] [--description TEXT]
 jeff classifiers add --file FILE
                          save new classifiers from a JSON map of key to classifier; `-` reads stdin
-jeff classifiers update KEY (QUESTION... [--model MODEL] | --file FILE)
+jeff classifiers update KEY (QUESTION... [--model MODEL] [--description TEXT] | --file FILE)
 jeff classifiers remove KEY
 ```
 

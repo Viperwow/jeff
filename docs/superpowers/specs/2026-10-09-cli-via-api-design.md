@@ -70,7 +70,7 @@ API responses name the log file only, never a server path.
 ```
 2026-10-09T10:42:17Z config_invalid C:\Users\viper\.jeff\jeff.json: 2 problems; jeff keeps the previous config
   questions."a b": key must be 1-64 characters of A-Z, a-z, 0-9, '_' and '-'
-  classifiers.triage: unknown field 'modle'; a classifier has questions and model
+  classifiers.triage: unknown field 'modle'; a classifier has questions, model and description
 2026-10-09T10:45:03Z config_fixed C:\Users\viper\.jeff\jeff.json fixed; config reloaded
 ```
 
@@ -83,6 +83,19 @@ API responses name the log file only, never a server path.
 {"config":"ok"}
 {"config":"invalid","file":"jeff.json","problems":2,"log":"jeff.log"}
 ```
+
+## Classifier description
+
+- A classifier may carry `description`, a non-empty string of up to 1000 characters. It does not change how the
+  classifier runs.
+
+  ```json
+  {"support-triage": {"description": "Routes incoming tickets", "questions": ["refund", "team"]}}
+  ```
+
+- A classifier has `questions`, `model` and `description`. Any other field is an unknown field.
+- The classifier form has an optional **Description** under **Key**. The list shows it under the key.
+- `jeff classifiers add|update` take `--description TEXT`. `classifiers list` gains a `description` column.
 
 ## Admin page
 
@@ -145,16 +158,16 @@ The questions count shows `· 1 deleted`.
 | `questions remove KEY` | `DELETE /api/questions/KEY` |
 | `classifiers list` | `GET /v1/classifiers` |
 | `classifiers get KEY` | `GET /v1/classifiers/KEY` |
-| `classifiers add KEY Q... [--model M]` | `POST /api/classifiers` |
+| `classifiers add KEY Q... [--model M] [--description D]` | `POST /api/classifiers` |
 | `classifiers add --file FILE` | `POST /api/classifiers`, the body as is |
-| `classifiers update KEY Q... [--model M]` | `PUT /api/classifiers/KEY` |
+| `classifiers update KEY Q... [--model M] [--description D]` | `PUT /api/classifiers/KEY` |
 | `classifiers update KEY --file FILE` | `PUT /api/classifiers/KEY`, the body as is |
 | `classifiers remove KEY` | `DELETE /api/classifiers/KEY` |
 
 - `FILE` is a path, or `-` for stdin.
 - `classifiers add --file` takes a JSON map of key to classifier, like `questions add`.
 - `classifiers update --file` takes one classifier.
-- `--file` conflicts with the positional questions and `--model`.
+- `--file` conflicts with the positional questions, `--model` and `--description`.
 
 ### Output
 

@@ -178,6 +178,10 @@
             <span class="block font-medium">Key</span>
             <input id="c-key" class="control font-mono" placeholder="support-triage" spellcheck="false">
           </label>
+          <label class="block space-y-1">
+            <span class="block font-medium">Description <span class="note font-normal">optional</span></span>
+            <textarea id="c-description" class="control" rows="2" maxlength="1000" placeholder="What this classifier is for"></textarea>
+          </label>
           <div class="space-y-2">
             <p class="flex items-baseline gap-2 font-medium">Questions <span id="c-count" class="note font-normal tabular-nums"></span></p>
             <ul id="c-picked" class="divide-y divide-neutral-200 rounded-lg border border-neutral-200 bg-white dark:divide-neutral-800 dark:border-neutral-800 dark:bg-neutral-900/40" aria-label="Questions of the classifier; Alt + arrow keys reorder" hidden></ul>
