@@ -67,9 +67,29 @@ async function api(path, opts = {}) {
   const body = await r.json().catch(() => ({}));
   $("#auth-error").hidden = r.status !== 401;
   if (r.status === 401) $("#auth-error").textContent = body.error || "jeff rejected the access key.";
-  if (!r.ok) throw new Error(body.error || body.detail?.message || body.detail || `HTTP ${r.status}`);
+  if (!r.ok) {
+    if (body.code === "config_invalid") checkStatus();
+    const err = new Error((body.error || body.detail?.message || body.detail || `HTTP ${r.status}`) + (body.log ? `. Log: ${body.log}` : ""));
+    err.code = body.code;
+    err.log = body.log;
+    throw err;
+  }
   return { body, headers: r.headers };
 }
+
+/** Shows the banner while jeff.json is broken and jeff runs on the config it read before. */
+async function checkStatus() {
+  try {
+    const { body } = await api("/api/status");
+    const bad = body.config === "invalid";
+    $("#config-banner").hidden = !bad;
+    if (!bad) return;
+    $("#config-problems").textContent = `${body.file} has ${body.problems} problem${body.problems === 1 ? "" : "s"}.`;
+    $("#config-log").textContent = body.log;
+  } catch {}
+}
+
+$("#config-recheck").onclick = (e) => busy(e.currentTarget, checkStatus);
 
 /* ---------- tabs ---------- */
 
@@ -1005,7 +1025,7 @@ function skippedNotice(keys) {
 
 function questionChip(key) {
   if (key in saved) return el("span", "rounded border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 font-mono text-[11px] text-neutral-700 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-300", key);
-  const c = el("span", "rounded border border-red-300 bg-red-50 px-1.5 py-0.5 font-mono text-[11px] text-red-800 line-through dark:border-red-900 dark:bg-red-950/40 dark:text-red-300", key);
+  const c = el("span", "rounded border border-red-300 bg-red-50 px-1.5 py-0.5 font-mono text-[11px] text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300", key);
   c.title = deletedTip(key);
   return c;
 }
@@ -1126,15 +1146,17 @@ function pickedRow(key) {
     }
     main.append(head, el("p", "note mt-0.5 truncate", q.instructions));
   } else {
-    head.append(el("span", "font-mono font-medium text-red-800 line-through dark:text-red-300", key), el("span", "badge bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200", "deleted"));
-    main.append(head, el("p", "mt-0.5 text-xs text-red-700 dark:text-red-300", "Deleted. The classifier skips it."));
+    head.append(el("span", "font-mono font-medium text-red-800 dark:text-red-300", key), el("span", "badge bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200", "deleted"));
+    main.append(head, el("p", "mt-0.5 text-xs text-red-700 dark:text-red-300", "The classifier skips this question"));
   }
-  li.append(handle, main, removeButton(() => {
+  const remove = removeButton(() => {
     const i = picked.indexOf(key);
     picked = picked.filter((k) => k !== key);
     renderPicked();
     ($$("#c-picked li")[Math.min(i, picked.length - 1)] || $("#c-search")).focus();
-  }, `Remove ${key}`));
+  }, `Remove ${key}`);
+  if (!q) remove.classList.add("text-red-700", "dark:text-red-300");
+  li.append(handle, main, remove);
   li.onkeydown = (e) => {
     if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
     e.preventDefault();
@@ -1320,3 +1342,4 @@ setView(view);
 loadQuestions().catch((e) => say($("#pg-status"), e.message, "err"));
 loadClassifiers().catch((e) => say($("#c-status"), e.message, "err"));
 loadConfig().catch((e) => say($("#pg-status"), e.message, "err"));
+checkStatus();
