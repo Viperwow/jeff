@@ -49,7 +49,7 @@ stays valid until the file is fixed.
 
 - The console shows one line: `error[config_invalid]: jeff.json has 2 problems; jeff keeps the previous config`.
 - Classification through `/v1/*`, the UI, `jeff ask` and curl keeps working on the last working config.
-- Changes to questions and classifiers answer `409`:
+- Every change saved through the API answers `409`: questions, classifiers, providers and keys:
 
   ```json
   {"code":"config_invalid","error":"jeff.json has 2 problems; fix it before changing questions or classifiers","log":"jeff.log"}
@@ -81,7 +81,7 @@ API responses name the log file only, never a server path.
 
 ```json
 {"config":"ok"}
-{"config":"invalid","problems":2,"log":"jeff.log"}
+{"config":"invalid","file":"jeff.json","problems":2,"log":"jeff.log"}
 ```
 
 ## Admin page

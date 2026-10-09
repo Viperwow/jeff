@@ -183,6 +183,8 @@ struct App {
     clm_warm: AtomicU8,
     /// Keys from `--api-key` / `JEFF_API_KEY`; they never expire and are managed outside the UI.
     static_keys: Vec<String>,
+    /// Problems of a config file that failed to reload; the config read before stays in force while it is not empty.
+    problems: Mutex<Vec<String>>,
     /// When the config file was last read, so keys created or revoked by `jeff keys` apply without a restart.
     config_mtime: Mutex<Option<SystemTime>>,
     /// Host names the UI answers to besides localhost and IP literals.
@@ -315,34 +317,47 @@ impl reqwest::dns::Resolve for GuardedResolver {
 }
 
 impl App {
-    /// A file that does not parse keeps the config in memory, so the access keys stay in force until it is fixed.
-    /// An invalid question does not block the reload: a key revoked meanwhile must stop working.
+    /// A broken file is refused whole and the config read before stays in force, keys included, until it is fixed.
     async fn refresh_from_disk(&self) {
         let now = modified(&self.config_path);
         let seen = *self.config_mtime.lock().unwrap();
         if now.is_some() && now != seen {
-            match read_config(&self.config_path) {
+            let path = &self.config_path;
+            match load_config(path) {
                 Ok(config) => {
-                    for (key, q) in &config.questions {
-                        if let Err(e) = questions::validate(key, q) {
-                            eprintln!("{}: {e}; it cannot be asked until fixed", self.config_path);
-                        }
-                    }
-                    for (key, c) in &config.classifiers {
-                        if let Err(e) = classifiers::validate(key, c) {
-                            eprintln!("{}: {e}; it cannot be called until fixed", self.config_path);
-                        }
-                    }
                     *self.config.write().await = config;
+                    let was = std::mem::take(&mut *self.problems.lock().unwrap());
+                    if !was.is_empty() {
+                        let line = format!("{path} fixed; config reloaded");
+                        eprintln!("{line}");
+                        log::write(path, "config_fixed", &line, &[]);
+                    }
                 }
-                Err(e) => eprintln!("{e}; keeping the config loaded before"),
+                Err(problems) => {
+                    let n = problems.len();
+                    let summary = format!(
+                        "{path}: {}; jeff keeps the previous config",
+                        count_problems(n)
+                    );
+                    log::write(path, "config_invalid", &summary, &problems);
+                    eprintln!(
+                        "error[config_invalid]: {}; jeff keeps the previous config",
+                        problems_text(path, n)
+                    );
+                    *self.problems.lock().unwrap() = problems;
+                }
             }
             *self.config_mtime.lock().unwrap() = now;
         }
     }
 
-    async fn save(&self, config: &Config) -> Result<(), String> {
-        save_config(&self.config_path, config)?;
+    async fn save(&self, config: &Config) -> Result<(), Box<Response>> {
+        let n = self.problems.lock().unwrap().len();
+        if n > 0 {
+            return Err(Box::new(config_invalid(&self.config_path, n)));
+        }
+        save_config(&self.config_path, config)
+            .map_err(|e| Box::new(error(StatusCode::INTERNAL_SERVER_ERROR, e)))?;
         *self.config_mtime.lock().unwrap() = modified(&self.config_path);
         Ok(())
     }
@@ -393,6 +408,46 @@ fn http_client(connect_secs: u64, allow_private: bool) -> reqwest::Client {
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({ "error": msg.into() }))).into_response()
+}
+
+/// `2 problems`, `1 problem`.
+fn count_problems(n: usize) -> String {
+    format!("{n} problem{}", if n == 1 { "" } else { "s" })
+}
+
+/// Names the config by file name only: API callers must not learn where the server keeps it.
+fn problems_text(config_path: &str, n: usize) -> String {
+    let name = std::path::Path::new(config_path)
+        .file_name()
+        .map_or_else(|| config_path.into(), |n| n.to_string_lossy());
+    format!("{name} has {}", count_problems(n))
+}
+
+/// jeff saves the whole file, so a save while it is broken would overwrite the hand edits.
+fn config_invalid(config_path: &str, n: usize) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "code": "config_invalid",
+            "error": format!("{}; fix it before changing questions or classifiers", problems_text(config_path, n)),
+            "log": "jeff.log",
+        })),
+    )
+        .into_response()
+}
+
+fn status_body(config_path: &str, problems: &[String]) -> Value {
+    if problems.is_empty() {
+        return json!({ "config": "ok" });
+    }
+    let file = std::path::Path::new(config_path)
+        .file_name()
+        .map_or_else(|| config_path.into(), |n| n.to_string_lossy());
+    json!({ "config": "invalid", "file": file, "problems": problems.len(), "log": "jeff.log" })
+}
+
+async fn status(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(status_body(&app.config_path, &app.problems.lock().unwrap()))
 }
 
 fn request(
@@ -928,8 +983,8 @@ async fn create_key(State(app): State<Arc<App>>, Json(input): Json<KeyInput>) ->
     let (key, record) = keys::generate(name, input.role, input.expires_at);
     let mut next = config.clone();
     next.keys.push(record.clone());
-    if let Err(e) = app.save(&next).await {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Err(r) = app.save(&next).await {
+        return *r;
     }
     *config = next;
     let mut view = key_view(&record);
@@ -950,8 +1005,8 @@ async fn revoke_key(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
             "this is the last admin key; create another admin key or revoke the client keys first",
         );
     }
-    if let Err(e) = app.save(&next).await {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Err(r) = app.save(&next).await {
+        return *r;
     }
     *config = next;
     StatusCode::NO_CONTENT.into_response()
@@ -982,9 +1037,7 @@ async fn change_config(
             questions::Change::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
         })
     })?;
-    app.save(&next)
-        .await
-        .map_err(|e| Box::new(error(StatusCode::INTERNAL_SERVER_ERROR, e)))?;
+    app.save(&next).await?;
     *config = next;
     Ok(config.clone())
 }
@@ -1256,8 +1309,8 @@ async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>)
         Ok(c) => c,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    if let Err(e) = app.save(&next).await {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Err(r) = app.save(&next).await {
+        return *r;
     }
     *config = next;
     Json(public(&config)).into_response()
@@ -2057,10 +2110,14 @@ fn run_install(action: install::Action) {
 
 async fn serve(args: ServeArgs) {
     let config_path = config_file(args.config.clone());
-    let config = load_config(&config_path).unwrap_or_else(|e| {
+    let config = load_config(&config_path).unwrap_or_else(|problems| {
+        let n = problems.len();
+        let summary = format!("{config_path}: {}; jeff did not start", count_problems(n));
+        log::write(&config_path, "config_invalid", &summary, &problems);
         fail_with(&format!(
-            "{}\nfix or remove the file; jeff does not start on a broken config",
-            e.join("\n")
+            "error[config_invalid]: {}\nlog: {}",
+            problems_text(&config_path, n),
+            log::path(&config_path).display()
         ))
     });
     if let Some(short) = args
@@ -2094,6 +2151,7 @@ async fn serve(args: ServeArgs) {
             .filter(|k| !k.is_empty())
             .collect(),
         config_mtime: Mutex::new(modified(&config_path)),
+        problems: Mutex::new(Vec::new()),
         allowed_hosts: args
             .allowed_hosts
             .iter()
@@ -2137,6 +2195,7 @@ async fn serve(args: ServeArgs) {
     let api_addr = args.api.clone();
     let manage = Router::new()
         .route("/api/config", get(get_config).put(put_config))
+        .route("/api/status", get(status))
         .route("/api/clm", get(clm_status))
         .route("/api/clm/{action}", post(clm_action))
         .route("/api/keys", get(list_keys).post(create_key))
@@ -2227,6 +2286,35 @@ fn fail_with(message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn problems_text_counts() {
+        assert_eq!(problems_text("x/jeff.json", 1), "jeff.json has 1 problem");
+        assert_eq!(problems_text("x/jeff.json", 2), "jeff.json has 2 problems");
+    }
+
+    #[tokio::test]
+    async fn config_invalid_names_the_log_only() {
+        let r = config_invalid("C:/Users/u/.jeff/jeff.json", 2);
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            json!({"code": "config_invalid", "error": "jeff.json has 2 problems; fix it before changing questions or classifiers", "log": "jeff.log"})
+        );
+    }
+
+    #[test]
+    fn status_body_shapes() {
+        assert_eq!(status_body("x/jeff.json", &[]), json!({"config": "ok"}));
+        assert_eq!(
+            status_body("x/jeff.json", &["a".into(), "b".into()]),
+            json!({"config": "invalid", "file": "jeff.json", "problems": 2, "log": "jeff.log"})
+        );
+    }
 
     #[test]
     fn detects_loopback_urls() {
