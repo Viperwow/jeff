@@ -1259,9 +1259,8 @@ function openClassifierForm(key = null) {
 /** The form's classifier, without its key. */
 function classifierDraft() {
   if (!picked.length) throw new Error("Add at least one question.");
-  // Fields the form does not show, saved through the API, survive an edit.
-  const { questions, model, ...rest } = cEditing ? classifiers[cEditing] : {};
-  const c = { ...rest, questions: [...picked] };
+  // A save refuses any other field, so one written by hand is dropped here instead of blocking the save.
+  const c = { questions: [...picked] };
   if ($("#c-form-model").value) c.model = $("#c-form-model").value;
   return c;
 }

@@ -32,6 +32,8 @@ Out of scope:
 - The classifier key follows the question key rules.
 - `questions` is a non-empty array of question keys, without duplicates. Its order is kept.
 - `model` is optional. When present, it is a non-empty string.
+- A save refuses any other field: `unknown field 'modle'; a classifier has questions and model`. Loading a
+  hand-edited config keeps such a field; the next save from the form drops it.
 - Saving does not check that the questions exist. A classifier stays saveable after one of its questions is deleted.
 - The field reads with `#[serde(default)]`. Existing configs load unchanged; no migration is needed.
 
