@@ -1423,21 +1423,21 @@ enum Command {
     },
     /// Ask saved or custom questions through a running jeff and print the answer JSON
     Ask(AskArgs),
-    /// Manage saved questions in the config file; a running server picks changes up on the next request
+    /// Manage saved questions through a running jeff; JEFF_API_KEY must hold an admin key
     Questions {
         #[command(subcommand)]
         action: QuestionsAction,
-        /// The config file [default: ~/.jeff/jeff.json]
-        #[arg(long, env = "JEFF_CONFIG", global = true)]
-        config: Option<String>,
+        /// The jeff admin page address, where questions are managed
+        #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url, global = true)]
+        url: String,
     },
-    /// Manage classifiers in the config file; a running server picks changes up on the next request
+    /// Manage classifiers through a running jeff; JEFF_API_KEY must hold an admin key
     Classifiers {
         #[command(subcommand)]
         action: ClassifiersAction,
-        /// The config file [default: ~/.jeff/jeff.json]
-        #[arg(long, env = "JEFF_CONFIG", global = true)]
-        config: Option<String>,
+        /// The jeff admin page address, where classifiers are managed
+        #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url, global = true)]
+        url: String,
     },
 }
 
@@ -1530,23 +1530,41 @@ enum ClassifiersAction {
         #[arg(short, long)]
         output: Option<String>,
     },
-    /// Save a new classifier; an existing key fails
-    Add(ClassifierArgs),
+    /// Save a new classifier, or every classifier of a JSON map in --file; an existing key fails
+    Add(AddClassifierArgs),
     /// Replace a classifier; without --model its override is removed
-    Update(ClassifierArgs),
+    Update(UpdateClassifierArgs),
     /// Delete one classifier
     Remove { key: String },
 }
 
 #[derive(Args)]
-struct ClassifierArgs {
-    key: String,
+struct AddClassifierArgs {
+    #[arg(required_unless_present = "file")]
+    key: Option<String>,
     /// Saved question keys, in the order to ask them
-    #[arg(required = true)]
+    #[arg(required_unless_present = "file")]
     questions: Vec<String>,
     /// The model for every question of the classifier, in place of their own
     #[arg(long)]
     model: Option<String>,
+    /// A JSON map of key to classifier, or `-` for stdin
+    #[arg(long, conflicts_with_all = ["key", "questions", "model"])]
+    file: Option<String>,
+}
+
+#[derive(Args)]
+struct UpdateClassifierArgs {
+    key: String,
+    /// Saved question keys, in the order to ask them
+    #[arg(required_unless_present = "file")]
+    questions: Vec<String>,
+    /// The model for every question of the classifier, in place of their own
+    #[arg(long)]
+    model: Option<String>,
+    /// A JSON classifier, or `-` for stdin
+    #[arg(long, conflicts_with_all = ["questions", "model"])]
+    file: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1646,11 +1664,9 @@ async fn main() {
         Some(Command::Remove { stack: Stack::Clm }) => return run_install(install::Action::Remove),
         Some(Command::Keys { action, config }) => return run_keys(action, &config_file(config)),
         Some(Command::Ask(args)) => return run_ask(args).await,
-        Some(Command::Questions { action, config }) => {
-            return run_questions(action, &config_file(config));
-        }
-        Some(Command::Classifiers { action, config }) => {
-            return run_classifiers(action, &config_file(config));
+        Some(Command::Questions { action, url }) => return run_questions(action, &url).await,
+        Some(Command::Classifiers { action, url }) => {
+            return run_classifiers(action, &url).await;
         }
     };
     serve(args).await;
@@ -1897,122 +1913,216 @@ fn ask_target(args: &AskArgs) -> String {
     }
 }
 
-fn run_classifiers(action: ClassifiersAction, path: &str) {
+/// An API error as the CLI prints it: `error[code]: message`, then `log: jeff.log` when the server names its log.
+fn error_lines(status: u16, text: &str) -> String {
+    let body: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+    let Some(msg) = body["error"].as_str() else {
+        return format!("error: HTTP {status}: {}", text.trim());
+    };
+    let mut out = match body["code"].as_str() {
+        Some(code) => format!("error[{code}]: {msg}"),
+        None => format!("error: {msg}"),
+    };
+    if let Some(log) = body["log"].as_str() {
+        out.push_str(&format!("\nlog: {log}"));
+    }
+    out
+}
+
+/// Calls the management API of a running jeff and returns its JSON, or `None` for an empty body. Any failure
+/// prints the error and exits.
+async fn admin_call(
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&Value>,
+) -> Option<Value> {
     let fail = |e: String| -> ! {
         eprintln!("{e}");
         std::process::exit(1)
     };
-    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
-    let refused = |c: questions::Change| -> ! {
-        match c {
-            questions::Change::NotFound(m)
-            | questions::Change::Exists(m)
-            | questions::Change::Invalid(m) => fail(m),
+    let base = base.trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("HTTP client");
+    let mut req = client.request(method, format!("{base}{path}"));
+    if let Some(body) = body {
+        req = req.json(body);
+    }
+    if let Some(key) = client_key(env::var("JEFF_API_KEY").ok()) {
+        req = req.bearer_auth(key);
+    }
+    let failed = |e: reqwest::Error| -> ! {
+        match e.is_connect() {
+            true => fail(format!("cannot connect to {base}; start jeff first")),
+            false => fail(format!("{base}{path}: {}", e.without_url())),
         }
     };
-    let build = |args: &ClassifierArgs| -> Value {
-        let mut c = json!({ "questions": args.questions });
-        if let Some(m) = &args.model {
-            c["model"] = json!(m);
-        }
-        for k in classifiers::skipped(&c, &config.questions) {
-            eprintln!("{}", classifiers::skip_reason(&k, &config.questions));
-        }
-        c
+    let resp = req.send().await.unwrap_or_else(|e| failed(e));
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_else(|e| failed(e));
+    if !status.is_success() {
+        fail(error_lines(status.as_u16(), &text));
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(
+        serde_json::from_str(&text)
+            .unwrap_or_else(|_| fail(format!("jeff sent a reply that is not JSON: {text}"))),
+    )
+}
+
+fn print_json(value: &Value, output: Option<String>) {
+    match output {
+        Some(path) => write_json(&path, value).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        }),
+        None => println!("{}", serde_json::to_string_pretty(value).unwrap()),
+    }
+}
+
+fn read_json(file: &str) -> Value {
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1)
     };
+    let text = read_input(file).unwrap_or_else(|e| fail(e));
+    serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{file}: {e}")))
+}
+
+/// A key as one URL path segment; the server refuses keys that need more than this, but the CLI must not build a
+/// different path from them.
+fn segment(key: &str) -> String {
+    url::form_urlencoded::byte_serialize(key.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20")
+}
+
+async fn saved_questions(url: &str) -> questions::Questions {
+    match admin_call(url, reqwest::Method::GET, "/v1/questions", None).await {
+        Some(Value::Object(q)) => q,
+        _ => questions::Questions::new(),
+    }
+}
+
+async fn warn_skipped(url: &str, c: &Value) {
+    let saved = saved_questions(url).await;
+    for k in classifiers::skipped(c, &saved) {
+        eprintln!("{}", classifiers::skip_reason(&k, &saved));
+    }
+}
+
+fn classifier_body(questions: &[String], model: Option<String>) -> Value {
+    let mut c = json!({ "questions": questions });
+    if let Some(m) = model {
+        c["model"] = json!(m);
+    }
+    c
+}
+
+async fn run_classifiers(action: ClassifiersAction, url: &str) {
+    use reqwest::Method;
     match action {
-        ClassifiersAction::List { output: Some(file) } => {
-            write_json(&file, &Value::Object(config.classifiers)).unwrap_or_else(|e| fail(e));
-        }
-        ClassifiersAction::List { output: None } => {
-            if config.classifiers.is_empty() {
-                eprintln!("no classifiers in {path}");
+        ClassifiersAction::List { output } => {
+            let cs = admin_call(url, Method::GET, "/v1/classifiers", None)
+                .await
+                .unwrap_or_default();
+            if output.is_some() {
+                return print_json(&cs, output);
             }
+            let cs = cs.as_object().cloned().unwrap_or_default();
+            if cs.is_empty() {
+                eprintln!("no classifiers");
+            }
+            let saved = saved_questions(url).await;
             let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
-            print!(
-                "{}",
-                classifiers_table(&config.classifiers, &config.questions, terminal)
-            );
+            print!("{}", classifiers_table(&cs, &saved, terminal));
         }
-        ClassifiersAction::Get { key, output } => match (config.classifiers.get(&key), output) {
-            (Some(c), Some(file)) => write_json(&file, c).unwrap_or_else(|e| fail(e)),
-            (Some(c), None) => println!("{}", serde_json::to_string_pretty(c).unwrap()),
-            (None, _) => fail(format!("unknown classifier '{key}'")),
-        },
+        ClassifiersAction::Get { key, output } => {
+            let path = format!("/v1/classifiers/{}", segment(&key));
+            let c = admin_call(url, Method::GET, &path, None)
+                .await
+                .unwrap_or_default();
+            print_json(&c, output);
+        }
         ClassifiersAction::Add(args) => {
-            let c = build(&args);
-            let input = classifiers::Classifiers::from_iter([(args.key.clone(), c)]);
-            classifiers::create(&mut config.classifiers, input).unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("added {}", args.key);
+            let input = match (args.file, args.key) {
+                (Some(file), _) => read_json(&file),
+                (None, Some(key)) => json!({ key: classifier_body(&args.questions, args.model) }),
+                (None, None) => unreachable!("clap requires a key without --file"),
+            };
+            let saved = admin_call(url, Method::POST, "/api/classifiers", Some(&input))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
+            for c in input.as_object().into_iter().flat_map(|m| m.values()) {
+                warn_skipped(url, c).await;
+            }
         }
         ClassifiersAction::Update(args) => {
-            let c = build(&args);
-            classifiers::update(&mut config.classifiers, &args.key, c)
-                .unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("updated {}", args.key);
+            let input = match args.file {
+                Some(file) => read_json(&file),
+                None => classifier_body(&args.questions, args.model),
+            };
+            let path = format!("/api/classifiers/{}", segment(&args.key));
+            let saved = admin_call(url, Method::PUT, &path, Some(&input))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
+            warn_skipped(url, &saved).await;
         }
         ClassifiersAction::Remove { key } => {
-            classifiers::remove(&mut config.classifiers, &key).unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("removed {key}");
+            let path = format!("/api/classifiers/{}", segment(&key));
+            admin_call(url, Method::DELETE, &path, None).await;
         }
     }
 }
 
-fn run_questions(action: QuestionsAction, path: &str) {
-    let fail = |e: String| -> ! {
-        eprintln!("{e}");
-        std::process::exit(1)
-    };
-    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
-    let json = |file: &str| -> Value {
-        let text = read_input(file).unwrap_or_else(|e| fail(e));
-        serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{file}: {e}")))
-    };
-    let refused = |c: questions::Change| -> ! {
-        match c {
-            questions::Change::NotFound(m)
-            | questions::Change::Exists(m)
-            | questions::Change::Invalid(m) => fail(m),
-        }
-    };
+async fn run_questions(action: QuestionsAction, url: &str) {
+    use reqwest::Method;
     match action {
-        QuestionsAction::List { output: Some(file) } => {
-            write_json(&file, &Value::Object(config.questions)).unwrap_or_else(|e| fail(e));
-        }
-        QuestionsAction::List { output: None } => {
-            if config.questions.is_empty() {
-                eprintln!("no questions in {path}");
+        QuestionsAction::List { output } => {
+            let qs = admin_call(url, Method::GET, "/v1/questions", None)
+                .await
+                .unwrap_or_default();
+            if output.is_some() {
+                return print_json(&qs, output);
+            }
+            let qs = qs.as_object().cloned().unwrap_or_default();
+            if qs.is_empty() {
+                eprintln!("no questions");
             }
             let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
-            print!("{}", questions_table(&config.questions, terminal));
+            print!("{}", questions_table(&qs, terminal));
         }
-        QuestionsAction::Get { key, output } => match (config.questions.get(&key), output) {
-            (Some(q), Some(file)) => write_json(&file, q).unwrap_or_else(|e| fail(e)),
-            (Some(q), None) => println!("{}", serde_json::to_string_pretty(q).unwrap()),
-            (None, _) => fail(format!("unknown question '{key}'")),
-        },
+        QuestionsAction::Get { key, output } => {
+            let path = format!("/v1/questions/{}", segment(&key));
+            let q = admin_call(url, Method::GET, &path, None)
+                .await
+                .unwrap_or_default();
+            print_json(&q, output);
+        }
         QuestionsAction::Add { file } => {
-            let Value::Object(input) = json(&file) else {
-                fail(format!("{file}: expected a JSON map of key to question"));
-            };
-            let keys: Vec<_> = input.keys().cloned().collect();
-            questions::create(&mut config.questions, input).unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("added {}", keys.join(", "));
+            let input = read_json(&file);
+            let saved = admin_call(url, Method::POST, "/api/questions", Some(&input))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
         }
         QuestionsAction::Update { key, file } => {
-            questions::update(&mut config.questions, &key, json(&file))
-                .unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("updated {key}");
+            let path = format!("/api/questions/{}", segment(&key));
+            let saved = admin_call(url, Method::PUT, &path, Some(&read_json(&file)))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
         }
         QuestionsAction::Remove { key } => {
-            questions::remove(&mut config.questions, &key).unwrap_or_else(|c| refused(c));
-            save_config(path, &config).unwrap_or_else(|e| fail(e));
-            println!("removed {key}");
+            let path = format!("/api/questions/{}", segment(&key));
+            admin_call(url, Method::DELETE, &path, None).await;
         }
     }
 }
@@ -2286,6 +2396,70 @@ fn fail_with(message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_lines_formats_api_errors() {
+        assert_eq!(
+            error_lines(
+                409,
+                r#"{"code":"config_invalid","error":"jeff.json has 2 problems; fix it before changing questions or classifiers","log":"jeff.log"}"#
+            ),
+            "error[config_invalid]: jeff.json has 2 problems; fix it before changing questions or classifiers\nlog: jeff.log"
+        );
+        assert_eq!(
+            error_lines(404, r#"{"error":"unknown classifier 'x'"}"#),
+            "error: unknown classifier 'x'"
+        );
+        assert_eq!(
+            error_lines(502, "Bad Gateway"),
+            "error: HTTP 502: Bad Gateway"
+        );
+    }
+
+    #[test]
+    fn classifiers_add_takes_flags_or_a_file() {
+        let parse = |a: &[&str]| Cli::try_parse_from(a).is_ok();
+        assert!(parse(&[
+            "jeff",
+            "classifiers",
+            "add",
+            "t",
+            "a",
+            "b",
+            "--model",
+            "m"
+        ]));
+        assert!(parse(&["jeff", "classifiers", "add", "--file", "c.json"]));
+        assert!(!parse(&[
+            "jeff",
+            "classifiers",
+            "add",
+            "t",
+            "a",
+            "--file",
+            "c.json"
+        ]));
+        assert!(!parse(&["jeff", "classifiers", "add"]));
+        assert!(parse(&[
+            "jeff",
+            "classifiers",
+            "update",
+            "t",
+            "--file",
+            "-"
+        ]));
+        assert!(!parse(&[
+            "jeff",
+            "classifiers",
+            "update",
+            "t",
+            "--file",
+            "-",
+            "--model",
+            "m"
+        ]));
+        assert!(!parse(&["jeff", "classifiers", "update", "t"]));
+    }
 
     #[test]
     fn problems_text_counts() {

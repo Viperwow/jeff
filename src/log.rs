@@ -29,7 +29,8 @@ pub fn utc(secs: u64) -> String {
     )
 }
 
-/// Appends one entry. A write failure is ignored: the console line still reports the problem.
+/// Appends one entry. A write failure is ignored: the console line still reports the problem. The log is readable by
+/// its owner only, like the config: a parse error may quote a value from it, such as a provider key.
 pub fn write(config_path: &str, event: &str, summary: &str, problems: &[String]) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -38,9 +39,11 @@ pub fn write(config_path: &str, event: &str, summary: &str, problems: &[String])
     for p in problems {
         entry.push_str(&format!("  {p}\n"));
     }
-    let _ = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let _ = options
         .open(path(config_path))
         .and_then(|mut f| f.write_all(entry.as_bytes()));
 }
