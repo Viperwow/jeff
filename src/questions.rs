@@ -8,8 +8,8 @@ pub fn validate(key: &str, q: &Value) -> Result<(), String> {
     check(key, q).map_err(|e| format!("question '{key}': {e}"))
 }
 
-fn check(key: &str, q: &Value) -> Result<(), &'static str> {
-    // The key appears in URL paths.
+/// The key appears in URL paths.
+pub fn check_key(key: &str) -> Result<(), &'static str> {
     if key.is_empty()
         || key.len() > 64
         || !key
@@ -18,6 +18,11 @@ fn check(key: &str, q: &Value) -> Result<(), &'static str> {
     {
         return Err("key must be 1-64 characters of A-Z, a-z, 0-9, '_' and '-'");
     }
+    Ok(())
+}
+
+fn check(key: &str, q: &Value) -> Result<(), &'static str> {
+    check_key(key)?;
     let Some(q) = q.as_object() else {
         return Err("must be an object");
     };

@@ -1,3 +1,4 @@
+mod classifiers;
 mod install;
 mod keys;
 mod questions;
@@ -67,6 +68,8 @@ struct Config {
     keys: Vec<keys::StoredKey>,
     #[serde(default)]
     questions: questions::Questions,
+    #[serde(default)]
+    classifiers: classifiers::Classifiers,
 }
 
 impl Default for Config {
@@ -99,6 +102,7 @@ impl Default for Config {
             ],
             keys: Vec::new(),
             questions: questions::Questions::new(),
+            classifiers: classifiers::Classifiers::new(),
         }
     }
 }
@@ -110,11 +114,14 @@ fn load_config(path: &str) -> Result<Config, String> {
     for (key, q) in &config.questions {
         questions::validate(key, q).map_err(|e| format!("{path}: {e}"))?;
     }
+    for (key, c) in &config.classifiers {
+        classifiers::validate(key, c).map_err(|e| format!("{path}: {e}"))?;
+    }
     Ok(config)
 }
 
-/// Parses the config without checking saved questions, so the CLI can still revoke a key or remove the broken
-/// question from a config that `serve` refuses.
+/// Parses the config without checking saved questions and classifiers, so the CLI can still revoke a key or remove
+/// the broken entry from a config that `serve` refuses.
 fn read_config(path: &str) -> Result<Config, String> {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {e}")),
@@ -309,6 +316,11 @@ impl App {
                     for (key, q) in &config.questions {
                         if let Err(e) = questions::validate(key, q) {
                             eprintln!("{}: {e}; it cannot be asked until fixed", self.config_path);
+                        }
+                    }
+                    for (key, c) in &config.classifiers {
+                        if let Err(e) = classifiers::validate(key, c) {
+                            eprintln!("{}: {e}; it cannot be called until fixed", self.config_path);
                         }
                     }
                     *self.config.write().await = config;
@@ -523,13 +535,21 @@ fn unreadable(provider: &str) -> (StatusCode, String) {
     )
 }
 
-async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> Response {
+async fn systemone(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
     let config = app.config.read().await.clone();
+    answer(&app, &config, body)
+        .await
+        .map_or_else(|res| *res, Upstream::reply)
+}
+
+/// Asks the providers for `body` and joins their answers; `Err` is the response for the client.
+async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream, Box<Response>> {
     let Some(obj) = body.as_object_mut() else {
-        return error(
+        return Err(error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "body must be a JSON object",
-        );
+        )
+        .into());
     };
     let model = obj
         .get("model")
@@ -543,16 +563,16 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
             .and_then(|qs| questions::group(qs, &model))
         {
             Ok(groups) => groups.into_iter().map(|(m, qs)| (m, Some(qs))).collect(),
-            Err(e) => return error(StatusCode::BAD_REQUEST, e),
+            Err(e) => return Err(error(StatusCode::BAD_REQUEST, e).into()),
         },
     };
     // Every model resolves before any call, so a request bound to fail costs no provider anything.
     let mut refreshed = false;
     let mut resolved = Vec::new();
     for (model, qs) in groups {
-        match find_model(&app, &config, &model, &mut refreshed).await {
+        match find_model(app, config, &model, &mut refreshed).await {
             Ok((p, upstream_model)) => resolved.push((p, upstream_model, qs)),
-            Err((status, msg)) => return error(status, msg),
+            Err((status, msg)) => return Err(error(status, msg).into()),
         }
     }
     let total = AtomicUsize::new(0);
@@ -561,7 +581,7 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
         if let Some(qs) = qs {
             body["questions"] = Value::Object(qs);
         }
-        let (app, total) = (&app, &total);
+        let total = &total;
         async move {
             match forward(app, p, upstream_model, body, total).await {
                 Ok(u) if u.status.is_success() => Ok(u),
@@ -571,12 +591,9 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
         }
     });
     // The first failure answers the request and drops the calls still running.
-    let mut parts = match try_join_all(calls).await {
-        Ok(parts) => parts,
-        Err(res) => return res,
-    };
+    let mut parts = try_join_all(calls).await.map_err(Box::new)?;
     if parts.len() == 1 {
-        return parts.pop().unwrap().reply();
+        return Ok(parts.pop().unwrap());
     }
     let mut answers = Vec::new();
     for u in &parts {
@@ -584,18 +601,24 @@ async fn systemone(State(app): State<Arc<App>>, Json(mut body): Json<Value>) -> 
             Ok(v) => answers.push(v),
             Err(_) => {
                 let (status, msg) = unreadable(&u.provider);
-                return error(status, msg);
+                return Err(error(status, msg).into());
             }
         }
     }
     let providers: Vec<_> = parts.iter().map(|u| u.provider.as_str()).collect();
-    Upstream {
+    Ok(Upstream {
         provider: providers.join(", "),
         ms: parts.iter().map(|u| u.ms).max().unwrap_or(0),
         status: StatusCode::OK,
         bytes: serde_json::to_vec(&questions::merge(answers)).unwrap(),
-    }
-    .reply()
+    })
+}
+
+/// The classifier's questions replace any `questions` the client sent.
+fn call_body(mut body: Value, questions: Value) -> Result<Value, String> {
+    let obj = body.as_object_mut().ok_or("body must be a JSON object")?;
+    obj.insert("questions".into(), questions);
+    Ok(body)
 }
 
 /// Lists one provider's models. A provider without `GET /v1/models` falls back to its configured list.
@@ -935,14 +958,14 @@ async fn get_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> R
     }
 }
 
-/// Applies `change` to a copy of the saved questions and saves it; an `Err` leaves both file and memory as they were.
-async fn change_questions(
+/// Applies `change` to a copy of the config and saves it; an `Err` leaves both file and memory as they were.
+async fn change_config(
     app: &App,
-    change: impl FnOnce(&mut questions::Questions) -> Result<(), questions::Change>,
-) -> Result<questions::Questions, Box<Response>> {
+    change: impl FnOnce(&mut Config) -> Result<(), questions::Change>,
+) -> Result<Config, Box<Response>> {
     let mut config = app.config.write().await;
     let mut next = config.clone();
-    change(&mut next.questions).map_err(|c| {
+    change(&mut next).map_err(|c| {
         Box::new(match c {
             questions::Change::NotFound(m) => error(StatusCode::NOT_FOUND, m),
             questions::Change::Exists(m) => error(StatusCode::CONFLICT, m),
@@ -953,15 +976,15 @@ async fn change_questions(
         .await
         .map_err(|e| Box::new(error(StatusCode::INTERNAL_SERVER_ERROR, e)))?;
     *config = next;
-    Ok(config.questions.clone())
+    Ok(config.clone())
 }
 
 async fn create_questions(
     State(app): State<Arc<App>>,
     Json(input): Json<questions::Questions>,
 ) -> Response {
-    match change_questions(&app, |qs| questions::create(qs, input)).await {
-        Ok(qs) => (StatusCode::CREATED, Json(qs)).into_response(),
+    match change_config(&app, |c| questions::create(&mut c.questions, input)).await {
+        Ok(c) => (StatusCode::CREATED, Json(c.questions)).into_response(),
         Err(r) => *r,
     }
 }
@@ -971,15 +994,112 @@ async fn update_question(
     Path(key): Path<String>,
     Json(q): Json<Value>,
 ) -> Response {
-    match change_questions(&app, |qs| questions::update(qs, &key, q)).await {
-        Ok(qs) => Json(qs[&key].clone()).into_response(),
+    match change_config(&app, |c| questions::update(&mut c.questions, &key, q)).await {
+        Ok(c) => Json(c.questions[&key].clone()).into_response(),
         Err(r) => *r,
     }
 }
 
 async fn delete_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
-    match change_questions(&app, |qs| questions::remove(qs, &key)).await {
-        Ok(qs) => Json(qs).into_response(),
+    match change_config(&app, |c| questions::remove(&mut c.questions, &key)).await {
+        Ok(c) => Json(c.questions).into_response(),
+        Err(r) => *r,
+    }
+}
+
+async fn list_classifiers(State(app): State<Arc<App>>) -> Json<classifiers::Classifiers> {
+    Json(app.config.read().await.classifiers.clone())
+}
+
+fn unknown_classifier(key: &str) -> Response {
+    error(StatusCode::NOT_FOUND, format!("unknown classifier '{key}'"))
+}
+
+async fn get_classifier(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    match app.config.read().await.classifiers.get(&key) {
+        Some(c) => Json(c.clone()).into_response(),
+        None => unknown_classifier(&key),
+    }
+}
+
+async fn call_classifier(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let config = app.config.read().await.clone();
+    let Some(c) = config.classifiers.get(&key) else {
+        return unknown_classifier(&key);
+    };
+    run_classifier(&app, &config, &key, c, body).await
+}
+
+/// Runs an unsaved classifier sent in the body, as the form's Try does; it skips questions exactly as a saved one.
+async fn try_classifier(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let config = app.config.read().await.clone();
+    match take_draft(body) {
+        Ok((c, body)) => run_classifier(&app, &config, "draft", &c, body).await,
+        Err(e) => error(StatusCode::UNPROCESSABLE_ENTITY, e),
+    }
+}
+
+/// Splits `{"classifier": {...}, ...}` into the classifier and the rest of the call body.
+fn take_draft(mut body: Value) -> Result<(Value, Value), String> {
+    let obj = body.as_object_mut().ok_or("body must be a JSON object")?;
+    match obj.remove("classifier") {
+        Some(c @ Value::Object(_)) => Ok((c, body)),
+        _ => Err("classifier must be an object with questions".into()),
+    }
+}
+
+async fn run_classifier(app: &App, config: &Config, key: &str, c: &Value, body: Value) -> Response {
+    let (input, skipped) = match classifiers::resolve(key, c, &config.questions) {
+        Ok(r) => r,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    let body = match call_body(body, input) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e),
+    };
+    match answer(app, config, body).await {
+        Ok(u) if u.status.is_success() => Upstream {
+            bytes: classifiers::with_skipped(u.bytes, &skipped),
+            ..u
+        }
+        .reply(),
+        Ok(u) => u.reply(),
+        Err(res) => *res,
+    }
+}
+
+async fn create_classifiers(
+    State(app): State<Arc<App>>,
+    Json(input): Json<classifiers::Classifiers>,
+) -> Response {
+    match change_config(&app, |c| classifiers::create(&mut c.classifiers, input)).await {
+        Ok(c) => (StatusCode::CREATED, Json(c.classifiers)).into_response(),
+        Err(r) => *r,
+    }
+}
+
+async fn update_classifier(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+    Json(classifier): Json<Value>,
+) -> Response {
+    match change_config(&app, |c| {
+        classifiers::update(&mut c.classifiers, &key, classifier)
+    })
+    .await
+    {
+        Ok(c) => Json(c.classifiers[&key].clone()).into_response(),
+        Err(r) => *r,
+    }
+}
+
+async fn delete_classifier(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    match change_config(&app, |c| classifiers::remove(&mut c.classifiers, &key)).await {
+        Ok(c) => Json(c.classifiers).into_response(),
         Err(r) => *r,
     }
 }
@@ -1085,6 +1205,7 @@ fn build_config(
         providers,
         keys: current.keys.clone(),
         questions: current.questions.clone(),
+        classifiers: current.classifiers.clone(),
     })
 }
 
@@ -1108,7 +1229,7 @@ async fn check_provider_hosts(providers: &[Provider], allow_private: bool) -> Re
     Ok(())
 }
 
-/// Keys and questions have their own endpoints; a provider save built from an older snapshot must not undo them.
+/// Keys, questions and classifiers have their own endpoints; a provider save built from an older snapshot must not undo them.
 async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>) -> Response {
     // The DNS checks run without the lock, so a slow resolver does not stall every request meanwhile.
     let snapshot = app.config.read().await.clone();
@@ -1247,6 +1368,14 @@ enum Command {
         #[arg(long, env = "JEFF_CONFIG", global = true)]
         config: Option<String>,
     },
+    /// Manage classifiers in the config file; a running server picks changes up on the next request
+    Classifiers {
+        #[command(subcommand)]
+        action: ClassifiersAction,
+        /// The config file [default: ~/.jeff/jeff.json]
+        #[arg(long, env = "JEFF_CONFIG", global = true)]
+        config: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -1254,6 +1383,9 @@ struct AskArgs {
     /// Saved questions to ask, by key
     #[arg(conflicts_with = "request")]
     keys: Vec<String>,
+    /// Call a saved classifier instead of naming questions
+    #[arg(long, conflicts_with_all = ["keys", "questions", "questions_file", "request"])]
+    classifier: Option<String>,
     /// The text the questions are about
     #[arg(
         long,
@@ -1318,6 +1450,40 @@ enum QuestionsAction {
     },
     /// Delete one saved question
     Remove { key: String },
+}
+
+#[derive(Subcommand)]
+enum ClassifiersAction {
+    /// List classifiers: key, model and questions
+    List {
+        /// Write the classifiers as JSON to this file instead
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Print one classifier as JSON
+    Get {
+        key: String,
+        /// Write the classifier JSON to this file instead of printing it
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Save a new classifier; an existing key fails
+    Add(ClassifierArgs),
+    /// Replace a classifier; without --model its override is removed
+    Update(ClassifierArgs),
+    /// Delete one classifier
+    Remove { key: String },
+}
+
+#[derive(Args)]
+struct ClassifierArgs {
+    key: String,
+    /// Saved question keys, in the order to ask them
+    #[arg(required = true)]
+    questions: Vec<String>,
+    /// The model for every question of the classifier, in place of their own
+    #[arg(long)]
+    model: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1420,6 +1586,9 @@ async fn main() {
         Some(Command::Questions { action, config }) => {
             return run_questions(action, &config_file(config));
         }
+        Some(Command::Classifiers { action, config }) => {
+            return run_classifiers(action, &config_file(config));
+        }
     };
     serve(args).await;
 }
@@ -1503,6 +1672,14 @@ fn ask_request(
         }
         (None, None) => None,
     };
+    if let Some(key) = &args.classifier {
+        questions::check_key(key).map_err(|e| format!("classifier '{key}': {e}"))?;
+        let mut body = json!({ "state": state });
+        if let Some(m) = &args.model {
+            body["model"] = json!(m);
+        }
+        return Ok(body);
+    }
     ask_body(&args.keys, questions, state, args.model.clone())
 }
 
@@ -1529,6 +1706,38 @@ fn questions_table(qs: &questions::Questions, boxed: bool) -> String {
             ]
         })
         .collect();
+    table(["key", "type", "model", "instructions"], rows, boxed)
+}
+
+/// One line per classifier; a question it cannot ask shows as `key (deleted)`.
+fn classifiers_table(
+    cs: &classifiers::Classifiers,
+    saved: &questions::Questions,
+    boxed: bool,
+) -> String {
+    let rows = cs
+        .iter()
+        .map(|(key, c)| {
+            let skipped = classifiers::skipped(c, saved);
+            let keys: Vec<String> = c["questions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|k| match skipped.iter().any(|s| s == k) {
+                    true => format!("{k} (deleted)"),
+                    false => k.to_owned(),
+                })
+                .collect();
+            let model = c.get("model").and_then(Value::as_str).unwrap_or("-");
+            [key.clone(), model.to_owned(), keys.join(", ")]
+        })
+        .collect();
+    table(["key", "model", "questions"], rows, boxed)
+}
+
+/// A boxed table for a terminal, tab-separated fields for a pipe. The last column is cut to fit a terminal.
+fn table<const N: usize>(header: [&str; N], rows: Vec<[String; N]>, boxed: bool) -> String {
     if !boxed {
         return rows.iter().map(|r| r.join("\t") + "\n").collect();
     }
@@ -1537,18 +1746,20 @@ fn questions_table(qs: &questions::Questions, boxed: bool) -> String {
         true => s.chars().take(WIDEST - 1).chain(['…']).collect(),
         false => s.clone(),
     };
-    let header = ["key", "type", "model", "instructions"].map(String::from);
-    let rows: Vec<[String; 4]> = std::iter::once(header)
-        .chain(rows.into_iter().map(|[k, t, m, i]| [k, t, m, cut(&i)]))
+    let rows: Vec<[String; N]> = std::iter::once(header.map(String::from))
+        .chain(rows.into_iter().map(|mut r| {
+            r[N - 1] = cut(&r[N - 1]);
+            r
+        }))
         .collect();
-    let widths: Vec<usize> = (0..4)
+    let widths: Vec<usize> = (0..N)
         .map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0))
         .collect();
     let rule = |l: &str, m: &str, r: &str| {
         let cells: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
         format!("{l}{}{r}\n", cells.join(m))
     };
-    let line = |row: &[String; 4]| {
+    let line = |row: &[String; N]| {
         let cells: Vec<String> = row
             .iter()
             .zip(&widths)
@@ -1579,7 +1790,7 @@ async fn run_ask(args: AskArgs) {
     };
     let body = ask_request(&args, read_input).unwrap_or_else(|e| fail(e));
     let base = args.url.trim_end_matches('/');
-    let url = format!("{base}/v1/systemone");
+    let url = format!("{base}{}", ask_target(&args));
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(args.connect_timeout))
         .timeout(Duration::from_secs(args.max_time))
@@ -1605,10 +1816,85 @@ async fn run_ask(args: AskArgs) {
     if !ok {
         fail(answer.map_or(text, |v| serde_json::to_string_pretty(&v).unwrap()));
     }
+    if let Some(skipped) = answer.as_ref().ok().and_then(|v| v["skipped"].as_array()) {
+        let keys: Vec<&str> = skipped.iter().filter_map(Value::as_str).collect();
+        eprintln!("skipped: {}", keys.join(", "));
+    }
     match (answer, args.output) {
         (Ok(v), Some(path)) => write_json(&path, &v).unwrap_or_else(|e| fail(e)),
         (Ok(v), None) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
         (Err(_), _) => fail(format!("jeff sent an answer that is not JSON: {text}")),
+    }
+}
+
+fn ask_target(args: &AskArgs) -> String {
+    match &args.classifier {
+        Some(key) => format!("/v1/classifiers/{key}"),
+        None => "/v1/systemone".into(),
+    }
+}
+
+fn run_classifiers(action: ClassifiersAction, path: &str) {
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1)
+    };
+    let mut config = read_config(path).unwrap_or_else(|e| fail(e));
+    let refused = |c: questions::Change| -> ! {
+        match c {
+            questions::Change::NotFound(m)
+            | questions::Change::Exists(m)
+            | questions::Change::Invalid(m) => fail(m),
+        }
+    };
+    let build = |args: &ClassifierArgs| -> Value {
+        let mut c = json!({ "questions": args.questions });
+        if let Some(m) = &args.model {
+            c["model"] = json!(m);
+        }
+        for k in classifiers::skipped(&c, &config.questions) {
+            eprintln!("{}", classifiers::skip_reason(&k, &config.questions));
+        }
+        c
+    };
+    match action {
+        ClassifiersAction::List { output: Some(file) } => {
+            write_json(&file, &Value::Object(config.classifiers)).unwrap_or_else(|e| fail(e));
+        }
+        ClassifiersAction::List { output: None } => {
+            if config.classifiers.is_empty() {
+                eprintln!("no classifiers in {path}");
+            }
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            print!(
+                "{}",
+                classifiers_table(&config.classifiers, &config.questions, terminal)
+            );
+        }
+        ClassifiersAction::Get { key, output } => match (config.classifiers.get(&key), output) {
+            (Some(c), Some(file)) => write_json(&file, c).unwrap_or_else(|e| fail(e)),
+            (Some(c), None) => println!("{}", serde_json::to_string_pretty(c).unwrap()),
+            (None, _) => fail(format!("unknown classifier '{key}'")),
+        },
+        ClassifiersAction::Add(args) => {
+            let c = build(&args);
+            let input = classifiers::Classifiers::from_iter([(args.key.clone(), c)]);
+            classifiers::create(&mut config.classifiers, input).unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("added {}", args.key);
+        }
+        ClassifiersAction::Update(args) => {
+            let c = build(&args);
+            classifiers::update(&mut config.classifiers, &args.key, c)
+                .unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("updated {}", args.key);
+        }
+        ClassifiersAction::Remove { key } => {
+            classifiers::remove(&mut config.classifiers, &key).unwrap_or_else(|c| refused(c));
+            save_config(path, &config).unwrap_or_else(|e| fail(e));
+            println!("removed {key}");
+        }
     }
 }
 
@@ -1825,6 +2111,14 @@ async fn serve(args: ServeArgs) {
         .route("/v1/models", get(models))
         .route("/v1/questions", get(list_questions))
         .route("/v1/questions/{key}", get(get_question))
+        .route(
+            "/v1/classifiers",
+            get(list_classifiers).post(try_classifier),
+        )
+        .route(
+            "/v1/classifiers/{key}",
+            get(get_classifier).post(call_classifier),
+        )
         .route_layer(middleware::from_fn_with_state(app.clone(), require_client))
         .route("/health", get(health))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
@@ -1840,6 +2134,11 @@ async fn serve(args: ServeArgs) {
         .route(
             "/api/questions/{key}",
             axum::routing::put(update_question).delete(delete_question),
+        )
+        .route("/api/classifiers", post(create_classifiers))
+        .route(
+            "/api/classifiers/{key}",
+            axum::routing::put(update_classifier).delete(delete_classifier),
         )
         .route_layer(middleware::from_fn_with_state(app.clone(), require_admin))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
@@ -2224,6 +2523,39 @@ mod tests {
     }
 
     #[test]
+    fn load_config_rejects_invalid_classifiers() {
+        let path = env::temp_dir().join(format!("jeff-test-c-{}.json", std::process::id()));
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["classifiers"] = json!({"k": {"questions": []}});
+        fs::write(&path, config.to_string()).unwrap();
+        let path = path.to_str().unwrap();
+        let loaded = load_config(path);
+        let read = read_config(path);
+        let _ = fs::remove_file(path);
+        let e = loaded.err().expect("an invalid classifier must be refused");
+        assert!(e.contains("classifier 'k'"), "{e}");
+        assert!(read.unwrap().classifiers.contains_key("k"));
+    }
+
+    #[test]
+    fn config_without_classifiers_still_loads() {
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config.as_object_mut().unwrap().remove("classifiers");
+        let config: Config = serde_json::from_value(config).unwrap();
+        assert!(config.classifiers.is_empty());
+    }
+
+    #[test]
+    fn call_body_replaces_client_questions() {
+        let body = json!({"state": "s", "model": "p/m", "questions": {"x": {"type": "noul", "instructions": "y"}}});
+        assert_eq!(
+            call_body(body, json!(["a"])).unwrap(),
+            json!({"state": "s", "model": "p/m", "questions": ["a"]})
+        );
+        assert!(call_body(json!([1]), json!(["a"])).is_err());
+    }
+
+    #[test]
     fn provider_save_keeps_timeouts_the_ui_does_not_send() {
         let mut current = Config::default();
         current.providers[0].connect_timeout = Some(3);
@@ -2274,5 +2606,79 @@ mod tests {
         };
         let next = build_config(&current, input, false).unwrap();
         assert_eq!(next.questions, current.questions);
+    }
+
+    #[test]
+    fn build_config_keeps_classifiers() {
+        let mut current = Config::default();
+        current
+            .classifiers
+            .insert("triage".into(), json!({"questions": ["u"]}));
+        let input = ConfigInput {
+            default_model: "clm/clm-latest".into(),
+            providers: vec![ProviderInput {
+                id: "clm".into(),
+                name: "CLM".into(),
+                url: "http://127.0.0.1:8700".into(),
+                key: None,
+                models: vec![],
+                installer: None,
+                connect_timeout: None,
+                max_time: None,
+            }],
+        };
+        let next = build_config(&current, input, false).unwrap();
+        assert_eq!(next.classifiers, current.classifiers);
+    }
+
+    #[test]
+    fn lists_classifiers_one_line_each() {
+        let cs = json!({"triage": {"questions": ["a", "gone"], "model": "p/m"}, "plain": {"questions": ["a"]}});
+        let saved = json!({"a": {"type": "noul", "instructions": "x"}});
+        assert_eq!(
+            classifiers_table(cs.as_object().unwrap(), saved.as_object().unwrap(), false),
+            "plain	-	a
+triage	p/m	a, gone (deleted)
+"
+        );
+    }
+
+    #[test]
+    fn ask_calls_a_classifier() {
+        let args = ask_args(&["--classifier", "triage", "--state", "s"]).unwrap();
+        assert_eq!(ask_target(&args), "/v1/classifiers/triage");
+        assert_eq!(
+            ask_request(&args, stdin_is("")).unwrap(),
+            json!({"state": "s"})
+        );
+        let args = ask_args(&["--classifier", "triage", "--state", "s", "--model", "p/m"]).unwrap();
+        assert_eq!(
+            ask_request(&args, stdin_is("")).unwrap(),
+            json!({"state": "s", "model": "p/m"})
+        );
+        assert!(ask_args(&["u", "--classifier", "triage", "--state", "s"]).is_err());
+        assert!(ask_args(&["--classifier", "t", "--questions", "{}", "--state", "s"]).is_err());
+        assert!(ask_args(&["--classifier", "t", "--request", "-"]).is_err());
+        let args = ask_args(&["--classifier", "a/b", "--state", "s"]).unwrap();
+        let e = ask_request(&args, stdin_is("")).unwrap_err();
+        assert!(e.contains("classifier 'a/b'"), "{e}");
+        assert_eq!(
+            ask_target(&ask_args(&["u", "--state", "s"]).unwrap()),
+            "/v1/systemone"
+        );
+    }
+
+    #[test]
+    fn take_draft_splits_the_classifier_from_the_call() {
+        let body = json!({"state": "s", "model": "p/m", "classifier": {"questions": ["a"]}});
+        assert_eq!(
+            take_draft(body).unwrap(),
+            (
+                json!({"questions": ["a"]}),
+                json!({"state": "s", "model": "p/m"})
+            )
+        );
+        assert!(take_draft(json!({"state": "s"})).is_err());
+        assert!(take_draft(json!([1])).is_err());
     }
 }
