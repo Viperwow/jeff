@@ -321,7 +321,20 @@ impl App {
     async fn refresh_from_disk(&self) {
         let now = modified(&self.config_path);
         let seen = *self.config_mtime.lock().unwrap();
-        if now.is_some() && now != seen {
+        if now.is_none() {
+            // A deleted file leaves no hand edits to protect; the next save writes the config back.
+            if !std::mem::take(&mut *self.problems.lock().unwrap()).is_empty() {
+                let line = format!(
+                    "{} removed; the next save writes it again",
+                    self.config_path
+                );
+                eprintln!("{line}");
+                log::write(&self.config_path, "config_removed", &line, &[]);
+            }
+            *self.config_mtime.lock().unwrap() = None;
+            return;
+        }
+        if now != seen {
             let path = &self.config_path;
             match load_config(path) {
                 Ok(config) => {
@@ -351,13 +364,36 @@ impl App {
         }
     }
 
+    /// Refuses to write over a file that is broken, or that changed since jeff last read it: either way the write
+    /// would lose a hand edit.
     async fn save(&self, config: &Config) -> Result<(), Box<Response>> {
+        let path = &self.config_path;
         let n = self.problems.lock().unwrap().len();
         if n > 0 {
-            return Err(Box::new(config_invalid(&self.config_path, n)));
+            return Err(Box::new(config_invalid(path, n)));
         }
-        save_config(&self.config_path, config)
-            .map_err(|e| Box::new(error(StatusCode::INTERNAL_SERVER_ERROR, e)))?;
+        if modified(path) != *self.config_mtime.lock().unwrap() {
+            return Err(Box::new(
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "code": "config_changed",
+                        "error": format!("{} changed on disk since jeff read it; try again", file_name(path)),
+                    })),
+                )
+                    .into_response(),
+            ));
+        }
+        save_config(path, config).map_err(|e| {
+            eprintln!("{e}");
+            Box::new(error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "could not save {}; the server console has the cause",
+                    file_name(path)
+                ),
+            ))
+        })?;
         *self.config_mtime.lock().unwrap() = modified(&self.config_path);
         Ok(())
     }
@@ -415,12 +451,15 @@ fn count_problems(n: usize) -> String {
     format!("{n} problem{}", if n == 1 { "" } else { "s" })
 }
 
-/// Names the config by file name only: API callers must not learn where the server keeps it.
-fn problems_text(config_path: &str, n: usize) -> String {
-    let name = std::path::Path::new(config_path)
+/// The config's file name only: API callers must not learn where the server keeps it.
+fn file_name(config_path: &str) -> String {
+    std::path::Path::new(config_path)
         .file_name()
-        .map_or_else(|| config_path.into(), |n| n.to_string_lossy());
-    format!("{name} has {}", count_problems(n))
+        .map_or_else(|| config_path.into(), |n| n.to_string_lossy().into_owned())
+}
+
+fn problems_text(config_path: &str, n: usize) -> String {
+    format!("{} has {}", file_name(config_path), count_problems(n))
 }
 
 /// jeff saves the whole file, so a save while it is broken would overwrite the hand edits.
@@ -440,10 +479,7 @@ fn status_body(config_path: &str, problems: &[String]) -> Value {
     if problems.is_empty() {
         return json!({ "config": "ok" });
     }
-    let file = std::path::Path::new(config_path)
-        .file_name()
-        .map_or_else(|| config_path.into(), |n| n.to_string_lossy());
-    json!({ "config": "invalid", "file": file, "problems": problems.len(), "log": "jeff.log" })
+    json!({ "config": "invalid", "file": file_name(config_path), "problems": problems.len(), "log": "jeff.log" })
 }
 
 async fn status(State(app): State<Arc<App>>) -> Json<Value> {
@@ -2497,6 +2533,75 @@ mod tests {
             "--description",
             "d"
         ]));
+    }
+
+    fn test_app(config_path: &str) -> App {
+        App {
+            clients: Mutex::new(HashMap::new()),
+            config: RwLock::new(Config::default()),
+            config_path: config_path.into(),
+            listed: RwLock::new(HashMap::new()),
+            clm_task: Mutex::new(json!({ "state": "idle" })),
+            clm_warm: AtomicU8::new(0),
+            static_keys: Vec::new(),
+            problems: Mutex::new(Vec::new()),
+            config_mtime: Mutex::new(modified(config_path)),
+            allowed_hosts: Vec::new(),
+            failures: Mutex::new(HashMap::new()),
+            exposed: false,
+            allow_private: false,
+        }
+    }
+
+    async fn body_of(r: Response) -> Value {
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_refuses_a_file_changed_on_disk() {
+        let path = temp_config(
+            "changed",
+            &serde_json::to_string(&Config::default()).unwrap(),
+        );
+        let app = test_app(&path);
+        *app.config_mtime.lock().unwrap() = Some(SystemTime::UNIX_EPOCH);
+        let r = app.save(&Config::default()).await.unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        assert_eq!(body_of(*r).await["code"], "config_changed");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_broken_file_clears_its_problems() {
+        let path = temp_config("deleted", "{");
+        let app = test_app(&path);
+        *app.config_mtime.lock().unwrap() = Some(SystemTime::UNIX_EPOCH);
+        app.refresh_from_disk().await;
+        assert_eq!(app.problems.lock().unwrap().len(), 1);
+        fs::remove_file(&path).unwrap();
+        app.refresh_from_disk().await;
+        assert!(app.problems.lock().unwrap().is_empty());
+        assert!(app.save(&Config::default()).await.is_ok());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_names_no_server_path() {
+        let blocker = env::temp_dir().join(format!("jeff-test-blocker-{}", std::process::id()));
+        fs::write(&blocker, "").unwrap();
+        let path = blocker.join("jeff.json");
+        let app = test_app(path.to_str().unwrap());
+        let r = app.save(&Config::default()).await.unwrap_err();
+        let _ = fs::remove_file(&blocker);
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_of(*r).await;
+        assert_eq!(
+            body["error"],
+            "could not save jeff.json; the server console has the cause"
+        );
     }
 
     #[test]

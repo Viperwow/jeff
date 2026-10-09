@@ -60,19 +60,28 @@ const store = {
 /**
  * Unsaved form input, kept in this browser until the form is saved, cancelled or discarded. A form whose fields match
  * what it opened with keeps no draft. Provider keys and created access keys never get here.
+ *
+ * A draft remembers the saved data it started from. When that data has changed since, the draft is dropped instead
+ * of restored: saving it would overwrite the newer data, for providers even removing one added meanwhile.
  */
 const drafts = {
   baseline: {},
-  get(id) { return store.get("draft:" + id); },
   drop(id) { try { localStorage.removeItem("jeff.draft:" + id); } catch {} },
-  /** Records what form `id` opened with, then returns its draft, if any. */
-  open(id, snapshot) {
-    this.baseline[id] = JSON.stringify(snapshot);
-    return this.get(id);
+  /** Records what form `id` opened with, then returns its draft, if any, and says in `status` when it was stale. */
+  open(id, snapshot, status) {
+    const base = JSON.stringify(snapshot);
+    this.baseline[id] = base;
+    const d = store.get("draft:" + id);
+    if (!d) return null;
+    if (d.base === base) return d.value;
+    this.drop(id);
+    say(status, "Draft discarded: the saved data changed since it was written.", "err");
+    return null;
   },
   track(id, snapshot) {
-    if (JSON.stringify(snapshot) === this.baseline[id]) this.drop(id);
-    else store.set("draft:" + id, snapshot);
+    const base = this.baseline[id];
+    if (JSON.stringify(snapshot) === base) this.drop(id);
+    else store.set("draft:" + id, { base, value: snapshot });
   },
 };
 
@@ -282,7 +291,7 @@ const trackProviders = () => drafts.track("providers", providersSnapshot());
 
 function renderProviders() {
   renderProviderCards(config.providers);
-  const d = drafts.open("providers", providersSnapshot());
+  const d = drafts.open("providers", providersSnapshot(), $("#save-status"));
   $("#p-draft").hidden = !d;
   if (!d) return;
   const saved = new Map(config.providers.map((p) => [p.id, p]));
@@ -535,7 +544,7 @@ const keySnapshot = () => ({ name: $("#key-name").value, role: $("#key-role").va
 const trackKey = () => drafts.track("key:new", keySnapshot());
 
 function restoreKeyDraft() {
-  const d = drafts.open("key:new", keySnapshot());
+  const d = drafts.open("key:new", keySnapshot(), $("#key-status"));
   $("#k-draft").hidden = !d;
   if (d) fillKeyForm(d);
 }
@@ -1037,7 +1046,8 @@ function openForm(key = null) {
   const card = addQuestion(key ? builderOf(key, q) : { type: "noul", key: "" });
   $(".q-key", card).readOnly = !!key;
   fillFormModel(q.model || "");
-  const d = drafts.open(questionDraftId(), questionSnapshot());
+  say($("#q-form-status"), "");
+  const d = drafts.open(questionDraftId(), questionSnapshot(), $("#q-form-status"));
   $("#q-draft").hidden = !d;
   if (d) {
     $(".q-key", addQuestion(d.q)).readOnly = !!key;
@@ -1045,7 +1055,6 @@ function openForm(key = null) {
   }
   $("#q-try-state").value = $("#pg-state").value;
   $("#q-try-answer").replaceChildren(el("p", "note py-12 text-center", "Try runs the draft against this state. Nothing is saved."));
-  say($("#q-form-status"), "");
   showForm(true);
   (key ? $(".q-instr") : $(".q-key")).focus();
 }
@@ -1376,7 +1385,8 @@ function openClassifierForm(key = null) {
   $("#c-description").value = typeof c.description === "string" ? c.description : "";
   picked = keysOf(c);
   fillClassifierModel(typeof c.model === "string" ? c.model : "");
-  const d = drafts.open(classifierDraftId(), classifierSnapshot());
+  say($("#c-form-status"), "");
+  const d = drafts.open(classifierDraftId(), classifierSnapshot(), $("#c-form-status"));
   $("#c-draft").hidden = !d;
   if (d) {
     if (!key) $("#c-key").value = d.key;
@@ -1388,7 +1398,6 @@ function openClassifierForm(key = null) {
   $("#c-delete").hidden = !key;
   $("#c-try-state").value = $("#pg-state").value;
   $("#c-try-answer").replaceChildren(el("p", "note py-12 text-center", "Try runs the draft against this state. Nothing is saved."));
-  say($("#c-form-status"), "");
   closeOptions();
   showClassifierForm(true);
   (key ? $("#c-search") : $("#c-key")).focus();

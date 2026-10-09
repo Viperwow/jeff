@@ -58,6 +58,12 @@ stays valid until the file is fixed.
   jeff saves the whole file, so saving now would overwrite the hand edits.
 
 - Once the file is fixed, the next reread applies it and changes work again.
+- A broken file deleted while jeff runs clears the problems: there are no hand edits left to protect, and the next
+  save writes the config again.
+- A save also refuses a file that changed on disk since jeff last read it, with `409`
+  `{"code":"config_changed","error":"jeff.json changed on disk since jeff read it; try again"}`.
+- A failed write answers `500` `could not save jeff.json; the server console has the cause`. The console has the
+  full error.
 
 API responses name the log file only, never a server path.
 
@@ -131,7 +137,10 @@ The questions count shows `· 1 deleted`.
   Keys forms.
 - A draft is keyed by its form and record, for example `draft:classifier:new` or `draft:classifier:triage`.
 - A draft is written on every field change.
-- It is restored after a page reload, a tab switch or a failed save. The form then shows **Draft restored** and a
+- It is restored after a page reload, a tab switch or a failed save.
+- A draft remembers the saved data it started from. When that data has changed since, the draft is dropped instead
+  of restored, and the form says `Draft discarded: the saved data changed since it was written.` Saving it would
+  overwrite the newer data, for providers even remove one added meanwhile. The form then shows **Draft restored** and a
   **Discard** button.
 - A successful **Save**, **Cancel** or **Discard** removes the draft.
 - Provider keys and created access keys are never written to the browser.
