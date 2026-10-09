@@ -7,8 +7,20 @@ use crate::questions::{self, Change, Questions};
 /// Saved classifiers by key: `{"questions": [keys], "model"?: "provider/model"}`.
 pub type Classifiers = Map<String, Value>;
 
+/// Fields beyond `questions` and `model` are refused, so a typo such as `modle` does not pass silently.
 pub fn validate(key: &str, c: &Value) -> Result<(), String> {
-    check(key, c).map_err(|e| format!("classifier '{key}': {e}"))
+    check(key, c).map_err(|e| format!("classifier '{key}': {e}"))?;
+    let unknown = c
+        .as_object()
+        .into_iter()
+        .flat_map(|o| o.keys())
+        .find(|f| *f != "questions" && *f != "model");
+    match unknown {
+        Some(f) => Err(format!(
+            "classifier '{key}': unknown field '{f}'; a classifier has questions and model"
+        )),
+        None => Ok(()),
+    }
 }
 
 fn check(key: &str, c: &Value) -> Result<(), &'static str> {
@@ -40,23 +52,6 @@ fn check(key: &str, c: &Value) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A save refuses fields beyond `questions` and `model`, so a typo such as `modle` does not pass silently. Loading
-/// stays lenient: the config keeps whatever was written by hand.
-fn validate_new(key: &str, c: &Value) -> Result<(), Change> {
-    validate(key, c).map_err(Change::Invalid)?;
-    let unknown = c
-        .as_object()
-        .into_iter()
-        .flat_map(|o| o.keys())
-        .find(|f| *f != "questions" && *f != "model");
-    match unknown {
-        Some(f) => Err(Change::Invalid(format!(
-            "classifier '{key}': unknown field '{f}'; a classifier has questions and model"
-        ))),
-        None => Ok(()),
-    }
-}
-
 fn not_found(key: &str) -> Change {
     Change::NotFound(format!("unknown classifier '{key}'"))
 }
@@ -67,7 +62,7 @@ pub fn create(saved: &mut Classifiers, input: Classifiers) -> Result<(), Change>
         return Err(Change::Invalid("no classifiers given".into()));
     }
     for (k, c) in &input {
-        validate_new(k, c)?;
+        validate(k, c).map_err(Change::Invalid)?;
     }
     if let Some(key) = input.keys().find(|k| saved.contains_key(*k)) {
         return Err(Change::Exists(format!("classifier '{key}' already exists")));
@@ -77,7 +72,7 @@ pub fn create(saved: &mut Classifiers, input: Classifiers) -> Result<(), Change>
 }
 
 pub fn update(saved: &mut Classifiers, key: &str, c: Value) -> Result<(), Change> {
-    validate_new(key, &c)?;
+    validate(key, &c).map_err(Change::Invalid)?;
     let old = saved.get_mut(key).ok_or_else(|| not_found(key))?;
     *old = c;
     Ok(())
@@ -250,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn save_refuses_unknown_fields() {
+    fn refuses_unknown_fields() {
         let mut saved = Classifiers::new();
         let typo = json!({"questions": ["u"], "modle": "p/m"});
         let e = create(&mut saved, cs(json!({"k": typo.clone()}))).unwrap_err();
@@ -266,7 +261,7 @@ mod tests {
             update(&mut saved, "k", typo),
             Err(Change::Invalid(_))
         ));
-        assert!(validate("k", &json!({"questions": ["u"], "modle": "p/m"})).is_ok());
+        assert!(validate("k", &json!({"questions": ["u"], "modle": "p/m"})).is_err());
     }
 
     #[test]

@@ -107,17 +107,26 @@ impl Default for Config {
     }
 }
 
-/// A missing file gives the defaults. A broken one is an error: falling back would drop every access key and
-/// open jeff to anyone.
-fn load_config(path: &str) -> Result<Config, String> {
-    let config = read_config(path)?;
-    for (key, q) in &config.questions {
-        questions::validate(key, q).map_err(|e| format!("{path}: {e}"))?;
+/// A missing file gives the defaults. A broken one is refused whole, with every problem found: falling back would
+/// drop every access key and open jeff to anyone, and a partial config would run on what the owner did not write.
+fn load_config(path: &str) -> Result<Config, Vec<String>> {
+    let config = read_config(path).map_err(|e| vec![e])?;
+    let problems: Vec<String> = config
+        .questions
+        .iter()
+        .filter_map(|(k, q)| questions::validate(k, q).err())
+        .chain(
+            config
+                .classifiers
+                .iter()
+                .filter_map(|(k, c)| classifiers::validate(k, c).err()),
+        )
+        .collect();
+    if problems.is_empty() {
+        Ok(config)
+    } else {
+        Err(problems)
     }
-    for (key, c) in &config.classifiers {
-        classifiers::validate(key, c).map_err(|e| format!("{path}: {e}"))?;
-    }
-    Ok(config)
 }
 
 /// Parses the config without checking saved questions and classifiers, so the CLI can still revoke a key or remove
@@ -2049,7 +2058,8 @@ async fn serve(args: ServeArgs) {
     let config_path = config_file(args.config.clone());
     let config = load_config(&config_path).unwrap_or_else(|e| {
         fail_with(&format!(
-            "{e}\nfix or remove the file; jeff does not start on a broken config"
+            "{}\nfix or remove the file; jeff does not start on a broken config",
+            e.join("\n")
         ))
     });
     if let Some(short) = args
@@ -2519,7 +2529,7 @@ mod tests {
         let result = load_config(path.to_str().unwrap());
         let _ = fs::remove_file(&path);
         let e = result.err().expect("an invalid question must be refused");
-        assert!(e.contains("question 'a b'"), "{e}");
+        assert!(e[0].contains("question 'a b'"), "{e:?}");
     }
 
     #[test]
@@ -2533,8 +2543,48 @@ mod tests {
         let read = read_config(path);
         let _ = fs::remove_file(path);
         let e = loaded.err().expect("an invalid classifier must be refused");
-        assert!(e.contains("classifier 'k'"), "{e}");
+        assert!(e[0].contains("classifier 'k'"), "{e:?}");
         assert!(read.unwrap().classifiers.contains_key("k"));
+    }
+
+    fn temp_config(name: &str, text: &str) -> String {
+        let path = env::temp_dir().join(format!("jeff-test-{name}-{}.json", std::process::id()));
+        fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn load_config_lists_every_problem() {
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["questions"] = json!({"a b": {"type": "noul", "instructions": "x"}});
+        config["classifiers"] = json!({"triage": {"questions": ["x"], "modle": "m"}});
+        let path = temp_config("every", &config.to_string());
+        let problems = load_config(&path).err().unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].starts_with("question 'a b': "), "{problems:?}");
+        assert_eq!(
+            problems[1],
+            "classifier 'triage': unknown field 'modle'; a classifier has questions and model"
+        );
+    }
+
+    #[test]
+    fn load_config_accepts_a_classifier_naming_a_deleted_question() {
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["classifiers"] = json!({"triage": {"questions": ["gone"]}});
+        let path = temp_config("gone", &config.to_string());
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        assert!(loaded.is_ok(), "{:?}", loaded.err());
+    }
+
+    #[test]
+    fn load_config_reports_bad_json_as_one_problem() {
+        let path = temp_config("json", "{");
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(loaded.err().map(|p| p.len()), Some(1));
     }
 
     #[test]
