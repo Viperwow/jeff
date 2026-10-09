@@ -290,6 +290,7 @@ function providersSnapshot() {
 const trackProviders = () => drafts.track("providers", providersSnapshot());
 
 function renderProviders() {
+  $("#default-model").value = "";
   renderProviderCards(config.providers);
   const d = drafts.open("providers", providersSnapshot(), $("#save-status"));
   $("#p-draft").hidden = !d;
