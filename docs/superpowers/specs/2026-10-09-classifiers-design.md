@@ -59,6 +59,7 @@ Access matches questions: `/v1` needs a client key, `/api` an admin key.
 | GET | `/v1/classifiers` | | Every classifier, as stored |
 | GET | `/v1/classifiers/{key}` | | One classifier, as stored; 404 if unknown |
 | POST | `/v1/classifiers/{key}` | `{"state": "...", "model"?: "..."}` | The merged answer |
+| POST | `/v1/classifiers` | `{"classifier": {...}, "state": "...", "model"?: "..."}` | The merged answer for an unsaved classifier |
 | POST | `/api/classifiers` | Map of key to classifier | All classifiers; an existing key fails and saves nothing |
 | PUT | `/api/classifiers/{key}` | One classifier | All classifiers; 404 if unknown |
 | DELETE | `/api/classifiers/{key}` | | All classifiers; 404 if unknown |
@@ -123,8 +124,8 @@ adds a yellow notice above the cards: `1 question skipped: spam`. The curl tab s
   already selected. Each option shows key, type badge and instructions. Arrow keys move, Enter adds, Escape closes.
 - Model override: a select with the listed models. The first option is "None (each question uses its own)".
 - Footer: Save, Cancel, Delete with the page's two-click confirmation (`confirmClick`), Try.
-- Try resolves the draft in the browser, drops deleted questions, and sends the result to `/v1/systemone`. The
-  answer renders with `answerCards()` and the same skipped notice. Nothing is saved.
+- Try sends the draft to `POST /v1/classifiers`. The server skips questions exactly as for a saved classifier, so Try
+  and Run answer alike. The answer renders with `answerCards()` and the same skipped notice. Nothing is saved.
 
 ## Errors
 

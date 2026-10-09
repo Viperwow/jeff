@@ -1288,13 +1288,10 @@ async function tryClassifier() {
   let c;
   try { c = classifierDraft(); }
   catch (err) { say(status, err.message, "err"); return; }
-  const working = c.questions.filter((k) => k in saved);
-  if (!working.length) { say(status, "No working questions.", "err"); return; }
-  const questions = c.model ? Object.fromEntries(working.map((k) => [k, { model: c.model }])) : working;
-  const body = { model: $("#c-model").value, state: $("#c-try-state").value, questions };
+  const body = { model: $("#c-model").value, state: $("#c-try-state").value, classifier: c };
   try {
-    const { out } = await ask(body, status, $("#c-try"));
-    $("#c-try-answer").replaceChildren(...[skippedNotice(missing(c.questions))].filter(Boolean), ...answerCards(fullQuestions(c.questions, c.model), out.answers || {}, body.model));
+    const { out } = await ask(body, status, $("#c-try"), "/v1/classifiers");
+    $("#c-try-answer").replaceChildren(...[skippedNotice(out.skipped)].filter(Boolean), ...answerCards(fullQuestions(c.questions, c.model), out.answers || {}, body.model));
   } catch (err) {
     say(status, err.message, "err");
   }

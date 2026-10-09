@@ -1031,7 +1031,29 @@ async fn call_classifier(
     let Some(c) = config.classifiers.get(&key) else {
         return unknown_classifier(&key);
     };
-    let (input, skipped) = match classifiers::resolve(&key, c, &config.questions) {
+    run_classifier(&app, &config, &key, c, body).await
+}
+
+/// Runs an unsaved classifier sent in the body, as the form's Try does; it skips questions exactly as a saved one.
+async fn try_classifier(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let config = app.config.read().await.clone();
+    match take_draft(body) {
+        Ok((c, body)) => run_classifier(&app, &config, "draft", &c, body).await,
+        Err(e) => error(StatusCode::UNPROCESSABLE_ENTITY, e),
+    }
+}
+
+/// Splits `{"classifier": {...}, ...}` into the classifier and the rest of the call body.
+fn take_draft(mut body: Value) -> Result<(Value, Value), String> {
+    let obj = body.as_object_mut().ok_or("body must be a JSON object")?;
+    match obj.remove("classifier") {
+        Some(c @ Value::Object(_)) => Ok((c, body)),
+        _ => Err("classifier must be an object with questions".into()),
+    }
+}
+
+async fn run_classifier(app: &App, config: &Config, key: &str, c: &Value, body: Value) -> Response {
+    let (input, skipped) = match classifiers::resolve(key, c, &config.questions) {
         Ok(r) => r,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -1039,7 +1061,7 @@ async fn call_classifier(
         Ok(b) => b,
         Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e),
     };
-    match answer(&app, &config, body).await {
+    match answer(app, config, body).await {
         Ok(u) if u.status.is_success() => Upstream {
             bytes: classifiers::with_skipped(u.bytes, &skipped),
             ..u
@@ -2089,7 +2111,10 @@ async fn serve(args: ServeArgs) {
         .route("/v1/models", get(models))
         .route("/v1/questions", get(list_questions))
         .route("/v1/questions/{key}", get(get_question))
-        .route("/v1/classifiers", get(list_classifiers))
+        .route(
+            "/v1/classifiers",
+            get(list_classifiers).post(try_classifier),
+        )
         .route(
             "/v1/classifiers/{key}",
             get(get_classifier).post(call_classifier),
@@ -2641,5 +2666,19 @@ triage	p/m	a, gone (deleted)
             ask_target(&ask_args(&["u", "--state", "s"]).unwrap()),
             "/v1/systemone"
         );
+    }
+
+    #[test]
+    fn take_draft_splits_the_classifier_from_the_call() {
+        let body = json!({"state": "s", "model": "p/m", "classifier": {"questions": ["a"]}});
+        assert_eq!(
+            take_draft(body).unwrap(),
+            (
+                json!({"questions": ["a"]}),
+                json!({"state": "s", "model": "p/m"})
+            )
+        );
+        assert!(take_draft(json!({"state": "s"})).is_err());
+        assert!(take_draft(json!([1])).is_err());
     }
 }
