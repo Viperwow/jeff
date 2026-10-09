@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde_json::{Map, Value, json};
 
 use crate::questions::{self, Change, Questions};
@@ -21,11 +23,12 @@ fn check(key: &str, c: &Value) -> Result<(), &'static str> {
     else {
         return Err("questions must be a non-empty array of question keys");
     };
-    for (i, k) in keys.iter().enumerate() {
-        if !k.is_string() {
+    let mut seen = HashSet::new();
+    for k in keys {
+        let Some(k) = k.as_str() else {
             return Err("questions must be a non-empty array of question keys");
-        }
-        if keys[..i].contains(k) {
+        };
+        if !seen.insert(k) {
             return Err("questions must not repeat a key");
         }
     }

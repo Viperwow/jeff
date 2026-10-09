@@ -1066,7 +1066,7 @@ function classifierBody() {
 
 function updateClassifierCurl() {
   const key = selectedClassifier();
-  $("#c-curl-text").textContent = key ? curlFor(classifierBody(), `/v1/classifiers/${key}`) : "Create a classifier to see its call.";
+  $("#c-curl-text").textContent = key ? curlFor(classifierBody(), `/v1/classifiers/${encodeURIComponent(key)}`) : "Create a classifier to see its call.";
 }
 $("#c-curl-copy").onclick = () => navigator.clipboard.writeText($("#c-curl-text").textContent).then(() => flash($("#c-status"), "curl copied"));
 $("#c-model").onchange = (e) => { store.set("c-model", e.target.value); updateClassifierCurl(); };

@@ -63,7 +63,7 @@ Access matches questions: `/v1` needs a client key, `/api` an admin key.
 | POST | `/v1/classifiers/{key}` | `{"state": "...", "model"?: "..."}` | The merged answer |
 | POST | `/v1/classifiers` | `{"classifier": {...}, "state": "...", "model"?: "..."}` | The merged answer for an unsaved classifier |
 | POST | `/api/classifiers` | Map of key to classifier | All classifiers; an existing key fails and saves nothing |
-| PUT | `/api/classifiers/{key}` | One classifier | All classifiers; 404 if unknown |
+| PUT | `/api/classifiers/{key}` | One classifier | The updated classifier; 404 if unknown |
 | DELETE | `/api/classifiers/{key}` | | All classifiers; 404 if unknown |
 
 The call body's `model` has the `/v1/systemone` meaning: the model for questions without their own, used when the
