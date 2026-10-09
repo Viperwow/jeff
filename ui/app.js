@@ -57,6 +57,28 @@ const store = {
   set(k, v) { try { localStorage.setItem("jeff." + k, JSON.stringify(v)); } catch {} },
 };
 
+/**
+ * Unsaved form input, kept in this browser until the form is saved, cancelled or discarded. A form whose fields match
+ * what it opened with keeps no draft. Provider keys and created access keys never get here.
+ */
+const drafts = {
+  baseline: {},
+  get(id) { return store.get("draft:" + id); },
+  drop(id) { try { localStorage.removeItem("jeff.draft:" + id); } catch {} },
+  /** Records what form `id` opened with, then returns its draft, if any. */
+  open(id, snapshot) {
+    this.baseline[id] = JSON.stringify(snapshot);
+    return this.get(id);
+  },
+  track(id, snapshot) {
+    if (JSON.stringify(snapshot) === this.baseline[id]) this.drop(id);
+    else store.set("draft:" + id, snapshot);
+  },
+};
+
+/** Runs `track` after the click that changed a form, such as adding or removing a row, has done its work. */
+const afterClick = (track) => () => setTimeout(track);
+
 function authHeaders(headers = {}) {
   const key = store.get("key");
   return key ? { ...headers, authorization: `Bearer ${key}` } : headers;
@@ -243,8 +265,34 @@ function providerCard(p) {
   return card;
 }
 
+function providersSnapshot() {
+  return {
+    default_model: $("#default-model").value,
+    providers: $$("#provider-list [data-provider]").map((card) => ({
+      id: $(".p-id", card).value,
+      name: $(".p-name", card).value,
+      url: $(".p-url", card).value,
+      models: $(".p-models", card).value,
+      installer: card.dataset.installer || null,
+    })),
+  };
+}
+
+const trackProviders = () => drafts.track("providers", providersSnapshot());
+
 function renderProviders() {
-  $("#provider-list").replaceChildren(...config.providers.map(providerCard));
+  renderProviderCards(config.providers);
+  const d = drafts.open("providers", providersSnapshot());
+  $("#p-draft").hidden = !d;
+  if (!d) return;
+  const saved = new Map(config.providers.map((p) => [p.id, p]));
+  renderProviderCards(d.providers.map((p) => ({ ...p, models: p.models.split(",").map((m) => m.trim()), key_set: saved.get(p.id)?.key_set })));
+  $("#default-model").value = d.default_model;
+  fillDefaultModel();
+}
+
+function renderProviderCards(providers) {
+  $("#provider-list").replaceChildren(...providers.map(providerCard));
   for (const card of $$("[data-installer=clm]")) clmTask(card).catch(() => {});
   const used = new Set(config.providers.map((p) => p.id));
   $("#preset").replaceChildren(...Object.entries(PRESET_LABELS).map(([k, label]) => {
@@ -255,6 +303,10 @@ function renderProviders() {
   $("#preset").value = Object.keys(PRESET_LABELS).find((k) => k === "custom" || !used.has(k));
   fillDefaultModel();
 }
+
+$("#page-providers").addEventListener("input", (e) => { if (!e.target.matches(".p-key")) trackProviders(); });
+$("#page-providers").addEventListener("change", (e) => { if (!e.target.matches(".p-key")) trackProviders(); });
+$("#page-providers").addEventListener("click", afterClick(trackProviders));
 
 $("#add-provider").onclick = () => {
   const preset = PRESETS[$("#preset").value];
@@ -311,6 +363,7 @@ async function saveProviders() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ default_model: $("#default-model").value, providers }),
     });
+    drafts.drop("providers");
     flash($("#save-status"), "Saved");
     await loadConfig();
   } catch (e) {
@@ -478,6 +531,28 @@ $("#key-date").addEventListener("input", syncExpiry);
 $("#key-exp").addEventListener("change", syncExpiry);
 syncExpiry();
 
+const keySnapshot = () => ({ name: $("#key-name").value, role: $("#key-role").value, exp: $("#key-exp").value, date: $("#key-date").value });
+const trackKey = () => drafts.track("key:new", keySnapshot());
+
+function restoreKeyDraft() {
+  const d = drafts.open("key:new", keySnapshot());
+  $("#k-draft").hidden = !d;
+  if (d) fillKeyForm(d);
+}
+
+function fillKeyForm(d) {
+  $("#key-name").value = d.name;
+  $("#key-role").value = d.role;
+  $("#key-exp").value = d.exp;
+  $("#key-date").value = d.date;
+  syncRole();
+  syncExpiry();
+}
+
+$("#key-form").addEventListener("input", trackKey);
+$("#key-form").addEventListener("change", trackKey);
+restoreKeyDraft();
+
 $("#key-form").onsubmit = (e) => {
   e.preventDefault();
   busy(e.submitter ?? $("#key-form [type=submit]"), createKey);
@@ -499,6 +574,8 @@ async function createKey() {
     if (kept) store.set("key", body.key);
     $("#key-saved-note").textContent = kept ? "This browser now uses this key for the admin page." : "";
     $("#key-name").value = "";
+    drafts.drop("key:new");
+    $("#k-draft").hidden = true;
     flash($("#key-status"), "Key created");
     await refreshInfo();
     await loadKeys();
@@ -935,6 +1012,19 @@ function fillFormModel(want = $("#q-form-model").value) {
   sel.value = want;
 }
 
+const questionDraftId = () => `question:${editing ?? "new"}`;
+
+/** The form as typed, unchecked: what `addQuestion` takes, plus the model. */
+function questionSnapshot() {
+  const card = $("#q-form-card .q");
+  const type = card.dataset.type;
+  const rows = type === "choice" ? $$(".q-row", card).map((r) => [$(".q-opt-key", r).value, $(".q-opt-desc", r).value])
+    : type === "score" ? $$(".q-level", card).map((i) => [i.value]) : undefined;
+  return { q: { key: $(".q-key", card).value, type, instructions: $(".q-instr", card).value, rows }, model: $("#q-form-model").value };
+}
+
+const trackQuestion = () => { if (!$("#q-form-view").hidden) drafts.track(questionDraftId(), questionSnapshot()); };
+
 function showForm(open) {
   $("#q-list-view").hidden = open;
   $("#q-form-view").hidden = !open;
@@ -947,11 +1037,17 @@ function openForm(key = null) {
   const card = addQuestion(key ? builderOf(key, q) : { type: "noul", key: "" });
   $(".q-key", card).readOnly = !!key;
   fillFormModel(q.model || "");
+  const d = drafts.open(questionDraftId(), questionSnapshot());
+  $("#q-draft").hidden = !d;
+  if (d) {
+    $(".q-key", addQuestion(d.q)).readOnly = !!key;
+    fillFormModel(d.model);
+  }
   $("#q-try-state").value = $("#pg-state").value;
   $("#q-try-answer").replaceChildren(el("p", "note py-12 text-center", "Try runs the draft against this state. Nothing is saved."));
   say($("#q-form-status"), "");
   showForm(true);
-  (key ? $(".q-instr", card) : $(".q-key", card)).focus();
+  (key ? $(".q-instr") : $(".q-key")).focus();
 }
 
 /** The form's question as `[key, native question]`, with its model when one is picked. */
@@ -972,6 +1068,7 @@ async function saveForm() {
     if (editing) await api(`/api/questions/${encodeURIComponent(editing)}`, { method: "PUT", headers: json, body: JSON.stringify(q) });
     else await api("/api/questions", { method: "POST", headers: json, body: JSON.stringify({ [key]: q }) });
     checked.add(key);
+    drafts.drop(questionDraftId());
     await loadQuestions();
     showForm(false);
   } catch (err) {
@@ -995,8 +1092,11 @@ async function tryDraft() {
 
 $("#q-new").onclick = () => openForm();
 $("#q-empty-new").onclick = () => openForm();
-$("#q-back").onclick = () => showForm(false);
-$("#q-cancel").onclick = () => showForm(false);
+const closeQuestionForm = () => { drafts.drop(questionDraftId()); showForm(false); };
+$("#q-back").onclick = closeQuestionForm;
+$("#q-cancel").onclick = closeQuestionForm;
+for (const type of ["input", "change"]) $("#q-form-view").addEventListener(type, (e) => { if (!e.target.closest("#q-try-state")) trackQuestion(); });
+$("#q-form-card").addEventListener("click", afterClick(trackQuestion));
 $("#q-save").onclick = (e) => busy(e.currentTarget, saveForm);
 $("#q-try").onclick = tryDraft;
 
@@ -1176,6 +1276,7 @@ function renderPicked() {
   const gone = missing(picked).length;
   $("#c-count").textContent = picked.length ? `${picked.length}${gone ? ` · ${gone} deleted` : ""}` : "";
   if (!$("#c-options").hidden) renderOptions();
+  trackClassifier();
 }
 
 let dragKey = null;
@@ -1260,6 +1361,10 @@ $("#c-search").onkeydown = (e) => {
 };
 $("#c-form-model").onchange = renderPicked;
 
+const classifierDraftId = () => `classifier:${cEditing ?? "new"}`;
+const classifierSnapshot = () => ({ key: $("#c-key").value, picked: [...picked], model: $("#c-form-model").value });
+const trackClassifier = () => { if (!$("#c-form-view").hidden) drafts.track(classifierDraftId(), classifierSnapshot()); };
+
 function openClassifierForm(key = null) {
   cEditing = key;
   const c = key ? classifiers[key] : {};
@@ -1268,6 +1373,13 @@ function openClassifierForm(key = null) {
   $("#c-key").readOnly = !!key;
   picked = keysOf(c);
   fillClassifierModel(typeof c.model === "string" ? c.model : "");
+  const d = drafts.open(classifierDraftId(), classifierSnapshot());
+  $("#c-draft").hidden = !d;
+  if (d) {
+    if (!key) $("#c-key").value = d.key;
+    picked = d.picked;
+    fillClassifierModel(d.model);
+  }
   renderPicked();
   $("#c-delete").hidden = !key;
   $("#c-try-state").value = $("#pg-state").value;
@@ -1297,6 +1409,7 @@ async function saveClassifier() {
     if (cEditing) await api(`/api/classifiers/${encodeURIComponent(key)}`, { method: "PUT", headers: json, body: JSON.stringify(c) });
     else await api("/api/classifiers", { method: "POST", headers: json, body: JSON.stringify({ [key]: c }) });
     store.set("classifier", key);
+    drafts.drop(classifierDraftId());
     await loadClassifiers();
     showClassifierForm(false);
   } catch (err) {
@@ -1329,8 +1442,19 @@ confirmClick($("#c-delete"), "Confirm delete", async () => {
 });
 $("#c-new").onclick = () => openClassifierForm();
 $("#c-empty-new").onclick = () => openClassifierForm();
-$("#c-back").onclick = () => showClassifierForm(false);
-$("#c-cancel").onclick = () => showClassifierForm(false);
+const closeClassifierForm = () => { drafts.drop(classifierDraftId()); showClassifierForm(false); };
+$("#c-back").onclick = closeClassifierForm;
+$("#c-cancel").onclick = closeClassifierForm;
+$("#c-key").addEventListener("input", trackClassifier);
+$("#c-form-model").addEventListener("change", trackClassifier);
+
+for (const b of $$("[data-discard]")) b.onclick = () => {
+  const form = b.dataset.discard;
+  if (form === "q") { drafts.drop(questionDraftId()); openForm(editing); }
+  if (form === "c") { drafts.drop(classifierDraftId()); openClassifierForm(cEditing); }
+  if (form === "p") { drafts.drop("providers"); renderProviders(); }
+  if (form === "k") { drafts.drop("key:new"); fillKeyForm(JSON.parse(drafts.baseline["key:new"])); $("#k-draft").hidden = true; }
+};
 $("#c-save").onclick = (e) => busy(e.currentTarget, saveClassifier);
 $("#c-try").onclick = tryClassifier;
 $("#c-run").onclick = runClassifier;
