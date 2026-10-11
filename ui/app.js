@@ -67,6 +67,16 @@ const store = {
 const drafts = {
   baseline: {},
   drop(id) { try { localStorage.removeItem("jeff.draft:" + id); } catch {} },
+  /** Drops the drafts of `kind` records missing from `keys`, such as ones deleted elsewhere. */
+  prune(kind, keys) {
+    const prefix = `jeff.draft:${kind}:`;
+    try {
+      for (const k of Object.keys(localStorage)) {
+        const id = k.slice(prefix.length);
+        if (k.startsWith(prefix) && id !== "new" && !Object.hasOwn(keys, id)) localStorage.removeItem(k);
+      }
+    } catch {}
+  },
   /** Records what form `id` opened with, then returns its draft, if any, and says in `status` when it was stale. */
   open(id, snapshot, status) {
     const base = JSON.stringify(snapshot);
@@ -1000,6 +1010,7 @@ function renderQuestions() {
 
 async function loadQuestions() {
   saved = (await api("/v1/questions")).body;
+  drafts.prune("question", saved);
   renderQuestions();
 }
 
@@ -1189,6 +1200,7 @@ function renderClassifiers() {
 
 async function loadClassifiers() {
   classifiers = (await api("/v1/classifiers")).body;
+  drafts.prune("classifier", classifiers);
   renderClassifiers();
 }
 

@@ -1963,7 +1963,19 @@ fn ask_target(args: &AskArgs) -> String {
 fn error_lines(status: u16, text: &str) -> String {
     let body: Value = serde_json::from_str(text).unwrap_or(Value::Null);
     let Some(msg) = body["error"].as_str() else {
-        return format!("error: HTTP {status}: {}", text.trim());
+        let reason = reqwest::StatusCode::from_u16(status)
+            .ok()
+            .and_then(|s| s.canonical_reason())
+            .unwrap_or_default();
+        let head = format!("error: HTTP {status} {reason}")
+            .trim_end()
+            .to_string();
+        // A proxy page or an empty body says nothing beyond the status.
+        let text = text.trim();
+        return match text.is_empty() || text.starts_with('<') {
+            true => head,
+            false => format!("{head}: {text}"),
+        };
     };
     let mut out = match body["code"].as_str() {
         Some(code) => format!("error[{code}]: {msg}"),
@@ -2055,10 +2067,12 @@ async fn saved_questions(url: &str) -> questions::Questions {
     }
 }
 
-async fn warn_skipped(url: &str, c: &Value) {
+async fn warn_skipped(url: &str, cs: impl IntoIterator<Item = &Value>) {
     let saved = saved_questions(url).await;
-    for k in classifiers::skipped(c, &saved) {
-        eprintln!("{}", classifiers::skip_reason(&k, &saved));
+    for c in cs {
+        for k in classifiers::skipped(c, &saved) {
+            eprintln!("{}", classifiers::skip_reason(&k, &saved));
+        }
     }
 }
 
@@ -2114,9 +2128,7 @@ async fn run_classifiers(action: ClassifiersAction, url: &str) {
                 .await
                 .unwrap_or_default();
             print_json(&saved, None);
-            for c in input.as_object().into_iter().flat_map(|m| m.values()) {
-                warn_skipped(url, c).await;
-            }
+            warn_skipped(url, input.as_object().into_iter().flat_map(|m| m.values())).await;
         }
         ClassifiersAction::Update(args) => {
             let input = match args.file {
@@ -2128,7 +2140,7 @@ async fn run_classifiers(action: ClassifiersAction, url: &str) {
                 .await
                 .unwrap_or_default();
             print_json(&saved, None);
-            warn_skipped(url, &saved).await;
+            warn_skipped(url, [&saved]).await;
         }
         ClassifiersAction::Remove { key } => {
             let path = format!("/api/classifiers/{}", segment(&key));
@@ -2466,8 +2478,16 @@ mod tests {
             "error: unknown classifier 'x'"
         );
         assert_eq!(
-            error_lines(502, "Bad Gateway"),
-            "error: HTTP 502: Bad Gateway"
+            error_lines(
+                415,
+                "Expected request with `Content-Type: application/json`\n"
+            ),
+            "error: HTTP 415 Unsupported Media Type: Expected request with `Content-Type: application/json`"
+        );
+        assert_eq!(error_lines(404, ""), "error: HTTP 404 Not Found");
+        assert_eq!(
+            error_lines(502, "<html>\n<body>Bad Gateway</body>\n</html>"),
+            "error: HTTP 502 Bad Gateway"
         );
     }
 
