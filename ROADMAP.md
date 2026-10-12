@@ -31,55 +31,78 @@ Found in a read-only audit against the OWASP API Security Top 10 (2023).
 - [ ] **Installers.** One-line shell and PowerShell installers, and a Homebrew tap.
 - [ ] **npm / npx.** Publish an npm package that dispatches the matching prebuilt binary, allowing one-off execution without a persistent global install (for example, `npx --yes jeff@<version> --help`). Support non-interactive CI usage, version pinning and reuse of the package-manager cache; if the wrapper downloads a binary separately, cache and verify that binary too. Document platform support and CI cache setup.
 - [ ] **PyPI / uvx.** Publish platform wheels containing the binary, for example with maturin in `bin` mode, allowing one-off execution without a persistent global install (for example, `uvx --from jeff==<version> jeff --help`). Support non-interactive CI usage, version pinning and reuse of the uv cache. Document platform support and CI cache setup.
-- [ ] **Container image.** A jeff container image for server deployments.
-  - Optional local sidecar.
-  - Team automation server.
-  - CI.
+- [ ] **Container image publish.** Publish an OCI image of jeff on a registry.
+- [ ] **Container sidecar deployment guide.** Document optional local sidecar use.
+- [ ] **Container team server deployment guide.** Document shared automation server use.
+- [ ] **Container CI deployment guide.** Document CI use of the image.
 - [ ] **Shell-first agent clients.** Document `jeff ask` as the primary integration path for coding agents.
 - [ ] **HTTP integrations without a terminal.** Document calling the same API when the host has no shell.
-- [ ] **MCP adapter (optional).** Expose classify and catalog operations over MCP without changing jeff core.
+- [ ] **MCP adapter.** Expose classify operations over MCP without changing jeff core.
+- [ ] **MCP catalog adapter.** Expose classifiers and questions catalog operations over MCP without changing jeff core.
 
 ## Agent integration
 
 jeff as an optional accelerator for coding agents (like a linter for decisions): routing, moderation, tool choice, priority, human-in-the-loop hints, soft bias — not a replacement for the main model's reasoning. If jeff is down, slow, or low-confidence, the agent decides next steps (including escalation to a human) without jeff blocking the session.
 
-**v1 agents:** Cursor, Claude Code, Codex.
-
-**Later agents (same skill where the host has a shell):** Deepseek harness, Hermes, Pi, OpenCode, Gemini CLI.
-
-- [ ] **Agent skill.** Ship a skill in this repo (`.cursor/skills/jeff/` or equivalent) as the first agent integration deliverable.
-  - Optional preflight: binary or Docker endpoint, `GET /health`.
-  - Once per session: load the classifiers catalog; load the questions catalog; use `--help` for flags.
-  - Runtime: `jeff ask` with saved classifiers, fixed classifier keys where needed, ad-hoc `--questions` to trial durable rules.
-  - State: static prefix plus dynamic tail; keep repeat payloads unchanged when possible for provider-side cache.
-  - Keys: env on the host or container; the agent calls `jeff` without handling Bearer tokens.
-  - No admin role for the agent by default.
-  - `--help` is the source of truth for CLI flags.
-- [ ] **Session-start prompts for jeff.** Document recommended first-turn requests for agents; may live in the skill, in user docs, or in project docs — not necessarily as shipped automation in the jeff binary.
-- [ ] **Claude hooks adapter.** After the skill: hook recipes that consume JSON from `jeff ask -o`.
-- [ ] **Cursor host patterns.** After the skill: turn-level patterns that consume the same JSON; no agent-specific protocol in jeff core.
-- [ ] **Project questions and classifiers.** Load questions and classifiers from the repository or launch directory.
-- [ ] **Project policies (later).** Load policy files from the repository or launch directory once the policy feature exists.
-- [ ] **Global config fallback.** Fall back to `~/.jeff/jeff.json` for providers, keys, and defaults when project files do not define them.
-- [ ] **Project vs global merge rules.** Specify how project keys overlap with global keys (for example providers only in global config).
-- [ ] **Version rules in git.** Keep classifiers and questions in the project repository.
-- [ ] **Sync rules to a shared jeff server.** Publish repo artifacts to the team automation server.
-- [ ] **Use repo rules in CI.** Run the same classifiers in CI as in the project tree.
-- [ ] **Policy thresholds.** ESLint-style caps on classifier outputs: threshold value plus event (`warning` or `error`); optional description for the agent when a cap fires.
+- [ ] **Agent skill for Cursor.** Ship `.cursor/skills/jeff/` in this repository.
+- [ ] **Agent skill for Claude Code.** Ship the Claude Code skills path in this repository.
+- [ ] **Agent skill for Codex.** Ship Codex-oriented skill instructions in this repository.
+- [ ] **Agent skill preflight.** Document optional preflight: binary or Docker endpoint, `GET /health`.
+- [ ] **Agent skill session classifiers catalog.** Document loading the classifiers catalog once per session.
+- [ ] **Agent skill session questions catalog.** Document loading the questions catalog once per session.
+- [ ] **Agent skill CLI discovery.** Document using `jeff --help` for flags instead of memorizing them.
+- [ ] **Agent skill saved classifiers.** Document `jeff ask --classifier` for saved rules.
+- [ ] **Agent skill fixed classifier keys.** Document hard-coded classifier keys where the project requires them.
+- [ ] **Agent skill ad-hoc questions.** Document `jeff ask --questions` to trial rules before saving them.
+- [ ] **Agent skill static state prefix.** Document a stable static block at the start of `state`.
+- [ ] **Agent skill dynamic state tail.** Document the changing tail of `state` after the static prefix.
+- [ ] **Agent skill stable repeat payloads.** Document keeping repeat requests byte-identical when possible for provider-side cache.
+- [ ] **Agent skill key handling.** Document that the agent calls `jeff`; keys live in jeff's environment only.
+- [ ] **Agent skill no admin default.** Document that coding agents must not use admin keys by default.
+- [ ] **Session-start prompts for jeff.** Document recommended first-turn requests for agents outside the jeff binary.
+- [ ] **Claude hooks adapter.** Ship hook recipes that consume JSON from `jeff ask -o`.
+- [ ] **Cursor host patterns.** Ship turn-level patterns that consume the same JSON.
+- [ ] **Load project questions.** Load saved questions from the repository or launch directory.
+- [ ] **Load project classifiers.** Load saved classifiers from the repository or launch directory.
+- [ ] **Load project policies.** Load policy files from the repository or launch directory.
+- [ ] **Fallback global providers.** Use `~/.jeff/jeff.json` providers when the project does not define them.
+- [ ] **Fallback global keys.** Use global access keys when the project does not define them.
+- [ ] **Fallback global defaults.** Use global defaults such as default model when the project does not define them.
+- [ ] **Project vs global merge rules.** Specify how project keys overlap with global keys.
+- [ ] **Version classifiers in git.** Store classifier definitions in the project repository.
+- [ ] **Version questions in git.** Store question definitions in the project repository.
+- [ ] **Sync repo artifacts to shared jeff.** Publish project rules to the team jeff server.
+- [ ] **CI project classifiers.** Run project classifiers in CI against the same artifacts as local dev.
+- [ ] **Policy threshold value.** Store a numeric or probability threshold on a policy rule.
+- [ ] **Policy threshold event.** Store whether a rule emits `warning` or `error`.
+- [ ] **Policy cap description.** Store agent-facing text explaining why a threshold exists.
 - [ ] **Policy soft-cap.** Emit a warning when a soft threshold fails; the agent still decides.
 - [ ] **Policy hard-cap.** Emit an error when a hard threshold fails.
-- [ ] **Policy programmatic mode.** Fail the CLI exit code or HTTP status on hard-cap without delegating to the agent.
-- [ ] **Policy response envelope.** Define how raw jeff answers combine with policy results for many agent hosts (TBD).
-- [ ] **Classifier-bound policy fields.** Attach thresholds to specific classifier answers on the classifier record.
+- [ ] **Policy hard-cap CLI exit code.** Non-zero exit from `jeff ask` on hard-cap in programmatic mode.
+- [ ] **Policy hard-cap HTTP status.** Non-success HTTP status on hard-cap in programmatic mode.
+- [ ] **Policy response envelope.** Define JSON shape for jeff answers plus policy results (TBD).
+- [ ] **Classifier-bound policy fields.** Attach policy thresholds to a specific classifier answer field.
 - [ ] **Decision logs.** Record classification requests and outcomes for review.
-- [ ] **Quality metrics.** Measure classifier and policy behavior against agreed criteria.
+- [ ] **Quality metrics.** Measure classifier behavior against agreed criteria.
+- [ ] **Policy quality metrics.** Measure policy cap behavior against agreed criteria.
 - [ ] **Review workflows.** Support human review of logged decisions.
-- [ ] **Experimentation methodology.** Document how to run A/B or flag-style rollouts of classifiers and policies.
-- [ ] **Near-real-time experiments.** Enable fast rollout and rollback of classifiers and policies (measurement design is a separate concern).
-- [ ] **Per-question model choice.** Pick the best model per question while batching into one provider per call where possible.
-- [ ] **Model benchmarks endpoint (later).** Surface fixed answer sets on large samples with human confirmation.
-- [ ] **Model usage statistics (later).** Surface stats to guide model choice per question or classifier.
-- [ ] **Learned routing layer (later).** Optional layer trained on common user classifiers and question stats; out of scope until the core agent path is stable.
+- [ ] **A/B experiment documentation.** Document A/B rollouts of classifiers and policies.
+- [ ] **Flag experiment documentation.** Document flag-style rollouts of classifiers and policies.
+- [ ] **Fast classifier rollout.** Enable quick rollout of classifier changes in shared deployments.
+- [ ] **Fast classifier rollback.** Enable quick rollback of classifier changes in shared deployments.
+- [ ] **Fast policy rollout.** Enable quick rollout of policy changes in shared deployments.
+- [ ] **Fast policy rollback.** Enable quick rollback of policy changes in shared deployments.
+- [ ] **Per-question model choice.** Pick the best model per question for each call.
+- [ ] **Single-provider batching.** Batch questions that share a provider into one upstream call where possible.
+- [ ] **Model benchmarks endpoint.** Surface fixed answer sets on large samples with human confirmation.
+- [ ] **Model usage statistics endpoint.** Surface usage stats to guide model choice.
+- [ ] **Learned routing from classifier stats.** Optional routing layer trained on classifier usage (later).
+- [ ] **Learned routing from question stats.** Optional routing layer trained on per-question usage (later).
+- [ ] **Agent integration for Deepseek harness.** Extend the skill pattern to Deepseek harness (later).
+- [ ] **Agent integration for Hermes.** Extend the skill pattern to Hermes (later).
+- [ ] **Agent integration for Pi.** Extend the skill pattern to Pi (later).
+- [ ] **Agent integration for OpenCode.** Extend the skill pattern to OpenCode (later).
+- [ ] **Agent integration for Gemini CLI.** Extend the skill pattern to Gemini CLI (later).
 
 ## Product
 
@@ -94,13 +117,18 @@ Build on Jeff's existing Jev-compatible discovery and request forwarding, using 
 
 - [x] **Classifiers.** Named groups of saved questions, run in one call, with an optional model override, through the API, the CLI and the Classifiers page.
 - [ ] **Multimodal state shape.** Design request bodies for static plus dynamic state parts before adding modalities beyond text.
-- [ ] **Multimodal state in the agent skill.** Document cache-friendly payloads and stable repeat requests in the agent skill.
-- [ ] **Multimodal capability matrix.** Record which models support which modalities; refuse unsupported inputs with a clear error; show limits per model (formats, size, count).
-- [ ] **State completeness over speed.** Prefer full context over latency when they conflict, within the global request body limit (16 MB today).
-- [ ] **Image input.** Let a classifier or a question take an image as the state, beside text.
-- [ ] **Image input via API.** Accept image state through the HTTP API.
-- [ ] **Image input via CLI.** Accept image state through a file argument in `jeff ask`.
-- [ ] **Image input via admin UI.** Accept image state through upload on the Classifiers and Questions pages.
+- [ ] **Multimodal cache-friendly payloads.** Design request bodies so provider-side caching can reuse stable prefixes.
+- [ ] **Multimodal state agent skill docs.** Document multimodal state conventions in the agent skill.
+- [ ] **Modality capability matrix.** Record which models support which modalities.
+- [ ] **Refuse unsupported modality.** Return a clear error when state uses a modality the model does not support.
+- [ ] **Per-model modality limits.** Show formats, size, and count limits per model in the admin UI.
+- [ ] **State completeness over speed.** Prefer full context over latency when they conflict, within the 16 MB request body limit.
+- [ ] **Image state on questions.** Accept an image as state for a single question.
+- [ ] **Image state on classifiers.** Accept an image as state for a classifier call.
+- [ ] **Image state HTTP API.** Accept image state through the HTTP API.
+- [ ] **Image state CLI file.** Accept image state through a file argument in `jeff ask`.
+- [ ] **Image state admin upload.** Accept image state through upload on the Classifiers page.
+- [ ] **Image state admin upload on Questions.** Accept image state through upload on the Questions page.
 - [ ] **Audio input.** The same for audio, as its own feature: record which models hear audio, refuse it for the others, and document formats, length and size limits per model. Accept it through the API, a file in the CLI and an upload in the UI.
 - [ ] **Video input.** After images and audio, and only where a model supports it: the heaviest input, with the strictest limits on length and size.
 - [ ] **Admin page sign-in.** A way to enter a key in a browser that did not create it.
