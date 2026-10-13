@@ -334,7 +334,24 @@ export function modelInvocable(markdown: string | null): boolean {
   if (!markdown) return true
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(markdown)
   if (!frontmatter) return true
-  return !/^disable-model-invocation:\s*true\s*$/m.test(frontmatter[1] as string)
+  const field = /^disable-model-invocation:(.*)$/m.exec(frontmatter[1] as string)
+  if (!field) return true
+  // Fails closed: any value but a plain false (quoted, any case, commented) bars the skill,
+  // so a spelling the engine's YAML reads as true can never slip through here.
+  const value = (field[1] as string).replace(/\s#.*$/, '').trim().replace(/^["']|["']$/g, '').toLowerCase()
+  return value === 'false' || value === 'no' || value === 'off'
+}
+
+/** Whether `url` is safe to send a key to: https, or plain http to this machine only. */
+export function keySafe(url: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  if (parsed.protocol === 'https:') return true
+  return parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
 }
 
 /** The classifier in jeff whose questions make the gate. */

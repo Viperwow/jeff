@@ -19,6 +19,7 @@ import {
   gateClassifier,
   injectionBlock,
   installPathsOf,
+  keySafe,
   modelInvocable,
   parseListing,
   parseNames,
@@ -245,6 +246,21 @@ describe('policy', () => {
     expect(modelInvocable('---\nname: x\n---\ndisable-model-invocation: true')).toBe(true)
     expect(modelInvocable('# no frontmatter')).toBe(true)
     expect(modelInvocable(null)).toBe(true)
+    // Any spelling the engine's YAML may read as true bars the skill; only a plain false lets it through.
+    for (const value of ['"true"', 'True', 'yes', 'on', 'true # set by admin', "'TRUE'", '1', '']) {
+      expect(modelInvocable(`---
+name: x
+disable-model-invocation: ${value}
+---
+# x`)).toBe(false)
+    }
+    for (const value of ['false', '"false"', 'False', 'no', 'off', 'false # default']) {
+      expect(modelInvocable(`---
+name: x
+disable-model-invocation: ${value}
+---
+# x`)).toBe(true)
+    }
   })
 
   test('skill bodies are looked for where Claude Code lays skills out', () => {
@@ -284,6 +300,14 @@ describe('policy', () => {
     expect(requestHeaders('k').authorization).toBe('Bearer k')
     expect(requestHeaders('').authorization).toBeUndefined()
     expect(baseUrl('http://127.0.0.1:8080//')).toBe('http://127.0.0.1:8080')
+    expect(keySafe('http://127.0.0.1:8080')).toBe(true)
+    expect(keySafe('http://localhost:8081')).toBe(true)
+    expect(keySafe('http://[::1]:8080')).toBe(true)
+    expect(keySafe('https://jeff.example')).toBe(true)
+    expect(keySafe('http://jeff.example')).toBe(false)
+    expect(keySafe('http://127.0.0.1.evil.example')).toBe(false)
+    expect(keySafe('http://localhost@evil.example')).toBe(false)
+    expect(keySafe('not a url')).toBe(false)
   })
 
   test('the suggestion block names the skill, and says "nothing" only while the listing is in place', () => {

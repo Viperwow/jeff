@@ -32,10 +32,14 @@ function systemone(body: { questions: Record<string, unknown> }, gate: number, f
  * The world beneath the mod: the engine's answers for everything it asks,
  * and a jeff that `route` answers. Every request the mod sends is recorded.
  */
-function world(on: Parameters<Parameters<typeof test>[1]>[1], route: (sent: Sent) => Reply | 'unreachable') {
+function world(
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  route: (sent: Sent) => Reply | 'unreachable',
+  env: Record<string, string> = {},
+) {
   const sent: Sent[] = []
   const logs: string[] = []
-  mock.env(on, { HOME: '/home/u' })
+  mock.env(on, { HOME: '/home/u', ...env })
   mock.clock(on)
   on('command.list', () => ({ value: COMMANDS }))
   on('session.cwd', () => ({ value: '/work' }))
@@ -112,6 +116,26 @@ describe('register', () => {
     expect(down.text).toBe('deploy the app')
     expect(down.context ?? []).toEqual([])
     expect(logs.some((line) => line.includes('needs a skill 0.05'))).toBe(true)
+  })
+
+  test('the key goes to a local jeff, never to a remote one over plain http', async ($, on) => {
+    const reply = (r: Sent) => (r.url.endsWith('/v1/classifiers/skill-gate') ? json(200, GATE) : systemone(r.body as never, 0.9, 0.9))
+    const { sent } = world(on, reply, { JEFF_API_KEY: 'secret', JEFF_URL: 'http://jeff.example:8080' })
+
+    await $.prompt.submit({ text: 'deploy the app' })
+
+    expect(sent.length > 0).toBe(true)
+    expect(sent.every((r) => r.url.startsWith('http://jeff.example:8080/'))).toBe(true)
+    expect(sent.every((r) => r.authorization === undefined)).toBe(true)
+  })
+
+  test('a local jeff gets the key in the authorization header', async ($, on) => {
+    const reply = (r: Sent) => (r.url.endsWith('/v1/classifiers/skill-gate') ? json(200, GATE) : systemone(r.body as never, 0.9, 0.9))
+    const { sent } = world(on, reply, { JEFF_API_KEY: 'secret' })
+
+    await $.prompt.submit({ text: 'deploy the app' })
+
+    expect(sent.every((r) => r.authorization === 'Bearer secret')).toBe(true)
   })
 
   test('prompt text that breaks JSON or looks like a path reaches jeff verbatim as the state', async ($, on) => {

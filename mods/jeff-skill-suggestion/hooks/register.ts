@@ -78,6 +78,7 @@ import {
   gateClassifier,
   injectionBlock,
   installPathsOf,
+  keySafe,
   modelInvocable,
   parseListing,
   parseNames,
@@ -131,7 +132,7 @@ export const register: Register = (on, options) => {
   const neverSuggested = parseNames(text('neverSuggested', ''))
   const rerankEnabled = flag('rerank', true)
   const excerptChars = number('excerptChars', 700)
-  const timeoutMs = number('timeoutMs', 800)
+  const timeoutMs = number('timeoutMs', 2000)
   const logDecisions = flag('logDecisions', true)
   const policy: PolicyConfig = {
     shortlist: Math.max(1, Math.round(number('shortlist', 3))),
@@ -230,11 +231,18 @@ export const register: Register = (on, options) => {
       $.ui.log(`[jeff-skill-suggestion] ${line}`)
     }
 
+    /** The key for `target`, or none when it would cross the network in plain text. */
+    const sendKey = (target: string) => {
+      if (!apiKey || keySafe(target)) return apiKey
+      once('insecure', `not sending JEFF_API_KEY to ${new URL(target).origin}: use https, or http on localhost`)
+      return ''
+    }
+
     /** One call to jeff, or null on timeout or a network error. */
     const call = async (target: string, method: 'GET' | 'POST', body?: string) => {
       try {
         const response = await Promise.race([
-          $.http.fetch(target, { method, headers: requestHeaders(apiKey), ...(body ? { body } : {}) }),
+          $.http.fetch(target, { method, headers: requestHeaders(sendKey(target)), ...(body ? { body } : {}) }),
           $.clock.sleep(timeoutMs),
         ])
         if (!response) once('timeout', `jeff did not answer ${target} within ${timeoutMs}ms; no suggestion`)

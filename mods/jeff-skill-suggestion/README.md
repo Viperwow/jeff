@@ -12,6 +12,8 @@ Install it in Claude Code 2.1.287 or later, with jeff running:
 
 On the first prompt the mod saves the `skill-gate` classifier in jeff, with three yes/no questions: `skill-gate-acts-on-system`, `skill-gate-follows-procedure` and `skill-gate-beyond-prose`. A question already saved under one of these keys is kept as it is. Edit the questions, add more to the classifier, or give it a `model` on jeff's admin page: the mod asks whatever `skill-gate` holds, and every yes counts towards a skill.
 
+The yes/no answers decide whether a skill is suggested, so the model behind `skill-gate` matters. Measured on four prompts with one right skill each, `typesafe/openjev-latest` gave the right skill a `fits` near 1.00 and the others near 0.00. `clm/clm-latest` rated wrong skills higher than the right one. Set the model on the `skill-gate` classifier in jeff; the mod asks both of its requests on that model.
+
 A jeff with no access keys lets the mod save the classifier with no key. A jeff with keys needs an admin key in `JEFF_API_KEY`, or in the mod's `apiKey` option, to save it once; a client key is enough after that.
 
 `/jeff-skill-suggestion:setup` hides every user skill from the model's listing, so `/context` counts them at 0. `/jeff-skill-suggestion:setup restore` undoes it.
