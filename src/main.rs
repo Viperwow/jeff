@@ -2395,7 +2395,12 @@ async fn serve(args: ServeArgs) {
         .merge(manage)
         .route(
             "/",
-            get(|| async { Html(include_str!("../ui/index.html")) }),
+            get(|| async {
+                Html(
+                    include_str!("../ui/index.html")
+                        .replace("{{version}}", env!("CARGO_PKG_VERSION")),
+                )
+            }),
         )
         .route(
             "/app.css",
