@@ -318,20 +318,26 @@ disable-model-invocation: ${value}
     expect(suggestionBlock(null, false)).toContain('No skill in the roster appears relevant')
   })
 
-  test('a prompt leaves one line of at most 15 words, with its numbers', () => {
+  test('a prompt leaves one line with its numbers and thresholds', () => {
     const wide = readWide(wideAnswer('powerpoint', DECK, ACTION), gate)
     const rerank = readRerank(rerankAnswer('pptx-author', { powerpoint: 0.73, 'pptx-author': 0.38 }), shortlisted)
-    const picked = summaryOf('pptx-author', wide, rerank, 2410)
-    expect(picked).toBe('/pptx-author · gate 0.87 · fits 0.38 · 2.4s')
-    expect(summaryOf('powerpoint', wide, null, 900)).toBe('/powerpoint · gate 0.87 · 0.9s')
+    const picked = summaryOf('pptx-author', wide, rerank, 1800, config)
+    expect(picked).toBe('Skill: /pptx-author · Fit gate: 0.3 · Fit score: 0.38 · Execution time: 1.8s')
+    expect(summaryOf('powerpoint', wide, null, 900, config)).toBe(
+      'Skill: /powerpoint · Need gate: 0.3 · Need score: 0.87 · Execution time: 0.9s',
+    )
     const prose = readWide(wideAnswer('commit', undefined, PROSE), gate)
-    expect(summaryOf(null, prose, null, 1100)).toBe('no skill · gate 0.10 · 1.1s')
+    expect(summaryOf(null, prose, null, 1100, config)).toBe(
+      'Skill: no need · Need gate: 0.3 · Need score: 0.10 · Execution time: 1.1s',
+    )
     const rejected = readRerank(rerankAnswer('powerpoint', { powerpoint: 0.02, 'pptx-author': 0.01 }), shortlisted)
-    const none = summaryOf(null, wide, rejected, 2400)
-    expect(none).toBe('no skill · gate 0.87 · nothing fits 0.02 · 2.4s')
-    expect(summaryOf(null, null, null, 2000)).toBe('no skill · no answer · 2.0s')
-    for (const line of [picked, none]) expect(line.split(/\s+/).length <= 15).toBe(true)
-  })
+    const none = summaryOf(null, wide, rejected, 2400, config)
+    expect(none).toBe('Skill: nothing fits · Fit gate: 0.3 · Fit score: 0.02 · Execution time: 2.4s')
+    expect(summaryOf(null, wide, null, 3000, config, 'jeff timed out after 3s')).toBe(
+      'Skipped: jeff timed out after 3s · Execution time: 3.0s',
+    )
+    expect(summaryOf(null, null, null, 10, config)).toBe('Skipped: no answer from jeff · Execution time: 0.0s')
+      })
 
   test("a plugin skill's plugin is the prefix of its name", () => {
     expect(pluginPrefix('superpowers:test-driven-development')).toBe('superpowers')

@@ -191,6 +191,9 @@ export const register: Register = (on, options) => {
     if (!e.text.trim() || /^\/\S/.test(e.text.trim())) return next(e)
     if (e.origin && NOT_A_TASK.has(e.origin.kind)) return next(e)
 
+    // Why this prompt got no answer from jeff, for its one log line.
+    let skipped: string | null = null
+
     const once = (kind: string, line: string) => {
       if (reported.has(kind)) return
       reported.add(kind)
@@ -211,10 +214,10 @@ export const register: Register = (on, options) => {
           $.http.fetch(target, { method, headers: requestHeaders(sendKey(target)), ...(body ? { body } : {}) }),
           $.clock.sleep(timeoutMs),
         ])
-        if (!response) once('timeout', `jeff did not answer ${target} within ${timeoutMs}ms; no suggestion`)
+        if (!response) skipped = `jeff timed out after ${timeoutMs / 1000}s`
         return response ?? null
-      } catch (error) {
-        once('unreachable', `jeff is not reachable at ${url} (${String(error)}); start it with \`jeff\`, no suggestion until then`)
+      } catch {
+        skipped = `jeff is not running at ${url}`
         return null
       }
     }
@@ -223,7 +226,7 @@ export const register: Register = (on, options) => {
     const ask = async (questions: Record<string, unknown>, what: string, model: string | null): Promise<string | null> => {
       const response = await call(`${url}/v1/systemone`, 'POST', requestBody(e.text, questions, model))
       if (response && response.ok) return response.text
-      if (response) once(`${what}-${response.status}`, `jeff responded ${response.status} to the ${what}: ${response.text.slice(0, 200)}`)
+      if (response) skipped = `jeff answered ${response.status} to the ${what}`
       return null
     }
 
@@ -236,13 +239,13 @@ export const register: Register = (on, options) => {
       for (const [key, question] of Object.entries(GATE_QUESTIONS)) {
         const saved = await call(`${adminUrl}/api/questions`, 'POST', JSON.stringify({ [key]: question }))
         if (!saved || (!saved.ok && saved.status !== 409)) {
-          if (saved) once('save', `could not save question ${key} in jeff (${saved.status}): ${saved.text.slice(0, 200)}${saved.status === 401 || saved.status === 403 ? '; set JEFF_API_KEY to an admin key' : ''}`)
+          if (saved) skipped = saved.status === 401 || saved.status === 403 ? `${GATE_CLASSIFIER} is missing in jeff; set JEFF_API_KEY to an admin key` : `could not save ${GATE_CLASSIFIER} in jeff (${saved.status})`
           return false
         }
       }
       const saved = await call(`${adminUrl}/api/classifiers`, 'POST', JSON.stringify(gateClassifier()))
       if (!saved || (!saved.ok && saved.status !== 409)) {
-        if (saved) once('save', `could not save classifier ${GATE_CLASSIFIER} in jeff (${saved.status}): ${saved.text.slice(0, 200)}`)
+        if (saved) skipped = `could not save ${GATE_CLASSIFIER} in jeff (${saved.status})`
         return false
       }
       $.ui.log(`saved classifier ${GATE_CLASSIFIER} in jeff with ${Object.keys(GATE_QUESTIONS).join(', ')}`)
@@ -257,11 +260,11 @@ export const register: Register = (on, options) => {
       if (response && response.status === 404 && (await saveGate())) response = await call(target, 'GET')
       if (!response) return null
       if (!response.ok) {
-        once('gate', `jeff responded ${response.status} for classifier ${GATE_CLASSIFIER}; no suggestion`)
+        skipped = `jeff answered ${response.status} for ${GATE_CLASSIFIER}`
         return null
       }
       gate = readGate(response.text)
-      if (!gate) once('gate', `jeff's ${GATE_CLASSIFIER} is not a classifier with questions; no suggestion`)
+      if (!gate) skipped = `${GATE_CLASSIFIER} in jeff has no questions`
       return gate
     }
 
@@ -335,16 +338,19 @@ export const register: Register = (on, options) => {
     // list: a skill hidden with skillOverrides is still a candidate.
     const skills = catalog(commands, injectContent ? new Set() : listed, neverSuggested)
     if (skills.length === 0) {
-      if (logDecisions) $.ui.log('no skill · 0 candidates')
+      if (logDecisions) $.ui.log('Skipped: no skills to choose from')
       return next(e)
     }
     const pluginOf = new Map(commands.map((command) => [command.name, command.plugin ?? pluginPrefix(command.name)]))
 
+    const startedAt = await $.clock.now()
     const skillGate = await loadGate()
-    if (!skillGate) return next(e)
+    if (!skillGate) {
+      if (logDecisions) $.ui.log(summaryOf(null, null, null, (await $.clock.now()) - startedAt, policy, skipped))
+      return next(e)
+    }
 
     // Request 1: rank everything, and ask skill-gate whether the prompt wants a skill at all.
-    const startedAt = await $.clock.now()
     let wide: Wide | null = null
     const wideAnswer = await ask(wideQuestions(skillGate, skills), 'ranking', skillGate.model)
     if (wideAnswer) wide = readWide(wideAnswer, skillGate)
@@ -392,7 +398,7 @@ export const register: Register = (on, options) => {
       block = suggestionBlock(pick, hideListing)
     }
     // The one line a prompt leaves in the log.
-    if (logDecisions) $.ui.log(summaryOf(pick?.name ?? null, wide, rerank, (await $.clock.now()) - startedAt))
+    if (logDecisions) $.ui.log(summaryOf(pick?.name ?? null, wide, rerank, (await $.clock.now()) - startedAt, policy, skipped))
     if (!block) return next(e)
     // Attached on the way down: one block after the prompt as typed, read by
     // the model and never shown to the person.
