@@ -48,7 +48,7 @@ Build on Jeff's existing Jev-compatible discovery and request forwarding, using 
 - [ ] **Image input.** Let a classifier or a question take an image as the state, beside text. Not every model reads images: record which models do, refuse an image sent to a text-only model with a clear error instead of dropping it, and show the limits per model (formats, size, count). Accept the image the same way through the API, a file in the CLI and an upload on the Classifiers and Questions pages.
 - [ ] **Audio input.** The same for audio, as its own feature: record which models hear audio, refuse it for the others, and document formats, length and size limits per model. Accept it through the API, a file in the CLI and an upload in the UI.
 - [ ] **Video input.** After images and audio, and only where a model supports it: the heaviest input, with the strictest limits on length and size.
-- [ ] **Version in the UI.** Show the running jeff version, as `jeff --version` prints it, in the bottom-left corner of every page.
+- [x] **Version in the UI.** Show the running jeff version, as `jeff --version` prints it, in the bottom-left corner of every page.
 - [ ] **Admin page sign-in.** A way to enter a key in a browser that did not create it.
 - [ ] **Recent unsaved questions.** List questions asked through Try, `jeff ask` or inline `/v1/systemone` maps but not saved, newest first, so a good question can be saved or used as a template in one click instead of typed again.
 - [ ] **Streaming mode.** Deliver each model's answers as they arrive, through the API and `jeff ask`, instead of waiting for the slowest model.
