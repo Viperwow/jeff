@@ -133,7 +133,7 @@ export const register: Register = (on, options) => {
   const logDecisions = flag('logDecisions', true)
   const policy: PolicyConfig = {
     shortlist: Math.max(1, Math.round(number('shortlist', 3))),
-    gateThreshold: number('gateThreshold', 0.3),
+    gateThreshold: number('gateThreshold', 0.2),
     fitsThreshold: number('fitsThreshold', 0.3),
   }
 

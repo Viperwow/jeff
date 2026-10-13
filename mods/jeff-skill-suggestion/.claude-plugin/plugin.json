@@ -58,7 +58,7 @@
       "type": "number",
       "title": "Needs-a-skill threshold",
       "description": "Mean of the skill-gate nouls under which nothing is suggested",
-      "default": 0.3
+      "default": 0.2
     },
     "fitsThreshold": {
       "type": "number",
