@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "extends": "./.claude-plugin/types/tsconfig.json",
+  "include": ["hooks", "tests", ".claude-plugin/types/**/*.d.ts"]
+}

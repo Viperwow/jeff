@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "jeff",
+  "owner": {
+    "name": "Viperwow",
+    "url": "https://github.com/Viperwow"
+  },
+  "plugins": [
+    {
+      "name": "jeff-skill-suggestion",
+      "description": "Hides the skill listing and lets jeff pick at most one skill per prompt",
+      "source": "./mods/jeff-skill-suggestion",
+      "category": "productivity"
+    }
+  ]
+}

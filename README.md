@@ -24,6 +24,7 @@ jeff runs as one small binary. It serves:
 - [Access keys](#access-keys)
 - [Run on a server](#run-on-a-server)
 - [Agent skill](#agent-skill)
+- [Claude Code mod](#claude-code-mod)
 - [Command reference](#command-reference)
 - [Build from source](#build-from-source)
 
@@ -281,6 +282,26 @@ Before you open a port to a network:
 ```sh
 npx skills add Viperwow/jeff
 ```
+
+## Claude Code mod
+
+[mods/jeff-skill-suggestion](mods/jeff-skill-suggestion) hides the skill listing from Claude Code and lets jeff pick at most one skill per prompt. It saves the `skill-gate` classifier in jeff on first use, so the questions that decide whether a prompt needs a skill can be edited on the admin page. Install it in Claude Code 2.1.287 or later, with jeff running:
+
+```text
+/plugin install jeff-skill-suggestion --marketplace Viperwow/jeff
+```
+
+With the mod, Claude chose the right skill in 90% of runs instead of 50%, at 40% lower cost. On prompts that needed a skill, it chose right in 86% of runs instead of 29%.
+
+Measured on 10 prompts, each run 3 times with the mod and 3 times without it, with `skill-gate` on `typesafe/openjev-latest`:
+
+| Metric | Without the mod | With the mod |
+|---|---|---|
+| Right skill chosen | 15 of 30 | 27 of 30 |
+| Cost | $5.13 | $3.07, −40% |
+| Context of a one-turn prompt | 39.6k tokens | 31.3k tokens, −21% |
+
+The mod waits for jeff before each prompt, about 1–3 s. [BENCHMARK.md](mods/jeff-skill-suggestion/BENCHMARK.md) has the setup, every prompt and the limits of the measurement.
 
 ## Command reference
 
