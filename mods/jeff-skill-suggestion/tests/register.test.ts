@@ -1,6 +1,7 @@
+import type { CommandInfo, On, PromptSubmitInput } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-const COMMANDS = [
+const COMMANDS: CommandInfo[] = [
   { name: 'help', description: 'Show help', source: 'builtin' },
   { name: 'deploy', description: 'Deploy the project to production', source: 'user' },
   { name: 'commit', description: 'Create a git commit from the staged changes', source: 'user' },
@@ -10,6 +11,9 @@ const GATE = { questions: ['skill-gate-acts-on-system', 'skill-gate-follows-proc
 
 type Sent = { url: string; method: string; body: unknown; authorization?: string }
 type Reply = { status: number; text: string }
+
+/** A prompt as typed at the composer. */
+const typed = (text: string): PromptSubmitInput => ({ text, wait: false, origin: { kind: 'composer' } })
 
 const json = (status: number, body: unknown): Reply => ({ status, text: JSON.stringify(body) })
 
@@ -33,7 +37,7 @@ function systemone(body: { questions: Record<string, unknown> }, gate: number, f
  * and a jeff that `route` answers. Every request the mod sends is recorded.
  */
 function world(
-  on: Parameters<Parameters<typeof test>[1]>[1],
+  on: On,
   route: (sent: Sent) => Reply | 'unreachable',
   env: Record<string, string> = {},
 ) {
@@ -45,7 +49,7 @@ function world(
   on('session.cwd', () => ({ value: '/work' }))
   on('fs.exists', () => ({ value: false }))
   on('ui.log', ($, e) => {
-    logs.push(String(e.text ?? e.message ?? JSON.stringify(e)))
+    logs.push(e.text)
     return { value: undefined }
   })
   on('ui.status', () => ({ value: undefined }))
@@ -67,7 +71,7 @@ describe('register', () => {
       r.url.endsWith('/v1/classifiers/skill-gate') ? json(200, GATE) : systemone(r.body as never, 0.9, 0.9),
     )
 
-    const result = await $.prompt.submit({ text: 'ship this build to production' })
+    const result = await $.prompt.submit(typed('ship this build to production'))
 
     expect(result.context?.length).toBe(1)
     expect(result.context?.[0]).toContain('Relevant to the current request: deploy.')
@@ -93,7 +97,7 @@ describe('register', () => {
       return systemone(r.body as never, 0.9, 0.9)
     })
 
-    const result = await $.prompt.submit({ text: 'deploy the app' })
+    const result = await $.prompt.submit(typed('deploy the app'))
 
     expect(sent.filter((r) => r.url.endsWith('/api/questions')).length).toBe(3)
     const classifier = sent.find((r) => r.url.endsWith('/api/classifiers'))?.body as Record<string, { questions: string[] }>
@@ -108,11 +112,11 @@ describe('register', () => {
       return r.url.endsWith('/v1/classifiers/skill-gate') ? json(200, GATE) : systemone(r.body as never, 0.05, 0.9)
     })
 
-    const prose = await $.prompt.submit({ text: 'what is a monad?' })
+    const prose = await $.prompt.submit(typed('what is a monad?'))
     expect(prose.context ?? []).toEqual([])
 
     up = false
-    const down = await $.prompt.submit({ text: 'deploy the app' })
+    const down = await $.prompt.submit(typed('deploy the app'))
     expect(down.text).toBe('deploy the app')
     expect(down.context ?? []).toEqual([])
     expect(logs.some((line) => line.includes('needs a skill 0.05'))).toBe(true)
@@ -122,7 +126,7 @@ describe('register', () => {
     const reply = (r: Sent) => (r.url.endsWith('/v1/classifiers/skill-gate') ? json(200, GATE) : systemone(r.body as never, 0.9, 0.9))
     const { sent } = world(on, reply, { JEFF_API_KEY: 'secret', JEFF_URL: 'http://jeff.example:8080' })
 
-    await $.prompt.submit({ text: 'deploy the app' })
+    await $.prompt.submit(typed('deploy the app'))
 
     expect(sent.length > 0).toBe(true)
     expect(sent.every((r) => r.url.startsWith('http://jeff.example:8080/'))).toBe(true)
@@ -133,7 +137,7 @@ describe('register', () => {
     const reply = (r: Sent) => (r.url.endsWith('/v1/classifiers/skill-gate') ? json(200, GATE) : systemone(r.body as never, 0.9, 0.9))
     const { sent } = world(on, reply, { JEFF_API_KEY: 'secret' })
 
-    await $.prompt.submit({ text: 'deploy the app' })
+    await $.prompt.submit(typed('deploy the app'))
 
     expect(sent.every((r) => r.authorization === 'Bearer secret')).toBe(true)
   })
@@ -144,7 +148,7 @@ describe('register', () => {
     )
     const hostile = 'deploy "}],"questions":{}} ../../etc/passwd\n$(rm -rf /) `id`'
 
-    await $.prompt.submit({ text: hostile })
+    await $.prompt.submit(typed(hostile))
 
     const ask = sent.find((r) => r.url.endsWith('/v1/systemone'))?.body as { state: string; questions: Record<string, unknown> }
     expect(ask.state).toBe(hostile)
