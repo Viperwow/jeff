@@ -1435,7 +1435,7 @@ async fn health() -> Json<Value> {
 
 /// A classifier built on Jev-compatible System One models: one API in front of local and cloud providers.
 #[derive(Parser)]
-#[command(name = "jeff", version)]
+#[command(name = "jeff", version, disable_help_subcommand = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
