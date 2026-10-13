@@ -3,6 +3,7 @@ name: Commitlint
 on:
   pull_request:
     branches: [main]
+    types: [opened, edited, synchronize, reopened]
 
 permissions:
   contents: read
@@ -23,3 +24,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }}
+      # A squash merge puts the PR title on main, and the release reads it from there.
+      - name: PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$TITLE" | pnpm exec commitlint
