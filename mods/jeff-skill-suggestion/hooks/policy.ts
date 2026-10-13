@@ -664,9 +664,9 @@ function reported(value: number | null | undefined): string {
 }
 
 /**
- * The one line a prompt leaves in the log. `Fit` is how well the chosen skill
- * fits, against `fitsThreshold`; `Need` is whether the prompt needs a skill at
- * all, against `gateThreshold`, shown when no skill got that far.
+ * The one line a prompt leaves in the log. `Need` is whether the prompt needs a
+ * skill at all, against `gateThreshold`; `Fit` is how well the chosen skill
+ * fits, against `fitsThreshold`, shown once the second request has run.
  */
 export function summaryOf(
   pick: string | null,
@@ -680,10 +680,10 @@ export function summaryOf(
   if (skipped || !wide) return `Skipped: ${skipped ?? 'no answer from jeff'} · ${took}`
   const need = `Need gate: ${config.gateThreshold} · Need score: ${reported(wide.gate)}`
   const fitOf = (value: number | undefined) => `Fit gate: ${config.fitsThreshold} · Fit score: ${reported(value)}`
-  if (pick) return `Skill: /${pick} · ${rerank ? fitOf(rerank.fits[pick]) : need} · ${took}`
+  if (pick) return `Skill: /${pick} · ${need}${rerank ? ` · ${fitOf(rerank.fits[pick])}` : ''} · ${took}`
   if (!passesGate(wide, config) || !rerank) return `Skill: no need · ${need} · ${took}`
   const best = Math.max(...Object.values(rerank.fits))
-  return `Skill: nothing fits · ${fitOf(Number.isFinite(best) ? best : undefined)} · ${took}`
+  return `Skill: nothing fits · ${need} · ${fitOf(Number.isFinite(best) ? best : undefined)} · ${took}`
 }
 
 /** The plugin a `plugin:skill` name comes from, for when the engine does not say. */

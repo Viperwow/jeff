@@ -322,7 +322,7 @@ disable-model-invocation: ${value}
     const wide = readWide(wideAnswer('powerpoint', DECK, ACTION), gate)
     const rerank = readRerank(rerankAnswer('pptx-author', { powerpoint: 0.73, 'pptx-author': 0.38 }), shortlisted)
     const picked = summaryOf('pptx-author', wide, rerank, 1800, config)
-    expect(picked).toBe('Skill: /pptx-author · Fit gate: 0.3 · Fit score: 0.38 · Execution time: 1.8s')
+    expect(picked).toBe('Skill: /pptx-author · Need gate: 0.3 · Need score: 0.87 · Fit gate: 0.3 · Fit score: 0.38 · Execution time: 1.8s')
     expect(summaryOf('powerpoint', wide, null, 900, config)).toBe(
       'Skill: /powerpoint · Need gate: 0.3 · Need score: 0.87 · Execution time: 0.9s',
     )
@@ -332,7 +332,7 @@ disable-model-invocation: ${value}
     )
     const rejected = readRerank(rerankAnswer('powerpoint', { powerpoint: 0.02, 'pptx-author': 0.01 }), shortlisted)
     const none = summaryOf(null, wide, rejected, 2400, config)
-    expect(none).toBe('Skill: nothing fits · Fit gate: 0.3 · Fit score: 0.02 · Execution time: 2.4s')
+    expect(none).toBe('Skill: nothing fits · Need gate: 0.3 · Need score: 0.87 · Fit gate: 0.3 · Fit score: 0.02 · Execution time: 2.4s')
     expect(summaryOf(null, wide, null, 3000, config, 'jeff timed out after 3s')).toBe(
       'Skipped: jeff timed out after 3s · Execution time: 3.0s',
     )
