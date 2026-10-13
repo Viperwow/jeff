@@ -23,6 +23,7 @@ jeff runs as one small binary. It serves:
 - [Local CLM](#local-clm)
 - [Access keys](#access-keys)
 - [Run on a server](#run-on-a-server)
+- [Agent skill](#agent-skill)
 - [Command reference](#command-reference)
 - [Build from source](#build-from-source)
 
@@ -270,6 +271,16 @@ Before you open a port to a network:
 - **Keep the admin page private.** It edits providers and keys and starts Docker. Bind it to `127.0.0.1` and reach it through an SSH tunnel (`ssh -L 8081:127.0.0.1:8081 server`), or turn it off with `--no-ui`.
 - **Name the proxy.** The admin page answers only to `localhost` and IP addresses. Behind a proxy with a domain name, add `--allowed-host admin.example.com`.
 - **Protect the config.** `jeff.json` holds provider keys in plain text. On Linux and macOS jeff writes it readable by its owner only.
+
+## Agent skill
+
+[![skills.sh](https://skills.sh/b/Viperwow/jeff)](https://skills.sh/Viperwow/jeff)
+
+[skills/jeff/SKILL.md](skills/jeff/SKILL.md) teaches a coding agent to run jeff, hand it typed decisions in batches, and save repeated checks as questions and classifiers. Install it with:
+
+```sh
+npx skills add Viperwow/jeff
+```
 
 ## Command reference
 
