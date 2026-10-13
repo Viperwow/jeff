@@ -659,43 +659,22 @@ export function suggestionBlock(suggested: Skill | null, hidden: boolean): strin
 }
 
 /** A number for the log, or `n/d` when the model reported none. */
-function reported(value: number | null): string {
-  return value === null ? 'n/d' : value.toFixed(2)
+function reported(value: number | null | undefined): string {
+  return value === null || value === undefined ? 'n/d' : value.toFixed(2)
 }
 
-/** The one-time line that says the mod is alive, which jeff answers it, and whether the listing is withheld. */
-export function describeSetup(url: string, hideListing: boolean): string {
-  const listing = hideListing ? 'withholding the skill listing' : 'leaving the skill listing in place'
-  return `ready on jeff (${url}); ${listing}`
+/** The one line a prompt leaves in the log: the pick or why none, with its numbers. */
+export function summaryOf(pick: string | null, reason: string, wide: Wide | null, rerank: Rerank | null, ms: number): string {
+  const took = `${(ms / 1000).toFixed(1)}s`
+  if (!pick) return `no skill · ${reason} · ${took}`
+  const fit = rerank ? ` · fits ${reported(rerank.fits[pick])}` : ''
+  return `/${pick} · gate ${reported(wide?.gate)}${fit} · ${took}`
 }
 
-/** What the first request answered: the gate and the top of the ranking. */
-export function describeWide(wide: Wide | null, candidates: number, ms: number | null): string {
-  const took = ms === null ? '' : ` · ${Math.round(ms)}ms`
-  if (!wide) return `no answer from ${candidates} candidates${took}`
-  const top = wide.ranked
-    .slice(0, 3)
-    .map((entry) => `${entry.name} (${reported(entry.probability)})`)
-    .join(', ')
-  return `needs a skill ${reported(wide.gate)} · top of ${candidates}: ${top || 'none'}${took}`
-}
-
-/** What the second request answered: the winner and every `fits`. */
-export function describeRerank(rerank: Rerank | null, ms: number | null): string {
-  const took = ms === null ? '' : ` · ${Math.round(ms)}ms`
-  if (!rerank) return `rerank: no answer${took}`
-  const fits = Object.entries(rerank.fits)
-    .map(([name, value]) => `${name} ${value.toFixed(2)}`)
-    .join(', ')
-  return `rerank → ${rerank.winner} (${reported(rerank.confidence)}) · fits ${fits || 'n/d'}${took}`
-}
-
-/**
- * The persistent status line: the last thing the mod did, short enough to
- * sit on screen beside the engine's own notices.
- */
-export function describeStatus(suggested: string | null): string {
-  return suggested ? `jeff · skill: ${suggested}` : 'jeff · no skill'
+/** The plugin a `plugin:skill` name comes from, for when the engine does not say. */
+export function pluginPrefix(name: string): string | undefined {
+  const cut = name.indexOf(':')
+  return cut > 0 ? name.slice(0, cut) : undefined
 }
 
 /** The name of the plugin's own setup command, as the engine runs it. */
@@ -881,7 +860,3 @@ export function setupAborted(reason: string): string {
   ].join('\n')
 }
 
-/** The hint logged while skills are still listed and the mod is meant to be the only source of them. */
-export function describeStillListed(count: number): string {
-  return `${count} skill${count === 1 ? ' is' : 's are'} still listed for the model (withheld here, but /context counts them); run /${SETUP_COMMAND} to hand their selection to the mod for good`
-}

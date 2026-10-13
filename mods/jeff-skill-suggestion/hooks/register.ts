@@ -68,11 +68,6 @@ import {
   catalog,
   commandLike,
   decide,
-  describeRerank,
-  describeSetup,
-  describeStatus,
-  describeStillListed,
-  describeWide,
   detailOf,
   displayIds,
   gateClassifier,
@@ -82,6 +77,7 @@ import {
   modelInvocable,
   parseListing,
   parseNames,
+  pluginPrefix,
   passesGate,
   pluginFileCandidates,
   readGate,
@@ -96,6 +92,7 @@ import {
   setupPlan,
   shortlistOf,
   skillFileCandidates,
+  summaryOf,
   suggestionBlock,
   syncedFileCandidates,
   trimListing,
@@ -145,9 +142,6 @@ export const register: Register = (on, options) => {
   // skills the model is allowed to invoke, and `$.command.list()` also names
   // commands the model may not.
   const listed = new Set<string>()
-  // The skill suggested for the current prompt, so a skill.prompt that loads
-  // it can be told apart from one the model reached for on its own.
-  let suggested: string | null = null
   // Each skill's SKILL.md as first found, with where, or null when nowhere:
   // read once per session, since the second request wants it on every prompt
   // it is on, and the injection wants it whole.
@@ -155,11 +149,6 @@ export const register: Register = (on, options) => {
   // The skills whose instructions were already attached this session: a
   // second time, the block only names the skill again.
   const injected = new Set<string>()
-  // Said once, the first time a hook runs. A mod that loaded and one that
-  // never loaded are otherwise told apart only by the absence of later lines,
-  // and absence is not evidence: with the listing gone, silence is the norm.
-  let announced = false
-  let hintedSetup = false
   // The same failure on every prompt would bury the log; each kind is said once.
   const reported = new Set<string>()
 
@@ -179,30 +168,12 @@ export const register: Register = (on, options) => {
     const skills = parseListing(e.text)
     for (const skill of skills) listed.add(skill.name)
 
-    // With the mod loading skills itself, a listing that still names any is
-    // context the setup command would have saved: say so once.
-    if (injectContent && !hintedSetup && skills.length > 0 && !e.agentId) {
-      hintedSetup = true
-      if (logDecisions) $.ui.log(`[jeff-skill-suggestion] ${describeStillListed(skills.length)}`)
-    }
-
     // A subagent's listing is not ours: nothing here suggests for a subagent,
     // so hiding its listing would leave it with no skills at all.
     if (!hideListing || e.agentId) return next(e)
 
-    const kept = trimListing(e.text, alwaysListed)
-    if (logDecisions) {
-      const keptNames = kept
-        ? parseListing(kept)
-            .map((skill) => skill.name)
-            .join(', ')
-        : 'none'
-      $.ui.log(
-        `[jeff-skill-suggestion] withheld the skill listing (${skills.length} skills, ${e.text.length} characters); kept listed: ${keptNames}`,
-      )
-    }
     // Answered without `next`: the engine's text never reaches the model.
-    return { text: kept }
+    return { text: trimListing(e.text, alwaysListed) }
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -214,11 +185,6 @@ export const register: Register = (on, options) => {
       }
     }
     const { url, adminUrl, apiKey } = jeff
-    if (!announced) {
-      announced = true
-      if (logDecisions) $.ui.log(`[jeff-skill-suggestion] ${describeSetup(url, hideListing)}`)
-    }
-    suggested = null
 
     // Notifications and peer messages are not tasks; a typed `/name` already
     // names its skill. Neither gets a suggestion.
@@ -228,7 +194,7 @@ export const register: Register = (on, options) => {
     const once = (kind: string, line: string) => {
       if (reported.has(kind)) return
       reported.add(kind)
-      $.ui.log(`[jeff-skill-suggestion] ${line}`)
+      $.ui.log(`${line}`)
     }
 
     /** The key for `target`, or none when it would cross the network in plain text. */
@@ -279,7 +245,7 @@ export const register: Register = (on, options) => {
         if (saved) once('save', `could not save classifier ${GATE_CLASSIFIER} in jeff (${saved.status}): ${saved.text.slice(0, 200)}`)
         return false
       }
-      $.ui.log(`[jeff-skill-suggestion] saved classifier ${GATE_CLASSIFIER} in jeff with ${Object.keys(GATE_QUESTIONS).join(', ')}`)
+      $.ui.log(`saved classifier ${GATE_CLASSIFIER} in jeff with ${Object.keys(GATE_QUESTIONS).join(', ')}`)
       return true
     }
 
@@ -337,7 +303,7 @@ export const register: Register = (on, options) => {
           }
         }
       } catch (error) {
-        $.ui.log(`[jeff-skill-suggestion] could not read /${skill.name}: ${String(error)}`)
+        $.ui.log(`could not read /${skill.name}: ${String(error)}`)
       }
       files.set(skill.name, found)
       return found
@@ -362,17 +328,17 @@ export const register: Register = (on, options) => {
       }
       commands = canonical(commands, displayToId ?? new Map())
     } catch (error) {
-      $.ui.log(`[jeff-skill-suggestion] could not list the skills: ${String(error)}`)
+      $.ui.log(`could not list the skills: ${String(error)}`)
       return next(e)
     }
     // Loading the skill itself, the mod is not bound to what the engine would
     // list: a skill hidden with skillOverrides is still a candidate.
     const skills = catalog(commands, injectContent ? new Set() : listed, neverSuggested)
     if (skills.length === 0) {
-      if (logDecisions) $.ui.log('[jeff-skill-suggestion] no candidate skills; nothing to suggest')
+      if (logDecisions) $.ui.log('no skill · 0 candidates')
       return next(e)
     }
-    const pluginOf = new Map(commands.map((command) => [command.name, command.plugin]))
+    const pluginOf = new Map(commands.map((command) => [command.name, command.plugin ?? pluginPrefix(command.name)]))
 
     const skillGate = await loadGate()
     if (!skillGate) return next(e)
@@ -382,12 +348,6 @@ export const register: Register = (on, options) => {
     let wide: Wide | null = null
     const wideAnswer = await ask(wideQuestions(skillGate, skills), 'ranking', skillGate.model)
     if (wideAnswer) wide = readWide(wideAnswer, skillGate)
-    // What jeff actually answered, whatever the policy then does with it.
-    // This is the line that proves the ranking ran.
-    if (logDecisions) {
-      const ms = (await $.clock.now()) - startedAt
-      $.ui.log(`[jeff-skill-suggestion] jeff: ${describeWide(wide, skills.length, ms)}`)
-    }
 
     // Request 2: re-read the shortlist with each skill's full text, and let
     // every candidate be rejected on its own.
@@ -407,17 +367,9 @@ export const register: Register = (on, options) => {
         candidates.push({ ...skill, detail: detailOf(skill, body, excerptChars) })
       }
       if (candidates.length > 0) {
-        const rerankStartedAt = await $.clock.now()
         rerankAttempted = true
         const answer = await ask(rerankQuestions(candidates), 'rerank', skillGate.model)
         if (answer) rerank = readRerank(answer, candidates)
-        if (logDecisions) {
-          const ms = (await $.clock.now()) - rerankStartedAt
-          const read = candidates.filter((candidate) => files.get(candidate.name)).length
-          $.ui.log(
-            `[jeff-skill-suggestion] jeff: ${describeRerank(rerank, ms)} · ${read}/${candidates.length} bodies read`,
-          )
-        }
       }
     }
 
@@ -430,47 +382,24 @@ export const register: Register = (on, options) => {
       decision = { name: null, reason: `/${pick.name} has disable-model-invocation` }
       pick = null
     }
-    if (logDecisions && barred.length > 0) {
-      $.ui.log(
-        `[jeff-skill-suggestion] not model-invocable, left out: ${barred.map((name) => `/${name}`).join(', ')}`,
-      )
-    }
-    // A row in the transcript scrolls away; this line stays on screen.
-    if (logDecisions) $.ui.status(describeStatus(pick?.name ?? null))
-    if (logDecisions) {
-      $.ui.log(
-        pick
-          ? `[jeff-skill-suggestion] suggesting /${pick.name}: ${decision.reason}`
-          : `[jeff-skill-suggestion] no suggestion: ${decision.reason}`,
-      )
-    }
-
-    suggested = pick?.name ?? null
     let block: string | null
     if (injectContent && pick) {
       const file = await fileOf(pick, pluginOf.get(pick.name))
       const projectDir = await $.session.cwd()
       block = injectionBlock(pick, file?.markdown ?? null, file?.path ?? null, projectDir, injected.has(pick.name))
-      if (logDecisions) {
-        $.ui.log(
-          file
-            ? injected.has(pick.name)
-              ? `[jeff-skill-suggestion] /${pick.name} already injected this session; named again`
-              : `[jeff-skill-suggestion] injected /${pick.name} from ${file.path} (${file.markdown.length} characters)`
-            : `[jeff-skill-suggestion] no file found for /${pick.name}; suggested by name only`,
-        )
-      }
       if (file) injected.add(pick.name)
     } else {
       block = suggestionBlock(pick, hideListing)
     }
+    // The one line a prompt leaves in the log.
+    if (logDecisions) $.ui.log(summaryOf(pick?.name ?? null, decision.reason, wide, rerank, (await $.clock.now()) - startedAt))
     if (!block) return next(e)
     // Attached on the way down: one block after the prompt as typed, read by
     // the model and never shown to the person.
     return next({ ...e, context: [...(e.context ?? []), block] })
   }).catch(($, e, next) => {
     // A suggestion is never worth a lost prompt: it goes through as typed.
-    $.ui.log(`[jeff-skill-suggestion] no suggestion: ${next.error.kind}`)
+    $.ui.log(`no suggestion: ${next.error.kind}`)
     return next(e)
   })
 
@@ -479,7 +408,6 @@ export const register: Register = (on, options) => {
   // summarize the block away. Either way the next pick goes in whole again.
   on('session.end', async ($, e, next) => {
     injected.clear()
-    suggested = null
     return next(e)
   })
   on('session.compact', async ($, e, next) => {
@@ -512,7 +440,7 @@ export const register: Register = (on, options) => {
       }
       commands = canonical(commands, displayToId ?? new Map())
     } catch (error) {
-      $.ui.log(`[jeff-skill-suggestion] setup: could not list the skills: ${String(error)}`)
+      $.ui.log(`setup: could not list the skills: ${String(error)}`)
       return next({ ...e, text: setupAborted(`the skills could not be listed (${String(error)})`) })
     }
     const home = (await $.env.get('HOME')) ?? '~'
@@ -522,7 +450,7 @@ export const register: Register = (on, options) => {
     try {
       if (await $.fs.exists(settingsPath)) json = await $.fs.read(settingsPath)
     } catch (error) {
-      $.ui.log(`[jeff-skill-suggestion] setup: could not read ${settingsPath}: ${String(error)}`)
+      $.ui.log(`setup: could not read ${settingsPath}: ${String(error)}`)
       return next({ ...e, text: setupAborted(`${settingsPath} exists but could not be read (${String(error)})`) })
     }
     const settings = readSkillSettings(json)
@@ -534,7 +462,7 @@ export const register: Register = (on, options) => {
     try {
       backupExists = await $.fs.exists(backupPath)
       if (backupExists && !validBackup(await $.fs.read(backupPath))) {
-        $.ui.log(`[jeff-skill-suggestion] setup: ${backupPath} is not a valid backup`)
+        $.ui.log(`setup: ${backupPath} is not a valid backup`)
         return next({
           ...e,
           text: setupAborted(
@@ -543,29 +471,9 @@ export const register: Register = (on, options) => {
         })
       }
     } catch (error) {
-      $.ui.log(`[jeff-skill-suggestion] setup: could not read ${backupPath}: ${String(error)}`)
+      $.ui.log(`setup: could not read ${backupPath}: ${String(error)}`)
       return next({ ...e, text: setupAborted(`${backupPath} could not be read (${String(error)})`) })
     }
-    if (logDecisions) {
-      $.ui.log(
-        `[jeff-skill-suggestion] setup (${mode}): ${plan.hide.length} to hide, ${plan.alreadyHidden.length} already hidden, ${plan.locked.length} locked by a plugin`,
-      )
-    }
     return next({ ...e, text: setupInstructions(mode, plan, settings, settingsPath, backupPath, backupExists) })
-  })
-
-  on('skill.prompt', async ($, e, next) => {
-    // Observation only: whether the model took the suggestion, or reached for
-    // a skill it was never told about, is the one measure of this mod's worth.
-    if (logDecisions && e.skill !== SETUP_COMMAND) {
-      const how =
-        suggested === e.skill
-          ? 'as suggested'
-          : suggested
-            ? `suggested was /${suggested}`
-            : 'nothing was suggested'
-      $.ui.log(`[jeff-skill-suggestion] skill /${e.skill} loaded (${how})`)
-    }
-    return next(e)
   })
 }

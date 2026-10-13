@@ -119,7 +119,7 @@ describe('register', () => {
     const down = await $.prompt.submit(typed('deploy the app'))
     expect(down.text).toBe('deploy the app')
     expect(down.context ?? []).toEqual([])
-    expect(logs.some((line) => line.includes('needs a skill 0.05'))).toBe(true)
+    expect(logs.filter((line) => line.startsWith('no skill · needs a skill 0.05'))).toHaveLength(1)
   })
 
   test('the key goes to a local jeff, never to a remote one over plain http', async ($, on) => {

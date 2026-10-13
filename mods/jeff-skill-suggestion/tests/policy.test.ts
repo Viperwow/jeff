@@ -8,11 +8,6 @@ import {
   catalog,
   commandLike,
   decide,
-  describeRerank,
-  describeSetup,
-  describeStatus,
-  describeStillListed,
-  describeWide,
   detailOf,
   displayIds,
   frontmatterName,
@@ -25,6 +20,7 @@ import {
   parseNames,
   passesGate,
   pluginFileCandidates,
+  pluginPrefix,
   readGate,
   readRerank,
   readSkillSettings,
@@ -38,6 +34,7 @@ import {
   shortlistOf,
   skillFileCandidates,
   suggestionBlock,
+  summaryOf,
   syncedFileCandidates,
   trimListing,
   validBackup,
@@ -321,20 +318,21 @@ disable-model-invocation: ${value}
     expect(suggestionBlock(null, false)).toContain('No skill in the roster appears relevant')
   })
 
-  test('the log lines name jeff, the gate, the ranking, the rerank and the pick', () => {
-    expect(describeSetup('http://127.0.0.1:8080', true)).toBe(
-      'ready on jeff (http://127.0.0.1:8080); withholding the skill listing',
-    )
-    expect(describeSetup('http://h', false)).toBe('ready on jeff (http://h); leaving the skill listing in place')
+  test('a prompt leaves one line of at most 15 words, with its numbers', () => {
     const wide = readWide(wideAnswer('powerpoint', DECK, ACTION), gate)
-    expect(describeWide(wide, 4, 160)).toBe(
-      'needs a skill 0.87 · top of 4: powerpoint (0.70), pptx-author (0.30), commit (0.00) · 160ms',
-    )
-    expect(describeWide(null, 4, null)).toBe('no answer from 4 candidates')
     const rerank = readRerank(rerankAnswer('pptx-author', { powerpoint: 0.73, 'pptx-author': 0.38 }), shortlisted)
-    expect(describeRerank(rerank, 90)).toBe('rerank → pptx-author (n/d) · fits powerpoint 0.73, pptx-author 0.38 · 90ms')
-    expect(describeStatus('pptx-author')).toBe('jeff · skill: pptx-author')
-    expect(describeStatus(null)).toBe('jeff · no skill')
+    const picked = summaryOf('pptx-author', 'rerank of 3, fits 0.38', wide, rerank, 2410)
+    expect(picked).toBe('/pptx-author · gate 0.87 · fits 0.38 · 2.4s')
+    expect(summaryOf('powerpoint', 'top', wide, null, 900)).toBe('/powerpoint · gate 0.87 · 0.9s')
+    const none = summaryOf(null, 'needs a skill 0.10 < 0.3', wide, null, 1700)
+    expect(none).toBe('no skill · needs a skill 0.10 < 0.3 · 1.7s')
+    for (const line of [picked, none]) expect(line.split(/\s+/).length <= 15).toBe(true)
+  })
+
+  test("a plugin skill's plugin is the prefix of its name", () => {
+    expect(pluginPrefix('superpowers:test-driven-development')).toBe('superpowers')
+    expect(pluginPrefix('commit')).toBeUndefined()
+    expect(pluginPrefix(':odd')).toBeUndefined()
   })
 
   test("the injection block carries the skill's body with its frontmatter off and its paths filled in", () => {
@@ -416,8 +414,6 @@ disable-model-invocation: ${value}
     expect(restore).toContain('Read /b.json')
     expect(restore).toContain('Only after a clear yes')
     expect(restore).toContain('rm ~/.claude/jeff-skill-suggestion.skill-overrides.backup.json')
-    expect(describeStillListed(1)).toContain('1 skill is still listed')
-    expect(describeStillListed(13)).toContain(`run /${SETUP_COMMAND}`)
   })
 
   test("a skill named with spaces in its frontmatter is mapped to its directory, which is the engine's id", () => {
