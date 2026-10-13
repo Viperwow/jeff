@@ -52,7 +52,7 @@ for tier in ("easy", "hard", "original"):
                      "type": item["question"]["type"], "expected": item["expected"], "got": got, "ok": ok,
                      "input_tokens": tokens, "seconds": round(secs, 3)})
 
-(OUT / "direct-results.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+(OUT / f"direct-{MODEL.replace('/', '_')}.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
 total = [sum(v[0] for v in score.values()), sum(v[1] for v in score.values())]
 for k, (ok, n) in list(score.items()) + [("total", total)]:
     print(f"{k:9} {ok}/{n} = {ok / n:.1%}")

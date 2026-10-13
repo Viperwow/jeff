@@ -2,10 +2,11 @@
 
 Usage: python companions.py DATA_DIR MODEL PAUSE_SECONDS
 """
-import json, subprocess, sys, time
+import json, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 D, MODEL, PAUSE = Path(sys.argv[1]), sys.argv[2], float(sys.argv[3])
+BASE = "https://raw.githubusercontent.com/fstandhartinger/jevbench/HEAD/datasets/public/"
 COMPANIONS = {
     "english": {"type": "noul", "instructions": "Is the text written in English?",
                 "criteria": {"true": "The text is in English", "false": "The text is in another language"}},
@@ -34,9 +35,13 @@ def ask(state, questions):
     raise RuntimeError(r.stdout + r.stderr)
 
 
+D.mkdir(parents=True, exist_ok=True)
 rows = []
 for tier in ("easy", "hard", "original"):
-    for line in (D / f"{tier}.jsonl").read_text(encoding="utf-8").splitlines():
+    path = D / f"{tier}.jsonl"
+    if not path.exists():
+        path.write_bytes(urllib.request.urlopen(BASE + f"{tier}.jsonl").read())
+    for line in path.read_text(encoding="utf-8").splitlines():
         it = json.loads(line)
         row = {"id": it["id"], "tier": tier, "type": it["question"]["type"], "expected": it["expected"]}
         try:
