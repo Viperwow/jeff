@@ -392,7 +392,7 @@ export const register: Register = (on, options) => {
       block = suggestionBlock(pick, hideListing)
     }
     // The one line a prompt leaves in the log.
-    if (logDecisions) $.ui.log(summaryOf(pick?.name ?? null, decision.reason, wide, rerank, (await $.clock.now()) - startedAt))
+    if (logDecisions) $.ui.log(summaryOf(pick?.name ?? null, wide, rerank, (await $.clock.now()) - startedAt))
     if (!block) return next(e)
     // Attached on the way down: one block after the prompt as typed, read by
     // the model and never shown to the person.

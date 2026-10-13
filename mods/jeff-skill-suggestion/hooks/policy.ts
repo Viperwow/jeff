@@ -663,12 +663,16 @@ function reported(value: number | null | undefined): string {
   return value === null || value === undefined ? 'n/d' : value.toFixed(2)
 }
 
-/** The one line a prompt leaves in the log: the pick or why none, with its numbers. */
-export function summaryOf(pick: string | null, reason: string, wide: Wide | null, rerank: Rerank | null, ms: number): string {
+/** The one line a prompt leaves in the log: the pick or none, with the numbers behind it. */
+export function summaryOf(pick: string | null, wide: Wide | null, rerank: Rerank | null, ms: number): string {
   const took = `${(ms / 1000).toFixed(1)}s`
-  if (!pick) return `no skill · ${reason} · ${took}`
-  const fit = rerank ? ` · fits ${reported(rerank.fits[pick])}` : ''
-  return `/${pick} · gate ${reported(wide?.gate)}${fit} · ${took}`
+  if (!wide) return `no skill · no answer · ${took}`
+  const parts = [pick ? `/${pick}` : 'no skill', `gate ${reported(wide.gate)}`]
+  if (rerank) {
+    const best = pick ? rerank.fits[pick] : Math.max(...Object.values(rerank.fits))
+    parts.push(`${pick ? 'fits' : 'nothing fits'} ${reported(Number.isFinite(best) ? best : null)}`)
+  }
+  return [...parts, took].join(' · ')
 }
 
 /** The plugin a `plugin:skill` name comes from, for when the engine does not say. */
