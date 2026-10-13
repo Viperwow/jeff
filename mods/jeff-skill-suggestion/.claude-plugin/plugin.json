@@ -88,7 +88,7 @@
       "type": "number",
       "title": "Latency budget (ms)",
       "description": "How long to wait for each answer from jeff before letting the prompt through without a suggestion",
-      "default": 2000
+      "default": 3000
     },
     "logDecisions": {
       "type": "boolean",

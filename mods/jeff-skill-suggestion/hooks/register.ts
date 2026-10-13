@@ -129,7 +129,7 @@ export const register: Register = (on, options) => {
   const neverSuggested = parseNames(text('neverSuggested', ''))
   const rerankEnabled = flag('rerank', true)
   const excerptChars = number('excerptChars', 700)
-  const timeoutMs = number('timeoutMs', 2000)
+  const timeoutMs = number('timeoutMs', 3000)
   const logDecisions = flag('logDecisions', true)
   const policy: PolicyConfig = {
     shortlist: Math.max(1, Math.round(number('shortlist', 3))),
