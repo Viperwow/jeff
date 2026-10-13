@@ -20,15 +20,15 @@ A jeff with no access keys lets the mod save the classifier with no key. A jeff 
 
 ## Tested on
 
-Claude Code 2.1.296, jeff 0.3.0.
+Claude Code 2.1.296, jeff 0.3.0, model `typesafe/openjev-latest`.
 
 ## Footprint
 
 ```text
-hooks: prompt.attachment{type=skill_listing}, prompt.submit, session.end, session.compact, skill.prompt{skill=jeff-skill-suggestion:setup}, skill.prompt
+hooks: prompt.attachment{type=skill_listing}, prompt.submit, session.end, session.compact, skill.prompt{skill=jeff-skill-suggestion:setup}
 gating hook with .catch: prompt.submit
 gating hook with .catch: session.compact
-calls: $.clock.now, $.clock.sleep, $.command.list, $.env.get, $.fs.exists, $.fs.list, $.fs.read, $.http.fetch, $.session.cwd, $.ui.log, $.ui.status
+calls: $.clock.now, $.clock.sleep, $.command.list, $.env.get, $.fs.exists, $.fs.list, $.fs.read, $.http.fetch, $.session.cwd, $.ui.log
 env writes: nothing
 env reads: HOME, JEFF_ADMIN_URL, JEFF_API_KEY, JEFF_URL
 ```
