@@ -291,6 +291,18 @@ npx skills add Viperwow/jeff
 /plugin install jeff-skill-suggestion --marketplace Viperwow/jeff
 ```
 
+With the mod, Claude chose the right skill in 90% of runs instead of 50%, at 40% lower cost. On prompts that needed a skill, it chose right in 86% of runs instead of 29%.
+
+Measured on 10 prompts, each run 3 times with the mod and 3 times without it, with `skill-gate` on `typesafe/openjev-latest`:
+
+| Metric | Without the mod | With the mod |
+|---|---|---|
+| Right skill chosen | 15 of 30 | 27 of 30 |
+| Cost | $5.13 | $3.07, −40% |
+| Context of a one-turn prompt | 39.6k tokens | 31.3k tokens, −21% |
+
+The mod waits for jeff before each prompt, about 1–3 s. [BENCHMARK.md](mods/jeff-skill-suggestion/BENCHMARK.md) has the setup, every prompt and the limits of the measurement.
+
 ## Command reference
 
 ```text
