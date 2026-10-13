@@ -4,3 +4,4 @@ node_modules/
 .strict-ai/
 /notes.md
 .superpowers/
+mods/*/.claude-plugin/types/

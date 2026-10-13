@@ -1,0 +1,4 @@
+{
+  "description": "Withholds the engine's skill listing at prompt.attachment and, at prompt.submit, asks jeff's skill-gate classifier and a ranking of every skill, then re-reads the top three, attaching the one winner as a <skill_relevance> block.",
+  "modules": ["./register.ts"]
+}

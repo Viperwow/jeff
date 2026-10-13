@@ -1,0 +1,100 @@
+{
+  "name": "jeff-skill-suggestion",
+  "version": "0.1.0",
+  "description": "Keeps the skill listing out of the context window and lets jeff pick at most one skill per prompt from the skills' descriptions: one request ranks every skill and asks jeff's skill-gate classifier whether the prompt needs a skill at all, a second re-reads the top three with their SKILL.md and can reject them all. The winner's SKILL.md is attached to the prompt, so the skills can be hidden from the model altogether (/jeff-skill-suggestion:setup makes them user-invocable-only and /context counts them at 0).",
+  "author": {
+    "name": "Viperwow",
+    "url": "https://github.com/Viperwow"
+  },
+  "repository": "https://github.com/Viperwow/jeff",
+  "license": "MIT",
+  "keywords": ["mod", "skills", "context", "jeff"],
+  "userConfig": {
+    "url": {
+      "type": "string",
+      "title": "jeff API URL",
+      "description": "Where jeff answers questions; empty uses JEFF_URL, then http://127.0.0.1:8080",
+      "default": ""
+    },
+    "adminUrl": {
+      "type": "string",
+      "title": "jeff admin URL",
+      "description": "Where the mod saves the skill-gate classifier when jeff has none; empty uses JEFF_ADMIN_URL, then http://127.0.0.1:8081",
+      "default": ""
+    },
+    "apiKey": {
+      "type": "string",
+      "title": "jeff key",
+      "description": "Key jeff asks for once it has access keys; empty uses JEFF_API_KEY. Saving skill-gate needs an admin key",
+      "default": "",
+      "sensitive": true
+    },
+    "inject": {
+      "type": "string",
+      "title": "How the chosen skill reaches the model",
+      "description": "\"content\" attaches the skill's SKILL.md to the prompt, so it loads even when the engine lists it as user-invocable-only or off; \"suggest\" only names it and the model loads it with the Skill tool",
+      "default": "content",
+      "options": ["content", "suggest"]
+    },
+    "hideListing": {
+      "type": "boolean",
+      "title": "Hide the skill listing",
+      "description": "Leave the engine's skill listing out of the main conversation's context; off keeps the listing and only adds the suggestion",
+      "default": true
+    },
+    "rerank": {
+      "type": "boolean",
+      "title": "Re-read the shortlist",
+      "description": "Send a second request that re-reads the top skills with their full description and SKILL.md opening, and can reject them all; off suggests the top of the ranking alone",
+      "default": true
+    },
+    "shortlist": {
+      "type": "number",
+      "title": "Shortlist size",
+      "description": "How many of the ranking the second request re-reads",
+      "default": 3
+    },
+    "gateThreshold": {
+      "type": "number",
+      "title": "Needs-a-skill threshold",
+      "description": "Mean of the skill-gate nouls under which nothing is suggested",
+      "default": 0.3
+    },
+    "fitsThreshold": {
+      "type": "number",
+      "title": "Fits threshold",
+      "description": "A shortlist whose best per-skill \"does this fit\" noul is under this is dropped entirely",
+      "default": 0.3
+    },
+    "excerptChars": {
+      "type": "number",
+      "title": "SKILL.md excerpt",
+      "description": "How many characters of each shortlisted skill's body the second request reads",
+      "default": 700
+    },
+    "alwaysListed": {
+      "type": "string",
+      "title": "Always listed",
+      "description": "Comma-separated skill names that stay in the listing whatever the prompt (the model can still see and call them)",
+      "default": ""
+    },
+    "neverSuggested": {
+      "type": "string",
+      "title": "Never suggested",
+      "description": "Comma-separated skill names jeff is never offered; they stay reachable by typing /name",
+      "default": ""
+    },
+    "timeoutMs": {
+      "type": "number",
+      "title": "Latency budget (ms)",
+      "description": "How long to wait for each answer from jeff before letting the prompt through without a suggestion",
+      "default": 800
+    },
+    "logDecisions": {
+      "type": "boolean",
+      "title": "Log decisions",
+      "description": "Write each selection to the session log",
+      "default": true
+    }
+  }
+}

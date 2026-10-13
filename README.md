@@ -24,6 +24,7 @@ jeff runs as one small binary. It serves:
 - [Access keys](#access-keys)
 - [Run on a server](#run-on-a-server)
 - [Agent skill](#agent-skill)
+- [Claude Code mod](#claude-code-mod)
 - [Command reference](#command-reference)
 - [Build from source](#build-from-source)
 
@@ -280,6 +281,14 @@ Before you open a port to a network:
 
 ```sh
 npx skills add Viperwow/jeff
+```
+
+## Claude Code mod
+
+[mods/jeff-skill-suggestion](mods/jeff-skill-suggestion) hides the skill listing from Claude Code and lets jeff pick at most one skill per prompt. It saves the `skill-gate` classifier in jeff on first use, so the questions that decide whether a prompt needs a skill can be edited on the admin page. Install it in Claude Code 2.1.287 or later, with jeff running:
+
+```text
+/plugin install jeff-skill-suggestion --marketplace Viperwow/jeff
 ```
 
 ## Command reference
