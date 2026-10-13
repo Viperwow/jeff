@@ -11,6 +11,33 @@ The same prompts went through Claude Code with the mod and without it, and each 
 - Each run is one `claude -p PROMPT --output-format stream-json --verbose`, with `--plugin-dir mods/jeff-skill-suggestion` for the mod's runs, in an empty directory.
 - A run chose right when the expected skill was loaded: by the Skill tool without the mod, by the mod's injection or the Skill tool with it. A prompt that needs no skill chose right when nothing was loaded.
 
+## How each number is computed
+
+Each run's `result` event and its stream give the raw values; [benchmark/summarize.py](benchmark/summarize.py) turns them into the tables below.
+
+| Number | Source | Computation |
+|---|---|---|
+| Right skill chosen | the run's `Skill` tool calls, and the skill named in the mod's log line | right when one of the expected skills loaded; for a prompt that expects none, right when nothing loaded; counted over 30 runs |
+| Right where a skill is needed | the same | the same count, over the 21 runs of the 7 prompts that expect a skill |
+| Cost | `total_cost_usd` | the sum over 30 runs |
+| Context of a one-turn run | `usage.input_tokens` + `usage.cache_creation_input_tokens` + `usage.cache_read_input_tokens` | the mean over runs with `num_turns` 1 |
+| Tokens written to the cache | `usage.cache_creation_input_tokens` | the mean over 30 runs |
+| Model turns | `num_turns` | the sum over 30 runs |
+| Time | `duration_ms` | the sum over 30 runs |
+| Need score | the mod's log line | as logged, per run |
+| Change | the two values | (with the mod − without) ÷ without |
+
+`total_cost_usd` is Claude Code's own estimate from the run's tokens. It leaves out what jeff's model charges for the mod's requests to `typesafe/openjev-latest`.
+
+To repeat the measurement, with jeff running and `skill-gate` on the model to test:
+
+```sh
+python benchmark/run.py
+python benchmark/summarize.py
+```
+
+[benchmark/results.jsonl](benchmark/results.jsonl) holds the 60 runs these tables come from.
+
 ## Results
 
 With the mod, Claude chose the right skill in 90% of runs instead of 50%, at 40% lower cost. On the 7 prompts that needed a skill, it chose right in 18 of 21 runs (86%) instead of 6 of 21 (29%).
