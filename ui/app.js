@@ -154,6 +154,7 @@ const PAGES = ["questions", "classifiers", "providers", "keys"];
 function showTab() {
   const id = PAGES.find((p) => location.hash === "#" + p) || "questions";
   for (const t of PAGES) $("#page-" + t).hidden = t !== id;
+  for (const n of $$(".unsaved-providers")) n.hidden = !store.get("draft:providers");
   if (id === "keys" && config) loadKeys().catch((e) => say($("#key-status"), e.message, "err"));
   for (const a of $$(".tab")) {
     if (a.getAttribute("href") === "#" + id) a.setAttribute("aria-current", "page");
