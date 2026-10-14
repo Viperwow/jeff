@@ -176,7 +176,7 @@ Name a model as `provider/model`, for example `typesafe/jev-latest`.
 
 A bare `jev-latest` goes to the first provider that lists it. A request without `model` gets the **Default model** set on the Providers page.
 
-To add a provider, open **Providers**, pick a preset or **Custom server** under **Add provider**, fill in the URL and the key, and click **Save**.
+To add a provider, open **Providers**, choose **Local** or **Cloud** under **Add provider**, then a provider or **Custom server**. Fill in the URL and the key, and click **Save**. Each card is tagged Local or Cloud by its URL.
 
 Provider rules:
 
@@ -211,7 +211,7 @@ Stop CLM with **Uninstall** or `jeff remove clm`. The downloaded weights stay on
 
 Install H2O-Lightning in one of two ways:
 
-- Click **Install** on the H2O-Lightning card. A config saved before jeff knew this model has no such card: add it under **Add provider** with the **H2O-Lightning (local)** preset first.
+- Click **Install** on the H2O-Lightning card. A config saved before jeff knew this model has no such card: add it under **Add provider** with **Local**, then **H2O-Lightning**, first.
 - Run `jeff install h2o-lightning`.
 
 | Step | Download |

@@ -10,10 +10,22 @@ const PRESETS = {
     installNote: "Runs H2O-Lightning-4B in Docker: vLLM on the GPU plus the model's shim. Needs Docker Desktop and an NVIDIA GPU with 16 GB; downloads about 18 GB once." },
   laya: { id: "laya", name: "Laya", url: "http://127.0.0.1:8000", models: ["english", "multilingual", "typed-decisions"], hint: "Local laya-serve. Start it with: LAYA_HOST=127.0.0.1 laya-serve" },
   typesafe: { id: "typesafe", name: "TypeSafe Jev", url: "https://api.typesafe.ai", models: ["jev-latest"], hint: "TypeSafe cloud API. Key from console.typesafe.ai/keys." },
+  openjev: { id: "openjev", name: "OpenJev", url: "https://api.codiv.ai", models: ["openjev-latest"], hint: "OpenJev hosted by Codiv. Key from codiv.ai/dashboard." },
   pipellm: { id: "pipellm", name: "PipeLLM Jev", url: "https://api.pipellm.ai", models: ["jev-1.13.0"], hint: "Jev hosted by PipeLLM." },
   custom: { id: "custom", name: "Custom", url: "http://127.0.0.1:9000", models: [], hint: "Any server that speaks POST /v1/systemone." },
+  "custom-cloud": { id: "custom", name: "Custom", url: "https://", models: [], hint: "Any server that speaks POST /v1/systemone." },
 };
-const PRESET_LABELS = { clm: "CLM (local)", "h2o-lightning": "H2O-Lightning (local)", laya: "Laya (local)", typesafe: "TypeSafe Jev (cloud)", pipellm: "PipeLLM Jev (cloud)", custom: "Custom server" };
+/** What Add provider offers for each kind. CLM and Laya stay in PRESETS for configs that already have them. */
+const CATALOG = { local: ["h2o-lightning", "custom"], cloud: ["typesafe", "openjev", "pipellm", "custom-cloud"] };
+
+function providerKind(url, installer) {
+  if (installer) return "local";
+  try {
+    return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(url).hostname) ? "local" : "cloud";
+  } catch {
+    return "";
+  }
+}
 
 function say(el, text, tone = "") {
   el.textContent = text;
@@ -270,12 +282,20 @@ function providerCard(p) {
   $(".p-id-echo", card).textContent = p.id;
   $(".p-id", card).oninput = (e) => ($(".p-id-echo", card).textContent = e.target.value);
   $(".p-url", card).value = p.url;
+  const showKind = () => {
+    const kind = providerKind($(".p-url", card).value, card.dataset.installer);
+    $(".p-kind", card).dataset.kind = kind;
+    $(".p-kind", card).textContent = kind;
+  };
+  $(".p-url", card).addEventListener("input", showKind);
   $(".p-key", card).placeholder = p.key_set ? "Saved" : "Not set";
   $(".p-key-hint", card).textContent = p.key_set ? "Leave empty to keep the saved key. Type a space to clear it." : "";
   $(".p-models", card).value = (p.models || []).join(", ");
   card.dataset.installer = p.installer || "";
+  showKind();
   confirmClick($(".p-delete", card), "Confirm remove", () => {
     card.remove();
+    showAddStep();
     fillDefaultModel();
     say($("#save-status"), "Save to apply.");
   });
@@ -318,22 +338,43 @@ function renderProviders() {
 function renderProviderCards(providers) {
   $("#provider-list").replaceChildren(...providers.map(providerCard));
   for (const card of $$("#provider-list [data-provider]")) if (PRESETS[card.dataset.installer]?.installer) installTask(card).catch(() => {});
-  const used = new Set(config.providers.map((p) => p.id));
-  $("#preset").replaceChildren(...Object.entries(PRESET_LABELS).map(([k, label]) => {
-    const o = new Option(label, k);
-    o.disabled = k !== "custom" && used.has(k);
-    return o;
-  }));
-  $("#preset").value = Object.keys(PRESET_LABELS).find((k) => k === "custom" || !used.has(k));
+  showAddStep();
   fillDefaultModel();
 }
+
+function showAddStep(kind) {
+  $("#add-kinds").hidden = !!kind;
+  $("#add-presets").hidden = !kind;
+  $("#add-back").hidden = !kind;
+  if (!kind) return;
+  const used = new Set($$("#provider-list .p-id").map((i) => i.value));
+  $("#add-presets").replaceChildren(...CATALOG[kind].map((key) => {
+    const preset = PRESETS[key];
+    const tile = document.createElement("button");
+    tile.type = "button";
+    tile.className = "tile";
+    tile.dataset.preset = key;
+    tile.disabled = preset.id !== "custom" && used.has(preset.id);
+    tile.append(Object.assign(document.createElement("span"), { className: "block font-semibold", textContent: preset.id === "custom" ? "Custom server" : preset.name }),
+      Object.assign(document.createElement("span"), { className: "note block", textContent: tile.disabled ? "Already added." : preset.hint }));
+    return tile;
+  }));
+}
+
+$("#add-kinds").onclick = (e) => {
+  const tile = e.target.closest("[data-kind]");
+  if (tile) showAddStep(tile.dataset.kind);
+};
+$("#add-back").onclick = () => showAddStep();
 
 $("#page-providers").addEventListener("input", (e) => { if (!e.target.matches(".p-key")) trackProviders(); });
 $("#page-providers").addEventListener("change", (e) => { if (!e.target.matches(".p-key")) trackProviders(); });
 $("#page-providers").addEventListener("click", afterClick(trackProviders));
 
-$("#add-provider").onclick = () => {
-  const preset = PRESETS[$("#preset").value];
+$("#add-presets").onclick = (e) => {
+  const tile = e.target.closest("[data-preset]");
+  if (!tile) return;
+  const preset = PRESETS[tile.dataset.preset];
   const ids = new Set($$("[data-provider]").map((c) => $(".p-id", c).value));
   let id = preset.id;
   for (let n = 2; ids.has(id); n++) id = `${preset.id}-${n}`;
@@ -342,6 +383,7 @@ $("#add-provider").onclick = () => {
   fillDefaultModel();
   $(".p-url", card).focus();
   say($("#save-status"), "Save to apply.");
+  showAddStep();
 };
 
 let info = null;

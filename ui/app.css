@@ -65,6 +65,12 @@
   .badge {
     @apply shrink-0 rounded px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase data-[type=noul]:bg-violet-100 data-[type=noul]:text-violet-800 data-[type=choice]:bg-sky-100 data-[type=choice]:text-sky-800 data-[type=score]:bg-amber-100 data-[type=score]:text-amber-900 dark:data-[type=noul]:bg-violet-950 dark:data-[type=noul]:text-violet-200 dark:data-[type=choice]:bg-sky-950 dark:data-[type=choice]:text-sky-200 dark:data-[type=score]:bg-amber-950 dark:data-[type=score]:text-amber-200;
   }
+  .badge {
+    @apply data-[kind=local]:bg-emerald-100 data-[kind=local]:text-emerald-800 data-[kind=cloud]:bg-sky-100 data-[kind=cloud]:text-sky-800 dark:data-[kind=local]:bg-emerald-950 dark:data-[kind=local]:text-emerald-200 dark:data-[kind=cloud]:bg-sky-950 dark:data-[kind=cloud]:text-sky-200;
+  }
+  .tile {
+    @apply cursor-pointer space-y-1 rounded-lg border border-neutral-200 p-3 text-left hover:border-sky-400 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-neutral-200 dark:border-neutral-800 dark:hover:border-sky-600 dark:disabled:hover:border-neutral-800;
+  }
   .bar {
     @apply border-neutral-200 bg-neutral-50 data-[chosen=true]:border-sky-300 dark:border-neutral-800 dark:bg-neutral-900 dark:data-[chosen=true]:border-sky-800;
   }

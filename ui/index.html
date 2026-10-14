@@ -236,10 +236,16 @@
       <p id="p-draft" class="note flex items-center gap-3" hidden>Draft restored <button type="button" class="btn" data-discard="p">Discard</button></p>
       <div id="provider-list" class="space-y-4"></div>
 
-      <section class="card flex flex-wrap items-center gap-3">
-        <h2 class="text-base font-semibold">Add provider</h2>
-        <select id="preset" class="control w-auto flex-1" aria-label="Provider preset"></select>
-        <button id="add-provider" type="button" class="btn">Add</button>
+      <section class="card space-y-3">
+        <div class="flex items-center gap-3">
+          <h2 class="flex-1 text-base font-semibold">Add provider</h2>
+          <button id="add-back" type="button" class="btn" hidden>Back</button>
+        </div>
+        <div id="add-kinds" class="grid gap-3 sm:grid-cols-2">
+          <button type="button" class="tile" data-kind="local"><span class="block font-semibold">Local</span><span class="note block">Runs on your machine, such as a model jeff installs in Docker.</span></button>
+          <button type="button" class="tile" data-kind="cloud"><span class="block font-semibold">Cloud</span><span class="note block">A hosted API. Needs an API key.</span></button>
+        </div>
+        <div id="add-presets" class="grid gap-3 sm:grid-cols-2" hidden></div>
       </section>
 
       <div class="flex items-center gap-3 pt-2">
@@ -316,7 +322,7 @@
   <section class="card space-y-4">
     <div class="flex flex-wrap items-start gap-3">
       <div class="min-w-0 flex-1">
-        <h2 class="flex flex-wrap items-center gap-x-3 text-base font-semibold"><span class="p-title"></span><span class="status note inline-flex items-center gap-1.5 font-normal before:size-2 before:rounded-full before:bg-current empty:hidden"></span></h2>
+        <h2 class="flex flex-wrap items-center gap-x-3 text-base font-semibold"><span class="p-title"></span><span class="p-kind badge"></span><span class="status note inline-flex items-center gap-1.5 font-normal before:size-2 before:rounded-full before:bg-current empty:hidden"></span></h2>
         <p class="p-hint note"></p>
       </div>
       <button type="button" class="p-delete btn btn-danger min-w-0">Remove provider</button>
