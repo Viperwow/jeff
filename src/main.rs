@@ -1410,7 +1410,20 @@ async fn install_status(app: Arc<App>, stack: install::Stack) -> Json<Value> {
         .providers
         .iter()
         .find(|p| p.installer.as_deref() == Some(stack.id()))
-        .cloned();
+        .cloned()
+        // A provider added on the page but not saved yet still gets its install tracked to the end.
+        .or_else(|| {
+            Some(Provider {
+                id: stack.id().to_owned(),
+                name: stack.name().to_owned(),
+                url: format!("http://127.0.0.1:{}", stack.port()),
+                key: None,
+                models: Vec::new(),
+                installer: Some(stack.id().to_owned()),
+                connect_timeout: None,
+                max_time: None,
+            })
+        });
     let mut loaded = false;
     if let Some(p) = &provider {
         loaded = model_loaded(&app, p, stack).await;
