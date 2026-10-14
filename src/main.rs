@@ -7,7 +7,7 @@ mod questions;
 use axum::{
     Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State},
-    http::{HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::delete,
@@ -74,7 +74,30 @@ struct Config {
     questions: questions::Questions,
     #[serde(default)]
     classifiers: classifiers::Classifiers,
+    #[serde(default)]
+    cache: CacheConfig,
 }
+
+/// How many successful provider answers jeff keeps, and for how long, so a repeated request skips the provider.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+struct CacheConfig {
+    /// 0 turns the cache off.
+    entries: usize,
+    ttl_secs: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        CacheConfig {
+            entries: 1000,
+            ttl_secs: 3600,
+        }
+    }
+}
+
+/// Answers by a hash of the provider and the exact body sent to it.
+type AnswerCache = HashMap<[u8; 32], (Instant, StatusCode, Vec<u8>)>;
 
 impl Default for Config {
     fn default() -> Self {
@@ -120,6 +143,7 @@ impl Default for Config {
             keys: Vec::new(),
             questions: questions::Questions::new(),
             classifiers: classifiers::Classifiers::new(),
+            cache: CacheConfig::default(),
         }
     }
 }
@@ -212,6 +236,7 @@ struct App {
     exposed: bool,
     /// Providers may sit in private networks such as 10.0.0.0/8.
     allow_private: bool,
+    answers: Mutex<AnswerCache>,
 }
 
 /// Failed key checks one address may make per window before it gets 429 until the window ends.
@@ -529,6 +554,8 @@ struct Upstream {
     ms: u64,
     status: StatusCode,
     bytes: Vec<u8>,
+    /// Came from jeff's answer cache, not the provider.
+    cached: bool,
 }
 
 impl Upstream {
@@ -544,6 +571,8 @@ impl Upstream {
             headers.insert("x-jeff-provider", v);
         }
         headers.insert("x-jeff-upstream-ms", HeaderValue::from(self.ms));
+        let cache = if self.cached { "hit" } else { "miss" };
+        headers.insert("x-jeff-cache", HeaderValue::from_static(cache));
         res
     }
 }
@@ -573,20 +602,51 @@ async fn find_model(
     })
 }
 
-/// Sends `body` to provider `p` as `upstream_model`; the error is the status and message for the client.
+/// Sends `body` to provider `p` as `upstream_model`; the error is the status and message for the client. `fresh`
+/// skips the cached answer but still caches the new one.
 async fn forward(
     app: &App,
     p: Provider,
     upstream_model: String,
     mut body: Value,
     total: &AtomicUsize,
+    cache: CacheConfig,
+    fresh: bool,
 ) -> Result<Upstream, (StatusCode, String)> {
     body["model"] = Value::String(upstream_model);
+    let sent = serde_json::to_vec(&body).unwrap();
+    let ttl = Duration::from_secs(cache.ttl_secs);
+    let key: [u8; 32] = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for part in [p.id.as_bytes(), p.url.as_bytes(), &sent] {
+            h.update((part.len() as u64).to_le_bytes());
+            h.update(part);
+        }
+        h.finalize().into()
+    };
+    let hit = app
+        .answers
+        .lock()
+        .unwrap()
+        .get(&key)
+        .filter(|(at, _, _)| cache.entries > 0 && !fresh && at.elapsed() < ttl)
+        .map(|(_, status, bytes)| (*status, bytes.clone()));
+    if let Some((status, bytes)) = hit {
+        return Ok(Upstream {
+            provider: p.id,
+            ms: 0,
+            status,
+            bytes: cached_usage(bytes),
+            cached: true,
+        });
+    }
 
     let t0 = Instant::now();
     let max = p.max_secs();
     let upstream = request(app, &p, reqwest::Method::POST, "/v1/systemone")
-        .json(&body)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(sent)
         .timeout(Duration::from_secs(max));
     let late = || {
         (
@@ -620,12 +680,46 @@ async fn forward(
             unreadable(&p.id)
         }
     })?;
+    if cache.entries > 0 && status.is_success() {
+        let mut answers = app.answers.lock().unwrap();
+        if answers.len() >= cache.entries {
+            answers.retain(|_, (at, _, _)| at.elapsed() < ttl);
+        }
+        // ponytail: finds the oldest with a linear scan; an ordered index if entries grow past ~100k
+        if answers.len() >= cache.entries {
+            let oldest = answers
+                .iter()
+                .min_by_key(|(_, (at, _, _))| *at)
+                .map(|(k, _)| *k);
+            answers.remove(&oldest.unwrap());
+        }
+        answers.insert(key, (Instant::now(), status, bytes.clone()));
+    }
     Ok(Upstream {
         provider: p.id,
         ms: t0.elapsed().as_millis() as u64,
         status,
         bytes,
+        cached: false,
     })
+}
+
+/// A cached answer cost the provider nothing: its `usage` token counts become 0 and `usage.cached` true, so summing
+/// `usage` gives what was really spent.
+fn cached_usage(bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(mut v) = serde_json::from_slice::<Value>(&bytes) else {
+        return bytes;
+    };
+    let Some(usage) = v.get_mut("usage").and_then(Value::as_object_mut) else {
+        return bytes;
+    };
+    for (k, n) in usage.iter_mut() {
+        if k.ends_with("_tokens") && n.is_number() {
+            *n = json!(0);
+        }
+    }
+    usage.insert("cached".into(), json!(true));
+    serde_json::to_vec(&v).unwrap()
 }
 
 type Batch = (Provider, String, Option<questions::Questions>);
@@ -653,15 +747,39 @@ fn unreadable(provider: &str) -> (StatusCode, String) {
     )
 }
 
-async fn systemone(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+/// `Cache-Control: no-cache` asks for an answer from the provider, not from jeff's cache.
+fn no_cache(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|d| {
+            matches!(
+                d.trim().to_ascii_lowercase().as_str(),
+                "no-cache" | "no-store"
+            )
+        })
+}
+
+async fn systemone(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     let config = app.config.read().await.clone();
-    answer(&app, &config, body)
+    answer(&app, &config, body, no_cache(&headers))
         .await
         .map_or_else(|res| *res, Upstream::reply)
 }
 
 /// Asks the providers for `body` and joins their answers; `Err` is the response for the client.
-async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream, Box<Response>> {
+async fn answer(
+    app: &App,
+    config: &Config,
+    mut body: Value,
+    fresh: bool,
+) -> Result<Upstream, Box<Response>> {
     let Some(obj) = body.as_object_mut() else {
         return Err(error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -701,7 +819,7 @@ async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream,
         }
         let total = &total;
         async move {
-            match forward(app, p, upstream_model, body, total).await {
+            match forward(app, p, upstream_model, body, total, config.cache, fresh).await {
                 Ok(u) if u.status.is_success() => Ok(u),
                 Ok(u) => Err(u.reply()),
                 Err((status, msg)) => Err(error(status, msg)),
@@ -729,6 +847,7 @@ async fn answer(app: &App, config: &Config, mut body: Value) -> Result<Upstream,
         ms: parts.iter().map(|u| u.ms).max().unwrap_or(0),
         status: StatusCode::OK,
         bytes: serde_json::to_vec(&questions::merge(answers)).unwrap(),
+        cached: parts.iter().all(|u| u.cached),
     })
 }
 
@@ -1151,20 +1270,25 @@ async fn get_classifier(State(app): State<Arc<App>>, Path(key): Path<String>) ->
 async fn call_classifier(
     State(app): State<Arc<App>>,
     Path(key): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let config = app.config.read().await.clone();
     let Some(c) = config.classifiers.get(&key) else {
         return unknown_classifier(&key);
     };
-    run_classifier(&app, &config, &key, c, body).await
+    run_classifier(&app, &config, &key, c, body, no_cache(&headers)).await
 }
 
 /// Runs an unsaved classifier sent in the body, as the form's Try does; it skips questions exactly as a saved one.
-async fn try_classifier(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+async fn try_classifier(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     let config = app.config.read().await.clone();
     match take_draft(body) {
-        Ok((c, body)) => run_classifier(&app, &config, "draft", &c, body).await,
+        Ok((c, body)) => run_classifier(&app, &config, "draft", &c, body, no_cache(&headers)).await,
         Err(e) => error(StatusCode::UNPROCESSABLE_ENTITY, e),
     }
 }
@@ -1178,7 +1302,14 @@ fn take_draft(mut body: Value) -> Result<(Value, Value), String> {
     }
 }
 
-async fn run_classifier(app: &App, config: &Config, key: &str, c: &Value, body: Value) -> Response {
+async fn run_classifier(
+    app: &App,
+    config: &Config,
+    key: &str,
+    c: &Value,
+    body: Value,
+    fresh: bool,
+) -> Response {
     let (input, skipped) = match classifiers::resolve(key, c, &config.questions) {
         Ok(r) => r,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -1187,7 +1318,7 @@ async fn run_classifier(app: &App, config: &Config, key: &str, c: &Value, body: 
         Ok(b) => b,
         Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e),
     };
-    match answer(app, config, body).await {
+    match answer(app, config, body, fresh).await {
         Ok(u) if u.status.is_success() => Upstream {
             bytes: classifiers::with_skipped(u.bytes, &skipped),
             ..u
@@ -1339,6 +1470,7 @@ fn build_config(
         keys: current.keys.clone(),
         questions: current.questions.clone(),
         classifiers: current.classifiers.clone(),
+        cache: current.cache,
     })
 }
 
@@ -1557,6 +1689,9 @@ struct AskArgs {
     /// Seconds to wait for the whole answer
     #[arg(long, default_value_t = 60)]
     max_time: u64,
+    /// Ask the providers again instead of reusing jeff's cached answer
+    #[arg(long)]
+    no_cache: bool,
     /// Write the answer JSON to this file instead of printing it
     #[arg(short, long)]
     output: Option<String>,
@@ -1956,6 +2091,9 @@ async fn run_ask(args: AskArgs) {
         .build()
         .expect("HTTP client");
     let mut req = client.post(&url).json(&body);
+    if args.no_cache {
+        req = req.header(reqwest::header::CACHE_CONTROL, "no-cache");
+    }
     if let Some(key) = client_key(env::var("JEFF_API_KEY").ok()) {
         req = req.bearer_auth(key);
     }
@@ -2373,6 +2511,7 @@ async fn serve(args: ServeArgs) {
         failures: Mutex::new(HashMap::new()),
         exposed,
         allow_private,
+        answers: Mutex::new(HashMap::new()),
     });
     if exposed && app.static_keys.is_empty() && app.config.read().await.keys.is_empty() {
         let addr = if loopback(&args.api) {
@@ -2624,6 +2763,7 @@ mod tests {
             failures: Mutex::new(HashMap::new()),
             exposed: false,
             allow_private: false,
+            answers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3114,6 +3254,18 @@ mod tests {
             .providers[0];
         assert_eq!(set.max_time, Some(30));
         assert!(build_config(&current, input(Some(0)), false).is_err());
+    }
+
+    #[test]
+    fn cached_usage_zeroes_tokens() {
+        let sent = json!({"answers": {"q": 1}, "usage": {"input_tokens": 73, "output_tokens": 2, "latency_ms": 136.8}});
+        let got: Value =
+            serde_json::from_slice(&cached_usage(serde_json::to_vec(&sent).unwrap())).unwrap();
+        assert_eq!(
+            got,
+            json!({"answers": {"q": 1}, "usage": {"input_tokens": 0, "output_tokens": 0, "latency_ms": 136.8, "cached": true}})
+        );
+        assert_eq!(cached_usage(b"not json".to_vec()), b"not json");
     }
 
     #[test]

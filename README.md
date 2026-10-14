@@ -116,6 +116,7 @@ jeff adds two response headers:
 
 - `x-jeff-provider`: the provider that answered.
 - `x-jeff-upstream-ms`: how long the provider took, in milliseconds.
+- `x-jeff-cache`: `hit` when the answer came from jeff's answer cache, `miss` when a provider answered. A cached answer also has `usage.cached: true` and every `usage` token count set to 0, since the provider spent nothing on it.
 
 Other endpoints:
 
@@ -166,7 +167,7 @@ cat call.json | jeff ask --request - -o answer.json
 
 Windows PowerShell 5.1 strips the inner quotes from JSON passed to a program, so put the JSON in a file there and pass it with `--questions-file`.
 
-`jeff ask` calls `http://127.0.0.1:8080` unless `--url` or `JEFF_URL` says otherwise, and sends `JEFF_API_KEY` as its key. It waits 5 seconds to connect (`--connect-timeout`) and 60 seconds for the answer (`--max-time`). A custom question is saved only by `jeff questions add`, the admin page or `POST /api/questions`.
+`jeff ask` calls `http://127.0.0.1:8080` unless `--url` or `JEFF_URL` says otherwise, and sends `JEFF_API_KEY` as its key. It waits 5 seconds to connect (`--connect-timeout`) and 60 seconds for the answer (`--max-time`). `--no-cache` asks the providers again instead of reusing a cached answer. A custom question is saved only by `jeff questions add`, the admin page or `POST /api/questions`.
 
 A question may name its own `model`. It goes to that model, and the others go to the request's `model` or the default model. jeff sends one call per model, at most 8 per request, and merges the answers into one response. `x-jeff-provider` then lists every provider that answered.
 
@@ -182,6 +183,7 @@ Provider rules:
 
 - **Models.** jeff asks each provider for its models. If a provider has no `GET /v1/models`, list its models by hand on its card.
 - **Keys over the network.** A provider key goes to a remote host only over `https://`. Plain `http://` with a key is accepted only for `localhost`.
+- **Answer cache.** jeff keeps successful answers and returns one again, without calling the provider, when the same provider gets the same request body, exact to the character. It keeps 1,000 answers for an hour by default. Set `"cache": {"entries": 1000, "ttl_secs": 3600}` in `jeff.json` to change that, and `"entries": 0` turns the cache off. Send `Cache-Control: no-cache` to get a fresh answer; jeff caches that one too.
 - **Timeouts.** jeff waits 10 seconds to connect to a provider and 60 seconds for its answer. Set `connect_timeout` and `max_time` in seconds on the provider in `jeff.json` to change them. A provider that does not answer in time gets `504`, one jeff cannot reach gets `502`.
 - **Description.** A provider card shows a short line under its name. Set it in the Description field, or as `description` in `jeff.json`. A preset provider shows the preset's own line, which the page does not let you change.
 
@@ -338,8 +340,8 @@ jeff keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|nev
 jeff keys revoke ID
 jeff ask [KEY...] (--state TEXT | --state-file FILE|-) [--questions JSON | --questions-file FILE|-]
          [--model MODEL] [--url URL]
-         [--connect-timeout SECONDS] [--max-time SECONDS] [-o FILE]
-jeff ask --request FILE|- [--model MODEL] [-o FILE]
+         [--connect-timeout SECONDS] [--max-time SECONDS] [--no-cache] [-o FILE]
+jeff ask --request FILE|- [--model MODEL] [--no-cache] [-o FILE]
                          ask through a running jeff and print the answer JSON
 jeff questions list [-o FILE]
                          list saved questions: a table in a terminal, tab-separated lines in a pipe
