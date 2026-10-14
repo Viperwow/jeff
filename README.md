@@ -5,6 +5,7 @@ A classifier built on Jev-compatible models, local or in the cloud.
 Your agent or service describes what it needs to know as typed questions: yes/no (`noul`), pick one (`choice`) or rate on a scale (`score`). jeff asks a Jev-compatible model and returns a probability for every answer, so the caller gets a label it can act on, never free text to parse. One API covers every model, and the providers it knows out of the box are:
 
 - **CLM**: Contrastive-LM, runs on your GPU, installed by jeff.
+- **H2O-Lightning**: H2O-Lightning-4B, runs on your GPU, installed by jeff.
 - **TypeSafe Jev**: cloud.
 - **Laya, PipeLLM** or any other server with `POST /v1/systemone`.
 
@@ -21,6 +22,7 @@ jeff runs as one small binary. It serves:
 - [Saved questions](#saved-questions)
 - [Providers and models](#providers-and-models)
 - [Local CLM](#local-clm)
+- [Local H2O-Lightning](#local-h2o-lightning)
 - [Access keys](#access-keys)
 - [Run on a server](#run-on-a-server)
 - [Agent skill](#agent-skill)
@@ -203,6 +205,22 @@ Downloads happen once. Later starts take about a minute.
 
 Stop CLM with **Uninstall** or `jeff remove clm`. The downloaded weights stay on disk for the next install.
 
+## Local H2O-Lightning
+
+[H2O-Lightning-4B](https://huggingface.co/h2oai/h2o-lightning-4b) runs in Docker on an NVIDIA GPU with at least 16 GB of memory: vLLM 0.30.0 serves the model, and the model's own shim answers `/v1/systemone` on port 8741. On Windows it needs Docker Desktop with WSL2.
+
+Install H2O-Lightning in one of two ways:
+
+- Click **Install** on the H2O-Lightning card. A config saved before jeff knew this model has no such card: add it under **Add provider** with the **H2O-Lightning (local)** preset first.
+- Run `jeff install h2o-lightning`.
+
+| Step | Download |
+|---|---|
+| vLLM image | about 9 GB |
+| H2O-Lightning-4B weights | 9.1 GB |
+
+Its model is `h2o-lightning/h2oai/h2o-lightning-4b`. Stop it with **Uninstall** or `jeff remove h2o-lightning`. The downloaded weights stay on disk for the next install.
+
 ## Access keys
 
 Without keys jeff accepts every request. Keep it that way only on your own machine.
@@ -310,6 +328,10 @@ jeff                     same as `jeff serve`
 jeff serve [flags]       run the API and the admin page
 jeff install clm         install and start local CLM in Docker
 jeff remove clm          stop and remove the CLM containers; the weights stay
+jeff install h2o-lightning
+                         install and start local H2O-Lightning-4B in Docker
+jeff remove h2o-lightning
+                         stop and remove the H2O-Lightning containers; the weights stay
 jeff keys list           list keys without showing them
 jeff keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|never]
 jeff keys revoke ID
