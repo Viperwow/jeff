@@ -59,5 +59,5 @@ Build on Jeff's existing Jev-compatible discovery and request forwarding, using 
 - [ ] **Streaming mode.** Deliver each model's answers as they arrive, through the API and `jeff ask`, instead of waiting for the slowest model.
 - [x] **Answer cache.** jeff caches successful answers by provider and exact request body. `cache.entries` and `cache.ttl_secs` in `jeff.json` set the size and lifetime. `x-jeff-cache` reports a hit. `Cache-Control: no-cache` skips the cache.
 - [ ] **One question per upstream call.** An option, per provider or per request, to send each question of a request or classifier to the provider in its own call and merge the answers. OpenJev answers a question differently beside other questions about the same text: on JevBench public, typesafe/openjev-latest scored 190/231 alone and 184/231 beside two neutral questions, and related questions moved one urgency answer from 0.03 to 1.00. Respect the provider rate limit (60 requests a minute per key on TypeSafe), and report the extra input tokens in `usage`.
-- [ ] **Uninstall confirmation.** The two-click confirmation used by Revoke, for CLM Uninstall.
+- [x] **Uninstall confirmation.** The two-click confirmation used by Revoke, for CLM Uninstall.
 - [ ] **CLM quality.** Measure FP8 against bf16, for example on the "app crashes" ticket that CLM routes to sales.

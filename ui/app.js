@@ -183,27 +183,24 @@ function confirmClick(button, armedLabel, action) {
     button.textContent = label;
   };
   button.onclick = async () => {
-    const until = Date.now() + GUARD_MS;
-    button.disabled = true;
-    try {
-      if (button.dataset.confirm === "true") {
-        disarm();
-        await action();
-      } else {
-        disarmCurrent();
-        disarmCurrent = disarm;
-        button.dataset.confirm = "true";
-        let left = CONFIRM_MS / 1000;
-        button.textContent = `${armedLabel} · ${left}s`;
-        timer = setInterval(() => {
-          left -= 1;
-          if (left > 0) button.textContent = `${armedLabel} · ${left}s`;
-          else disarm();
-        }, 1000);
-      }
-    } finally {
-      setTimeout(() => { button.disabled = false; }, Math.max(0, until - Date.now()));
+    if (button.dataset.confirm === "true") {
+      disarm();
+      // The action owns the button from here, so Uninstall stays locked while its task runs.
+      await action();
+      return;
     }
+    button.disabled = true;
+    setTimeout(() => { button.disabled = false; }, GUARD_MS);
+    disarmCurrent();
+    disarmCurrent = disarm;
+    button.dataset.confirm = "true";
+    let left = CONFIRM_MS / 1000;
+    button.textContent = `${armedLabel} · ${left}s`;
+    timer = setInterval(() => {
+      left -= 1;
+      if (left > 0) button.textContent = `${armedLabel} · ${left}s`;
+      else disarm();
+    }, 1000);
   };
 }
 
@@ -314,7 +311,7 @@ function providerCard(p) {
     $(".p-install", card).hidden = false;
     $(".p-task", card).textContent = PRESETS[p.installer].installNote;
     $(".p-install-btn", card).onclick = () => installTask(card, "install");
-    $(".p-remove-btn", card).onclick = () => installTask(card, "remove");
+    confirmClick($(".p-remove-btn", card), "Confirm uninstall", () => installTask(card, "remove"));
   }
   return card;
 }
@@ -524,7 +521,6 @@ async function installTask(card, action) {
   const out = $(".p-task", card);
   const buttons = [$(".p-install-btn", card), $(".p-remove-btn", card)];
   if (action) {
-    if (action === "remove" && !confirm(`Stop and remove the ${name} containers? Downloaded weights are kept.`)) return;
     // Shown and locked before the request, so the click registers at once and cannot start a second action.
     for (const b of buttons) b.disabled = true;
     card.dataset.action = action;
