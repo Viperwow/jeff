@@ -48,6 +48,9 @@ struct Provider {
     /// Seconds jeff waits for an answer to `/v1/systemone` [default: 60].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_time: Option<u64>,
+    /// A short line the admin page shows under the provider name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 impl Provider {
@@ -89,6 +92,7 @@ impl Default for Config {
                     installer: Some("clm".into()),
                     connect_timeout: None,
                     max_time: None,
+                    description: None,
                 },
                 Provider {
                     id: "typesafe".into(),
@@ -99,6 +103,7 @@ impl Default for Config {
                     installer: None,
                     connect_timeout: None,
                     max_time: None,
+                    description: None,
                 },
                 Provider {
                     id: "h2o-lightning".into(),
@@ -109,6 +114,7 @@ impl Default for Config {
                     installer: Some("h2o-lightning".into()),
                     connect_timeout: None,
                     max_time: None,
+                    description: None,
                 },
             ],
             keys: Vec::new(),
@@ -852,7 +858,7 @@ fn public(config: &Config) -> Value {
         .map(|p| {
             json!({
                 "id": p.id, "name": p.name, "url": p.url, "key_set": p.key.is_some(),
-                "models": p.models, "installer": p.installer,
+                "models": p.models, "installer": p.installer, "description": p.description,
             })
         })
         .collect();
@@ -1245,6 +1251,9 @@ struct ProviderInput {
     /// Absent keeps the stored value for this id; the admin page does not send it.
     #[serde(default)]
     max_time: Option<u64>,
+    /// Absent keeps the stored description for this id, "" clears it.
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -1305,6 +1314,10 @@ fn build_config(
         providers.push(Provider {
             connect_timeout: p.connect_timeout.or(stored.and_then(|q| q.connect_timeout)),
             max_time: p.max_time.or(stored.and_then(|q| q.max_time)),
+            description: match p.description {
+                Some(d) => Some(d.trim().to_owned()).filter(|d| !d.is_empty()),
+                None => stored.and_then(|q| q.description.clone()),
+            },
             id,
             name,
             url,
@@ -1422,6 +1435,7 @@ async fn install_status(app: Arc<App>, stack: install::Stack) -> Json<Value> {
                 installer: Some(stack.id().to_owned()),
                 connect_timeout: None,
                 max_time: None,
+                description: None,
             })
         });
     let mut loaded = false;
@@ -2809,6 +2823,7 @@ mod tests {
                 installer: None,
                 connect_timeout: None,
                 max_time: None,
+                description: None,
             }],
         };
         let key_of = |input| {
@@ -3087,6 +3102,7 @@ mod tests {
                 installer: None,
                 connect_timeout: None,
                 max_time,
+                description: None,
             }],
         };
         let kept = &build_config(&current, input(None), false)
@@ -3098,6 +3114,30 @@ mod tests {
             .providers[0];
         assert_eq!(set.max_time, Some(30));
         assert!(build_config(&current, input(Some(0)), false).is_err());
+    }
+
+    #[test]
+    fn provider_save_keeps_a_description_it_does_not_send() {
+        let input = |description: Option<&str>| ConfigInput {
+            default_model: "clm/clm-latest".into(),
+            providers: vec![ProviderInput {
+                id: "clm".into(),
+                name: "CLM".into(),
+                url: "http://127.0.0.1:8700".into(),
+                key: None,
+                models: vec![],
+                installer: None,
+                connect_timeout: None,
+                max_time: None,
+                description: description.map(String::from),
+            }],
+        };
+        let set = build_config(&Config::default(), input(Some(" GPU box ")), false).unwrap();
+        assert_eq!(set.providers[0].description.as_deref(), Some("GPU box"));
+        let kept = build_config(&set, input(None), false).unwrap();
+        assert_eq!(kept.providers[0].description.as_deref(), Some("GPU box"));
+        let cleared = build_config(&set, input(Some("")), false).unwrap();
+        assert_eq!(cleared.providers[0].description, None);
     }
 
     #[test]
@@ -3118,6 +3158,7 @@ mod tests {
                 installer: None,
                 connect_timeout: None,
                 max_time: None,
+                description: None,
             }],
         };
         let next = build_config(&current, input, false).unwrap();
@@ -3141,6 +3182,7 @@ mod tests {
                 installer: None,
                 connect_timeout: None,
                 max_time: None,
+                description: None,
             }],
         };
         let next = build_config(&current, input, false).unwrap();
