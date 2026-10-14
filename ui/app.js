@@ -119,7 +119,9 @@ function authHeaders(headers = {}) {
 }
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, { ...opts, headers: authHeaders(opts.headers) });
+  const r = await fetch(path, { ...opts, headers: authHeaders(opts.headers) }).catch(() => {
+    throw new Error("Cannot reach jeff. Start it with jeff serve and reload this page.");
+  });
   const body = await r.json().catch(() => ({}));
   $("#auth-error").hidden = r.status !== 401;
   if (r.status === 401) $("#auth-error").textContent = body.error || "jeff rejected the access key.";
