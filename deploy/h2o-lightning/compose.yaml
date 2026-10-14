@@ -1,0 +1,54 @@
+name: jeff-h2o-lightning
+
+services:
+  vllm:
+    # vLLM 0.30.0, the version the model card measures, pinned by digest so a re-pushed tag cannot change what runs.
+    image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+    # The revision is the v1.2.3 commit; the shim below reads its serve_config.json from the same commit.
+    # The image limits match what the shim sends: up to 4 images, each scaled to at most 1,048,576 pixels.
+    # On a 16 GB GPU the Mamba state cache holds about 187 sequences, so vLLM's default of 256 refuses to start.
+    command: >
+      h2oai/h2o-lightning-4b --revision 97becfd219bcd85b0d6e800cc9544c91627656bc
+      --served-model-name h2oai/h2o-lightning-4b --max-model-len 40960 --gpu-memory-utilization 0.85 --max-num-seqs 64
+      --limit-mm-per-prompt '{"image": 4, "video": 0}' --mm-processor-kwargs '{"max_pixels": 1048576}'
+    environment:
+      # Decisions read log-probabilities and never sample; FlashInfer's sampler is a JIT build that can fail to compile.
+      VLLM_USE_FLASHINFER_SAMPLER: "0"
+    ipc: host
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  shim:
+    # The shim is plain Python; the vLLM image already has Python and the hf CLI.
+    image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        hf download h2oai/h2o-lightning-4b h2o_lightning_shim.py serve_config.json
+        --revision 97becfd219bcd85b0d6e800cc9544c91627656bc --local-dir /shim
+        && exec python3 /shim/h2o_lightning_shim.py --config /shim/serve_config.json
+        --vllm http://vllm:8000 --host 0.0.0.0 --port 8741
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "127.0.0.1:8741:8741"
+    depends_on:
+      - vllm
+    restart: unless-stopped
+
+volumes:
+  hf-cache:

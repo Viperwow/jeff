@@ -4,18 +4,86 @@ use std::{
     process::{Command, Stdio},
 };
 
-const CLM_COMPOSE: &str = include_str!("../deploy/clm/compose.yaml");
-const CLM_PORT: u16 = 8700;
-
-/// Our own clm container already holding the port is fine: `up -d` leaves it running.
-pub fn clm_running() -> bool {
-    running("jeff-clm-clm")
-}
+const CLM_IMAGE: &str =
+    "vllm/vllm-openai@sha256:6bf34e50e2387dc46dc87a9d6a945fdd616a022bccfddd949052f54063ebcb8c";
+const H2O_IMAGE: &str =
+    "vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90";
 
 /// Qwen3-8B safetensors, summed from the Hugging Face file list.
 const ENCODER_WEIGHT_BYTES: u64 = 16_381_516_776;
 /// CLM_v0.1-8B.pt, the reference head clm-serve downloads on first start.
 const CLM_HEAD_BYTES: u64 = 75_557_149;
+/// model.safetensors of H2O-Lightning-4B v1.2.3.
+const H2O_WEIGHT_BYTES: u64 = 9_078_620_536;
+
+/// A local provider jeff installs in Docker.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Stack {
+    Clm,
+    H2oLightning,
+}
+
+impl Stack {
+    pub const ALL: [Stack; 2] = [Stack::Clm, Stack::H2oLightning];
+
+    /// The provider's `installer` value and the path segment of its install endpoints.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Clm => "clm",
+            Self::H2oLightning => "h2o-lightning",
+        }
+    }
+
+    pub fn parse(installer: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.id() == installer)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clm => "CLM",
+            Self::H2oLightning => "H2O-Lightning",
+        }
+    }
+
+    fn compose(self) -> &'static str {
+        match self {
+            Self::Clm => include_str!("../deploy/clm/compose.yaml"),
+            Self::H2oLightning => include_str!("../deploy/h2o-lightning/compose.yaml"),
+        }
+    }
+
+    pub fn port(self) -> u16 {
+        match self {
+            Self::Clm => 8700,
+            Self::H2oLightning => 8741,
+        }
+    }
+
+    pub fn first_start(self) -> &'static str {
+        match self {
+            Self::Clm => "the encoder downloads ~16 GB on first start",
+            Self::H2oLightning => "vLLM downloads ~9 GB of weights on first start",
+        }
+    }
+
+    /// Our own server container already holding the port is fine: `up -d` leaves it running.
+    pub fn running(self) -> bool {
+        running(match self {
+            Self::Clm => "jeff-clm-clm",
+            Self::H2oLightning => "jeff-h2o-lightning-shim",
+        })
+    }
+
+    /// Install steps in order, each `{id, label, weight, done, progress?}`. `weight` is the step's share of the whole
+    /// install in rough gigabytes, so the overall progress tracks the downloads. `loaded` is whether the server reaches
+    /// its model; `warm` is whether a first request has gone through.
+    pub fn steps(self, loaded: bool, warm: bool) -> Vec<serde_json::Value> {
+        match self {
+            Self::Clm => clm_steps(loaded, warm),
+            Self::H2oLightning => h2o_steps(loaded, warm),
+        }
+    }
+}
 
 fn running(name: &str) -> bool {
     Command::new("docker")
@@ -31,9 +99,18 @@ fn running(name: &str) -> bool {
         .is_ok_and(|o| !o.stdout.is_empty())
 }
 
+fn image_present(image: &str) -> bool {
+    Command::new("docker")
+        .args(["image", "inspect", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 fn bytes_in(container: &str, path: &str) -> u64 {
     let out = Command::new("docker")
-        .args(["exec", container, "du", "-sb", path])
+        .args(["exec", container, "du", "-sbL", path])
         .output();
     out.ok()
         .and_then(|o| {
@@ -46,19 +123,15 @@ fn bytes_in(container: &str, path: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Install steps in order, each `{id, label, weight, done, progress?}`. `weight` is the step's share of the whole
-/// install in rough gigabytes, so the overall progress tracks the downloads. `loaded` is whether clm-serve reaches its encoder;
-/// `warm` is whether a first request has gone through, which takes about 30 s after the encoder loads.
-pub fn clm_steps(loaded: bool, warm: bool) -> Vec<serde_json::Value> {
+fn ratio(n: u64, total: u64) -> f64 {
+    (n as f64 / total as f64).min(1.0)
+}
+
+/// clm-serve's first request takes about 30 s after the encoder loads.
+fn clm_steps(loaded: bool, warm: bool) -> Vec<serde_json::Value> {
     use serde_json::json;
     let docker = docker_ready().unwrap_or(false);
-    let image = docker
-        && Command::new("docker")
-            .args(["image", "inspect", "vllm/vllm-openai@sha256:6bf34e50e2387dc46dc87a9d6a945fdd616a022bccfddd949052f54063ebcb8c"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
+    let image = docker && image_present(CLM_IMAGE);
     let encoder_up = docker && running("jeff-clm-encoder");
     let clm_up = docker && running("jeff-clm-clm");
     let weights = if encoder_up {
@@ -74,7 +147,6 @@ pub fn clm_steps(loaded: bool, warm: bool) -> Vec<serde_json::Value> {
     } else {
         0
     };
-    let ratio = |n: u64, total: u64| (n as f64 / total as f64).min(1.0);
     vec![
         json!({ "id": "docker", "label": "Start Docker", "weight": 0.5, "done": docker }),
         json!({ "id": "image", "label": "Download the vLLM image (about 10 GB)", "weight": 10.0, "done": image }),
@@ -84,6 +156,31 @@ pub fn clm_steps(loaded: bool, warm: bool) -> Vec<serde_json::Value> {
         json!({ "id": "head", "label": "Download the CLM head (76 MB)", "weight": 0.1,
                 "done": head >= CLM_HEAD_BYTES, "progress": ratio(head, CLM_HEAD_BYTES) }),
         json!({ "id": "load", "label": "Load the encoder on the GPU", "weight": 1.0, "done": loaded }),
+        json!({ "id": "warm", "label": "Warm up the model", "weight": 0.5, "done": loaded && warm }),
+    ]
+}
+
+fn h2o_steps(loaded: bool, warm: bool) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let docker = docker_ready().unwrap_or(false);
+    let image = docker && image_present(H2O_IMAGE);
+    let vllm_up = docker && running("jeff-h2o-lightning-vllm");
+    let shim_up = docker && running("jeff-h2o-lightning-shim");
+    let weights = if vllm_up {
+        bytes_in(
+            "jeff-h2o-lightning-vllm-1",
+            "/root/.cache/huggingface/hub/models--h2oai--h2o-lightning-4b",
+        )
+    } else {
+        0
+    };
+    vec![
+        json!({ "id": "docker", "label": "Start Docker", "weight": 0.5, "done": docker }),
+        json!({ "id": "image", "label": "Download the vLLM image (about 9 GB)", "weight": 9.0, "done": image }),
+        json!({ "id": "containers", "label": "Start the containers", "weight": 0.2, "done": vllm_up && shim_up }),
+        json!({ "id": "weights", "label": "Download H2O-Lightning-4B weights (9.1 GB)", "weight": 9.1,
+                "done": loaded || weights >= H2O_WEIGHT_BYTES, "progress": ratio(weights, H2O_WEIGHT_BYTES) }),
+        json!({ "id": "load", "label": "Load the model on the GPU", "weight": 1.0, "done": loaded }),
         json!({ "id": "warm", "label": "Warm up the model", "weight": 0.5, "done": loaded && warm }),
     ]
 }
@@ -99,11 +196,11 @@ pub fn home() -> PathBuf {
     PathBuf::from(user).join(".jeff")
 }
 
-fn clm_compose_file() -> Result<PathBuf, String> {
-    let dir = home().join("clm");
+fn compose_file(stack: Stack) -> Result<PathBuf, String> {
+    let dir = home().join(stack.id());
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let file = dir.join("compose.yaml");
-    fs::write(&file, CLM_COMPOSE).map_err(|e| format!("{}: {e}", file.display()))?;
+    fs::write(&file, stack.compose()).map_err(|e| format!("{}: {e}", file.display()))?;
     Ok(file)
 }
 
@@ -126,7 +223,7 @@ impl Action {
         match self {
             // Without --force-recreate, Reinstall on running containers would do nothing.
             Self::Install => &["up", "-d", "--force-recreate"],
-            // Volumes stay, so a reinstall does not download the 16 GB of weights again.
+            // Volumes stay, so a reinstall does not download the weights again.
             Self::Remove => &["down"],
         }
     }
@@ -185,19 +282,27 @@ fn ensure_docker(progress: &dyn Fn(&str)) -> Result<(), String> {
     Err("Docker Desktop did not start within 3 minutes. Open it manually and try again.".to_owned())
 }
 
-/// Runs `docker compose` for CLM. `inherit` streams progress to this terminal; otherwise output is captured.
-pub fn clm(action: Action, inherit: bool, progress: &dyn Fn(&str)) -> Result<String, String> {
+/// Runs `docker compose` for a stack. `inherit` streams progress to this terminal; otherwise output is captured.
+pub fn run(
+    stack: Stack,
+    action: Action,
+    inherit: bool,
+    progress: &dyn Fn(&str),
+) -> Result<String, String> {
     ensure_docker(progress)?;
-    if matches!(action, Action::Install) && !port_free(CLM_PORT) && !clm_running() {
+    let (name, port) = (stack.name(), stack.port());
+    if matches!(action, Action::Install) && !port_free(port) && !stack.running() {
         return Err(format!(
-            "Port {CLM_PORT} is taken by another program, perhaps a clm-serve started by hand. Stop it and press Install again."
+            "Port {port} is taken by another program, perhaps a {name} server started by hand. Stop it and press Install again."
         ));
     }
-    progress(match action {
-        Action::Install => "Pulling images and starting CLM… the first pull is about 10 GB.",
-        Action::Remove => "Removing CLM containers…",
+    progress(&match action {
+        Action::Install => {
+            format!("Pulling images and starting {name}… the first pull is about 10 GB.")
+        }
+        Action::Remove => format!("Removing {name} containers…"),
     });
-    let file = clm_compose_file()?;
+    let file = compose_file(stack)?;
     let mut cmd = Command::new("docker");
     cmd.arg("compose")
         .arg("-f")

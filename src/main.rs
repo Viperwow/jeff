@@ -13,7 +13,7 @@ use axum::{
     routing::delete,
     routing::{get, post},
 };
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use futures_util::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -100,6 +100,16 @@ impl Default for Config {
                     connect_timeout: None,
                     max_time: None,
                 },
+                Provider {
+                    id: "h2o-lightning".into(),
+                    name: "H2O-Lightning".into(),
+                    url: env_or("H2O_LIGHTNING_URL", "http://127.0.0.1:8741"),
+                    key: None,
+                    models: vec!["h2oai/h2o-lightning-4b".into()],
+                    installer: Some("h2o-lightning".into()),
+                    connect_timeout: None,
+                    max_time: None,
+                },
             ],
             keys: Vec::new(),
             questions: questions::Questions::new(),
@@ -178,9 +188,10 @@ struct App {
     config_path: String,
     /// Model lists last fetched from each provider, keyed by provider id.
     listed: RwLock<HashMap<String, Vec<String>>>,
-    clm_task: Mutex<Value>,
-    /// 0 cold, 1 warming, 2 warm: whether clm-serve has answered its first, slow request.
-    clm_warm: AtomicU8,
+    /// The running or last install action of each local stack, indexed by `install::Stack`.
+    tasks: [Mutex<Value>; 2],
+    /// 0 cold, 1 warming, 2 warm: whether each stack's server has answered its first, slow request.
+    warm: [AtomicU8; 2],
     /// Keys from `--api-key` / `JEFF_API_KEY`; they never expire and are managed outside the UI.
     static_keys: Vec<String>,
     /// Problems of a config file that failed to reload; the config read before stays in force while it is not empty.
@@ -741,10 +752,11 @@ async fn provider_models(app: &App, p: &Provider) -> Value {
         }
         Err(e) => (false, Some(e.without_url().to_string()), None),
     };
+    let stack = p.installer.as_deref().and_then(install::Stack::parse);
     // clm-serve opens its port only after downloading its head, which takes minutes on first start.
     if !ok
-        && p.installer.as_deref() == Some("clm")
-        && tokio::task::spawn_blocking(install::clm_running)
+        && let Some(stack) = stack
+        && tokio::task::spawn_blocking(move || stack.running())
             .await
             .unwrap_or(false)
     {
@@ -768,21 +780,30 @@ async fn provider_models(app: &App, p: &Provider) -> Value {
     if let Some(e) = error {
         out["error"] = json!(e);
     }
-    // clm-serve answers before its encoder has loaded the weights; requests fail with 502 until then.
-    if ok && p.installer.as_deref() == Some("clm") {
-        let health = request(app, p, reqwest::Method::GET, "/health")
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await;
-        if let Ok(r) = health
-            && r.json::<Value>()
-                .await
-                .is_ok_and(|h| h["embedder"] == false)
-        {
-            out["warning"] = json!("encoder is loading");
-        }
+    // Both servers answer before their model has loaded; requests fail until then.
+    if ok
+        && let Some(stack) = stack
+        && !model_loaded(app, p, stack).await
+    {
+        out["warning"] = json!("model is loading");
     }
     out
+}
+
+/// clm-serve reports `embedder: true` once its encoder is up; the H2O-Lightning shim answers `/health` with 200
+/// only once vLLM serves the model.
+async fn model_loaded(app: &App, p: &Provider, stack: install::Stack) -> bool {
+    let Ok(r) = request(app, p, reqwest::Method::GET, "/health")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    match stack {
+        install::Stack::Clm => r.json::<Value>().await.is_ok_and(|h| h["embedder"] == true),
+        install::Stack::H2oLightning => r.status().is_success(),
+    }
 }
 
 async fn refresh_models(app: &App, config: &Config) -> Vec<Value> {
@@ -1352,59 +1373,53 @@ async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>)
     Json(public(&config)).into_response()
 }
 
-async fn clm_action(State(app): State<Arc<App>>, Path(action): Path<String>) -> Response {
+async fn install_action(app: Arc<App>, action: String, stack: install::Stack) -> Response {
     let Some(action) = install::Action::parse(&action) else {
         return error(StatusCode::NOT_FOUND, "expected install or remove");
     };
+    let task = &app.tasks[stack as usize];
     {
-        let mut task = app.clm_task.lock().unwrap();
+        let mut task = task.lock().unwrap();
         if task["state"] == "running" {
-            return error(StatusCode::CONFLICT, "another CLM action is running");
+            return error(
+                StatusCode::CONFLICT,
+                format!("another {} action is running", stack.name()),
+            );
         }
         *task = json!({ "state": "running" });
     }
     let app2 = app.clone();
     tokio::task::spawn_blocking(move || {
-        let progress = |step: &str| {
-            *app2.clm_task.lock().unwrap() = json!({ "state": "running", "step": step })
-        };
-        let result = install::clm(action, false, &progress);
-        *app2.clm_task.lock().unwrap() = match result {
+        let task = &app2.tasks[stack as usize];
+        let progress =
+            |step: &str| *task.lock().unwrap() = json!({ "state": "running", "step": step });
+        let result = install::run(stack, action, false, &progress);
+        *task.lock().unwrap() = match result {
             Ok(log) => json!({ "state": "done", "log": log }),
             Err(e) => json!({ "state": "error", "error": e }),
         };
     });
-    (
-        StatusCode::ACCEPTED,
-        Json(app.clm_task.lock().unwrap().clone()),
-    )
-        .into_response()
+    (StatusCode::ACCEPTED, Json(task.lock().unwrap().clone())).into_response()
 }
 
-async fn clm_status(State(app): State<Arc<App>>) -> Json<Value> {
-    let clm = app
+async fn install_status(app: Arc<App>, stack: install::Stack) -> Json<Value> {
+    let provider = app
         .config
         .read()
         .await
         .providers
         .iter()
-        .find(|p| p.installer.as_deref() == Some("clm"))
+        .find(|p| p.installer.as_deref() == Some(stack.id()))
         .cloned();
     let mut loaded = false;
-    if let Some(p) = &clm {
-        let health = request(&app, p, reqwest::Method::GET, "/health")
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await;
-        if let Ok(r) = health {
-            loaded = r.json::<Value>().await.is_ok_and(|h| h["embedder"] == true);
-        }
+    if let Some(p) = &provider {
+        loaded = model_loaded(&app, p, stack).await;
     }
+    let warm = &app.warm[stack as usize];
     if !loaded {
-        app.clm_warm.store(0, Ordering::Relaxed);
-    } else if let Some(p) = clm.filter(|_| {
-        app.clm_warm
-            .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+        warm.store(0, Ordering::Relaxed);
+    } else if let Some(p) = provider.filter(|_| {
+        warm.compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
     }) {
         let app2 = app.clone();
@@ -1415,16 +1430,15 @@ async fn clm_status(State(app): State<Arc<App>>) -> Json<Value> {
                 .timeout(Duration::from_secs(300))
                 .send()
                 .await;
-            let warm = sent.is_ok_and(|r| r.status().is_success());
-            app2.clm_warm
-                .store(if warm { 2 } else { 0 }, Ordering::Relaxed);
+            let ok = sent.is_ok_and(|r| r.status().is_success());
+            app2.warm[stack as usize].store(if ok { 2 } else { 0 }, Ordering::Relaxed);
         });
     }
-    let warm = app.clm_warm.load(Ordering::Relaxed) == 2;
-    let steps = tokio::task::spawn_blocking(move || install::clm_steps(loaded, warm))
+    let warm = warm.load(Ordering::Relaxed) == 2;
+    let steps = tokio::task::spawn_blocking(move || stack.steps(loaded, warm))
         .await
         .unwrap_or_default();
-    let mut out = app.clm_task.lock().unwrap().clone();
+    let mut out = app.tasks[stack as usize].lock().unwrap().clone();
     out["steps"] = json!(steps);
     Json(out)
 }
@@ -1446,9 +1460,9 @@ enum Command {
     /// Run the API and the web UI (the default command)
     Serve(ServeArgs),
     /// Install a local provider in Docker
-    Install { stack: Stack },
+    Install { stack: install::Stack },
     /// Stop and remove a local provider's containers; downloaded weights are kept
-    Remove { stack: Stack },
+    Remove { stack: install::Stack },
     /// Manage jeff access keys in the config file; a running server picks changes up on the next request
     Keys {
         #[command(subcommand)]
@@ -1636,11 +1650,6 @@ struct ServeDefaults {
     args: ServeArgs,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum Stack {
-    Clm,
-}
-
 #[derive(Args)]
 struct ServeArgs {
     /// Where the API listens: /v1/systemone, /v1/models and /health. ADDR:PORT, or a bare PORT on 127.0.0.1
@@ -1700,10 +1709,8 @@ async fn main() {
     let args = match cli.command {
         None => ServeDefaults::parse_from(["jeff"]).args,
         Some(Command::Serve(args)) => args,
-        Some(Command::Install { stack: Stack::Clm }) => {
-            return run_install(install::Action::Install);
-        }
-        Some(Command::Remove { stack: Stack::Clm }) => return run_install(install::Action::Remove),
+        Some(Command::Install { stack }) => return run_install(stack, install::Action::Install),
+        Some(Command::Remove { stack }) => return run_install(stack, install::Action::Remove),
         Some(Command::Keys { action, config }) => return run_keys(action, &config_file(config)),
         Some(Command::Ask(args)) => return run_ask(args).await,
         Some(Command::Questions { action, url }) => return run_questions(action, &url).await,
@@ -2270,13 +2277,14 @@ fn run_keys(action: KeysAction, path: &str) {
     }
 }
 
-fn run_install(action: install::Action) {
-    match install::clm(action, true, &|step| println!("{step}")) {
-        Ok(_) if matches!(action, install::Action::Install) => {
-            println!(
-                "done: CLM is at http://127.0.0.1:8700; the encoder downloads ~16 GB on first start"
-            )
-        }
+fn run_install(stack: install::Stack, action: install::Action) {
+    match install::run(stack, action, true, &|step| println!("{step}")) {
+        Ok(_) if matches!(action, install::Action::Install) => println!(
+            "done: {} is at http://127.0.0.1:{}; {}",
+            stack.name(),
+            stack.port(),
+            stack.first_start()
+        ),
         Ok(_) => println!("done"),
         Err(e) => {
             eprintln!("{e}");
@@ -2319,8 +2327,8 @@ async fn serve(args: ServeArgs) {
         config: RwLock::new(config),
         config_path: config_path.clone(),
         listed: RwLock::new(HashMap::new()),
-        clm_task: Mutex::new(json!({ "state": "idle" })),
-        clm_warm: AtomicU8::new(0),
+        tasks: std::array::from_fn(|_| Mutex::new(json!({ "state": "idle" }))),
+        warm: Default::default(),
         static_keys: args
             .api_keys
             .iter()
@@ -2370,11 +2378,9 @@ async fn serve(args: ServeArgs) {
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
     // The UI calls the same /v1 routes on its own origin, so it works whether or not the API port is reachable from the browser.
     let api_addr = args.api.clone();
-    let manage = Router::new()
+    let mut manage = Router::new()
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/status", get(status))
-        .route("/api/clm", get(clm_status))
-        .route("/api/clm/{action}", post(clm_action))
         .route("/api/keys", get(list_keys).post(create_key))
         .route("/api/keys/{id}", delete(revoke_key))
         .route("/api/questions", post(create_questions))
@@ -2386,7 +2392,23 @@ async fn serve(args: ServeArgs) {
         .route(
             "/api/classifiers/{key}",
             axum::routing::put(update_classifier).delete(delete_classifier),
-        )
+        );
+    for stack in install::Stack::ALL {
+        manage = manage
+            .route(
+                &format!("/api/{}", stack.id()),
+                get(move |State(app): State<Arc<App>>| install_status(app, stack)),
+            )
+            .route(
+                &format!("/api/{}/{{action}}", stack.id()),
+                post(
+                    move |State(app): State<Arc<App>>, Path(action): Path<String>| {
+                        install_action(app, action, stack)
+                    },
+                ),
+            );
+    }
+    let manage = manage
         .route_layer(middleware::from_fn_with_state(app.clone(), require_admin))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
     let info_app = app.clone();
@@ -2566,8 +2588,8 @@ mod tests {
             config: RwLock::new(Config::default()),
             config_path: config_path.into(),
             listed: RwLock::new(HashMap::new()),
-            clm_task: Mutex::new(json!({ "state": "idle" })),
-            clm_warm: AtomicU8::new(0),
+            tasks: std::array::from_fn(|_| Mutex::new(json!({ "state": "idle" }))),
+            warm: Default::default(),
             static_keys: Vec::new(),
             problems: Mutex::new(Vec::new()),
             config_mtime: Mutex::new(modified(config_path)),

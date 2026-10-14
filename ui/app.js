@@ -4,13 +4,16 @@ let config = null;
 let modelList = null;
 
 const PRESETS = {
-  clm: { id: "clm", name: "CLM", url: "http://127.0.0.1:8700", models: ["clm-latest"], installer: "clm", hint: "Local Contrastive-LM server (clm-serve)." },
+  clm: { id: "clm", name: "CLM", url: "http://127.0.0.1:8700", models: ["clm-latest"], installer: "clm", hint: "Local Contrastive-LM server (clm-serve).",
+    installNote: "Runs CLM in Docker: a Qwen3-8B FP8 encoder on the GPU plus clm-serve. Needs Docker Desktop and an NVIDIA GPU; downloads about 25 GB once." },
+  "h2o-lightning": { id: "h2o-lightning", name: "H2O-Lightning", url: "http://127.0.0.1:8741", models: ["h2oai/h2o-lightning-4b"], installer: "h2o-lightning", hint: "Local H2O-Lightning-4B decision model (vLLM plus its shim).",
+    installNote: "Runs H2O-Lightning-4B in Docker: vLLM on the GPU plus the model's shim. Needs Docker Desktop and an NVIDIA GPU with 16 GB; downloads about 18 GB once." },
   laya: { id: "laya", name: "Laya", url: "http://127.0.0.1:8000", models: ["english", "multilingual", "typed-decisions"], hint: "Local laya-serve. Start it with: LAYA_HOST=127.0.0.1 laya-serve" },
   typesafe: { id: "typesafe", name: "TypeSafe Jev", url: "https://api.typesafe.ai", models: ["jev-latest"], hint: "TypeSafe cloud API. Key from console.typesafe.ai/keys." },
   pipellm: { id: "pipellm", name: "PipeLLM Jev", url: "https://api.pipellm.ai", models: ["jev-1.13.0"], hint: "Jev hosted by PipeLLM." },
   custom: { id: "custom", name: "Custom", url: "http://127.0.0.1:9000", models: [], hint: "Any server that speaks POST /v1/systemone." },
 };
-const PRESET_LABELS = { clm: "CLM (local)", laya: "Laya (local)", typesafe: "TypeSafe Jev (cloud)", pipellm: "PipeLLM Jev (cloud)", custom: "Custom server" };
+const PRESET_LABELS = { clm: "CLM (local)", "h2o-lightning": "H2O-Lightning (local)", laya: "Laya (local)", typesafe: "TypeSafe Jev (cloud)", pipellm: "PipeLLM Jev (cloud)", custom: "Custom server" };
 
 function say(el, text, tone = "") {
   el.textContent = text;
@@ -276,10 +279,11 @@ function providerCard(p) {
     fillDefaultModel();
     say($("#save-status"), "Save to apply.");
   });
-  if (p.installer === "clm") {
+  if (PRESETS[p.installer]?.installer) {
     $(".p-install", card).hidden = false;
-    $(".p-install-btn", card).onclick = () => clmTask(card, "install");
-    $(".p-remove-btn", card).onclick = () => clmTask(card, "remove");
+    $(".p-task", card).textContent = PRESETS[p.installer].installNote;
+    $(".p-install-btn", card).onclick = () => installTask(card, "install");
+    $(".p-remove-btn", card).onclick = () => installTask(card, "remove");
   }
   return card;
 }
@@ -313,7 +317,7 @@ function renderProviders() {
 
 function renderProviderCards(providers) {
   $("#provider-list").replaceChildren(...providers.map(providerCard));
-  for (const card of $$("[data-installer=clm]")) clmTask(card).catch(() => {});
+  for (const card of $$("#provider-list [data-provider]")) if (PRESETS[card.dataset.installer]?.installer) installTask(card).catch(() => {});
   const used = new Set(config.providers.map((p) => p.id));
   $("#preset").replaceChildren(...Object.entries(PRESET_LABELS).map(([k, label]) => {
     const o = new Option(label, k);
@@ -418,7 +422,7 @@ function renderSteps(card, t) {
     current.hidden = false;
     $(".p-task", card).hidden = true;
     $(".p-details", card).hidden = true;
-    current.replaceChildren(stepIcon("spin"), el("span", "shrink-0 font-medium", "Uninstalling"), el("span", "note min-w-0", t.step || "Removing the CLM containers…"));
+    current.replaceChildren(stepIcon("spin"), el("span", "shrink-0 font-medium", "Uninstalling"), el("span", "note min-w-0", t.step || `Removing the ${stackName(card)} containers…`));
     return false;
   }
   const started = running || t.state === "error" || steps.slice(1).some((s) => s.done);
@@ -456,52 +460,56 @@ function renderSteps(card, t) {
   return ready;
 }
 
-async function clmTask(card, action) {
+const stackName = (card) => PRESETS[card.dataset.installer].name;
+
+async function installTask(card, action) {
   if (!card.isConnected) return;
+  const stack = card.dataset.installer;
+  const name = stackName(card);
   const out = $(".p-task", card);
   const buttons = [$(".p-install-btn", card), $(".p-remove-btn", card)];
   if (action) {
-    if (action === "remove" && !confirm("Stop and remove the CLM containers? Downloaded weights are kept.")) return;
+    if (action === "remove" && !confirm(`Stop and remove the ${name} containers? Downloaded weights are kept.`)) return;
     // Shown and locked before the request, so the click registers at once and cannot start a second action.
     for (const b of buttons) b.disabled = true;
     card.dataset.action = action;
-    renderSteps(card, { steps: card.clmSteps, state: "running", step: action === "remove" ? "Removing the CLM containers…" : "" });
-    try { await api(`/api/clm/${action}`, { method: "POST" }); }
+    renderSteps(card, { steps: card.installSteps, state: "running", step: action === "remove" ? `Removing the ${name} containers…` : "" });
+    try { await api(`/api/${stack}/${action}`, { method: "POST" }); }
     catch (e) {
       for (const b of buttons) b.disabled = false;
       delete card.dataset.action;
-      renderSteps(card, { steps: card.clmSteps, state: "idle" });
+      renderSteps(card, { steps: card.installSteps, state: "idle" });
       say(out, e.message, "err");
       return;
     }
   }
   let t;
-  try { t = (await api("/api/clm")).body; }
+  try { t = (await api(`/api/${stack}`)).body; }
   catch (e) {
     // One failed status read must not stop the polling and leave the buttons locked.
-    say(out, `Could not read the CLM status: ${e.message}. Retrying…`, "err");
-    setTimeout(() => clmTask(card), 2000);
+    say(out, `Could not read the ${name} status: ${e.message}. Retrying…`, "err");
+    setTimeout(() => installTask(card), 2000);
     return;
   }
   if (t.state !== "running") delete card.dataset.action;
-  card.clmSteps = t.steps;
+  card.installSteps = t.steps;
   const ready = renderSteps(card, t);
   const containersUp = (t.steps || []).find((s) => s.id === "containers")?.done;
   // Reinstall stays locked while the model downloads, loads and warms up: restarting would begin that again.
   const busy = t.state === "running" || (containersUp && !ready);
   buttons[0].disabled = busy;
   buttons[1].disabled = t.state === "running";
-  buttons[0].title = busy && t.state !== "running" ? "CLM is still starting. Uninstall stops it." : "";
+  buttons[0].title = busy && t.state !== "running" ? `${name} is still starting. Uninstall stops it.` : "";
   // Kept while busy: a reinstall stops the containers for a moment, which would flip the label to Install.
   if (!busy || !card.dataset.labelSet) {
     buttons[0].textContent = containersUp ? "Reinstall" : "Install";
     card.dataset.labelSet = "1";
   }
   if (t.state === "error") say(out, t.error, "err");
-  else if (ready) say(out, "CLM is installed and ready.", "ok");
+  else if (ready) say(out, `${name} is installed and ready.`, "ok");
   else if (t.state === "running") say(out, t.step || "Working…");
   else if (containersUp) say(out, "Downloading and loading the model. You can close this page; it keeps going.");
-  if (t.state === "running" || (containersUp && !ready)) setTimeout(() => clmTask(card), 2000);
+  if (t.state === "running" || (containersUp && !ready)) setTimeout(() => installTask(card), 2000);
   else if (ready && !card.dataset.wasReady) { card.dataset.wasReady = "1"; loadModels().catch(() => {}); }
 }
 
