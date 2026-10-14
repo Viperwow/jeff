@@ -167,7 +167,7 @@ cat call.json | jeff ask --request - -o answer.json
 
 Windows PowerShell 5.1 strips the inner quotes from JSON passed to a program, so put the JSON in a file there and pass it with `--questions-file`.
 
-`jeff ask` calls `http://127.0.0.1:8080` unless `--url` or `JEFF_URL` says otherwise, and sends `JEFF_API_KEY` as its key. It waits 5 seconds to connect (`--connect-timeout`) and 60 seconds for the answer (`--max-time`). A custom question is saved only by `jeff questions add`, the admin page or `POST /api/questions`.
+`jeff ask` calls `http://127.0.0.1:8080` unless `--url` or `JEFF_URL` says otherwise, and sends `JEFF_API_KEY` as its key. It waits 5 seconds to connect (`--connect-timeout`) and 60 seconds for the answer (`--max-time`). `--no-cache` asks the providers again instead of reusing a cached answer. A custom question is saved only by `jeff questions add`, the admin page or `POST /api/questions`.
 
 A question may name its own `model`. It goes to that model, and the others go to the request's `model` or the default model. jeff sends one call per model, at most 8 per request, and merges the answers into one response. `x-jeff-provider` then lists every provider that answered.
 
@@ -340,8 +340,8 @@ jeff keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|nev
 jeff keys revoke ID
 jeff ask [KEY...] (--state TEXT | --state-file FILE|-) [--questions JSON | --questions-file FILE|-]
          [--model MODEL] [--url URL]
-         [--connect-timeout SECONDS] [--max-time SECONDS] [-o FILE]
-jeff ask --request FILE|- [--model MODEL] [-o FILE]
+         [--connect-timeout SECONDS] [--max-time SECONDS] [--no-cache] [-o FILE]
+jeff ask --request FILE|- [--model MODEL] [--no-cache] [-o FILE]
                          ask through a running jeff and print the answer JSON
 jeff questions list [-o FILE]
                          list saved questions: a table in a terminal, tab-separated lines in a pipe

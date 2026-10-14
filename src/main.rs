@@ -1671,6 +1671,9 @@ struct AskArgs {
     /// Seconds to wait for the whole answer
     #[arg(long, default_value_t = 60)]
     max_time: u64,
+    /// Ask the providers again instead of reusing jeff's cached answer
+    #[arg(long)]
+    no_cache: bool,
     /// Write the answer JSON to this file instead of printing it
     #[arg(short, long)]
     output: Option<String>,
@@ -2070,6 +2073,9 @@ async fn run_ask(args: AskArgs) {
         .build()
         .expect("HTTP client");
     let mut req = client.post(&url).json(&body);
+    if args.no_cache {
+        req = req.header(reqwest::header::CACHE_CONTROL, "no-cache");
+    }
     if let Some(key) = client_key(env::var("JEFF_API_KEY").ok()) {
         req = req.bearer_auth(key);
     }
