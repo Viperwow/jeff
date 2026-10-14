@@ -637,7 +637,7 @@ async fn forward(
             provider: p.id,
             ms: 0,
             status,
-            bytes,
+            bytes: cached_usage(bytes),
             cached: true,
         });
     }
@@ -702,6 +702,24 @@ async fn forward(
         bytes,
         cached: false,
     })
+}
+
+/// A cached answer cost the provider nothing: its `usage` token counts become 0 and `usage.cached` true, so summing
+/// `usage` gives what was really spent.
+fn cached_usage(bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(mut v) = serde_json::from_slice::<Value>(&bytes) else {
+        return bytes;
+    };
+    let Some(usage) = v.get_mut("usage").and_then(Value::as_object_mut) else {
+        return bytes;
+    };
+    for (k, n) in usage.iter_mut() {
+        if k.ends_with("_tokens") && n.is_number() {
+            *n = json!(0);
+        }
+    }
+    usage.insert("cached".into(), json!(true));
+    serde_json::to_vec(&v).unwrap()
 }
 
 type Batch = (Provider, String, Option<questions::Questions>);
@@ -3236,6 +3254,18 @@ mod tests {
             .providers[0];
         assert_eq!(set.max_time, Some(30));
         assert!(build_config(&current, input(Some(0)), false).is_err());
+    }
+
+    #[test]
+    fn cached_usage_zeroes_tokens() {
+        let sent = json!({"answers": {"q": 1}, "usage": {"input_tokens": 73, "output_tokens": 2, "latency_ms": 136.8}});
+        let got: Value =
+            serde_json::from_slice(&cached_usage(serde_json::to_vec(&sent).unwrap())).unwrap();
+        assert_eq!(
+            got,
+            json!({"answers": {"q": 1}, "usage": {"input_tokens": 0, "output_tokens": 0, "latency_ms": 136.8, "cached": true}})
+        );
+        assert_eq!(cached_usage(b"not json".to_vec()), b"not json");
     }
 
     #[test]

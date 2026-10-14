@@ -116,7 +116,7 @@ jeff adds two response headers:
 
 - `x-jeff-provider`: the provider that answered.
 - `x-jeff-upstream-ms`: how long the provider took, in milliseconds.
-- `x-jeff-cache`: `hit` when the answer came from jeff's answer cache, `miss` when a provider answered.
+- `x-jeff-cache`: `hit` when the answer came from jeff's answer cache, `miss` when a provider answered. A cached answer also has `usage.cached: true` and every `usage` token count set to 0, since the provider spent nothing on it.
 
 Other endpoints:
 
