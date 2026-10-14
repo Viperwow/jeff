@@ -183,6 +183,7 @@ Provider rules:
 - **Models.** jeff asks each provider for its models. If a provider has no `GET /v1/models`, list its models by hand on its card.
 - **Keys over the network.** A provider key goes to a remote host only over `https://`. Plain `http://` with a key is accepted only for `localhost`.
 - **Timeouts.** jeff waits 10 seconds to connect to a provider and 60 seconds for its answer. Set `connect_timeout` and `max_time` in seconds on the provider in `jeff.json` to change them. A provider that does not answer in time gets `504`, one jeff cannot reach gets `502`.
+- **Description.** A provider card shows a short line under its name. Set it in the Description field, or as `description` in `jeff.json`. A preset provider shows the preset's own line, which the page does not let you change.
 
 ## Local CLM
 

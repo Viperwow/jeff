@@ -277,7 +277,15 @@ function providerCard(p) {
   const card = $("#tpl-provider").content.firstElementChild.cloneNode(true);
   card.dataset.provider = p.id;
   $(".p-title", card).textContent = p.name || p.id;
-  $(".p-hint", card).textContent = (PRESETS[p.id] || {}).hint || "";
+  // A preset's description is its hint and stays fixed; only other providers store their own.
+  const presetHint = p.id !== "custom" && PRESETS[p.id]?.hint;
+  const desc = $(".p-desc", card);
+  desc.value = presetHint || p.description || "";
+  desc.readOnly = !!presetHint;
+  card.dataset.preset = presetHint ? "1" : "";
+  if (presetHint) $(".p-desc-note", card).textContent = "Set by the preset.";
+  $(".p-hint", card).textContent = desc.value;
+  desc.oninput = () => ($(".p-hint", card).textContent = desc.value);
   $(".p-name", card).value = p.name || "";
   $(".p-id", card).value = p.id;
   $(".p-id-echo", card).textContent = p.id;
@@ -318,6 +326,7 @@ function providersSnapshot() {
       url: $(".p-url", card).value,
       models: $(".p-models", card).value,
       installer: card.dataset.installer || null,
+      description: card.dataset.preset ? null : $(".p-desc", card).value,
     })),
   };
 }
@@ -419,6 +428,7 @@ async function saveProviders() {
       url: $(".p-url", card).value,
       models: $(".p-models", card).value.split(","),
       installer: card.dataset.installer || null,
+      description: card.dataset.preset ? null : $(".p-desc", card).value,
     };
     const key = $(".p-key", card).value;
     if (key) p.key = key;
