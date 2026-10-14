@@ -42,7 +42,7 @@ The final mockup is `gpu-fit-v19.html` from the brainstorming session. It sits o
 5. While the confirmation is open, the reading of other programs refreshes about every 2 seconds. Only the grey segment and the numbers change; the scale and the mark do not.
 6. Confirming starts the install, and the card shows the usual install progress.
 
-When jeff cannot read the GPU (no NVIDIA card, no `nvidia-smi`, or no answer from it), the confirmation follows `gpu-unknown-v3.html`, variant U2:
+When jeff cannot read the GPU (no NVIDIA card, no `nvidia-smi`, or no answer from it), the confirmation follows `gpu-unknown-v4.html`, variant U2:
 
 - The buttons are `Install anyway` (primary) and `Cancel`.
 - The bar's scale is the required total: jeff's running models plus the new one, each segment proportional to its size. There is no other-programs segment and no GPU mark. The new model's segment is hatched in neutral grey, not green or red.
