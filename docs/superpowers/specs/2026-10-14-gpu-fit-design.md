@@ -42,7 +42,13 @@ The final mockup is `gpu-fit-v19.html` from the brainstorming session. It sits o
 5. While the confirmation is open, the reading of other programs refreshes about every 2 seconds. Only the grey segment and the numbers change; the scale and the mark do not.
 6. Confirming starts the install, and the card shows the usual install progress.
 
-When jeff cannot read the GPU (no NVIDIA card, or no `nvidia-smi`), the confirmation shows only the buttons, with `Install`, and no bar.
+When jeff cannot read the GPU (no NVIDIA card, no `nvidia-smi`, or no answer from it), the confirmation follows `gpu-unknown-v3.html`, variant U2:
+
+- The buttons are `Install anyway` (primary) and `Cancel`.
+- The bar's scale is the required total: jeff's running models plus the new one, each segment proportional to its size. There is no other-programs segment and no GPU mark. The new model's segment is hatched in neutral grey, not green or red.
+- Above the bar, on the left: `Required GPU memory X GB`; on the right: `Your GPU: unknown`.
+- The legend lists the running models and `CLM requires 9.5 GB`, with the same separators.
+- Below, in orange: `Could not read your GPU memory, so it cannot tell whether this fits.`
 
 ## Behaviour, as decided
 
