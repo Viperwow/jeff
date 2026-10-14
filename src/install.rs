@@ -296,6 +296,16 @@ pub fn run(
             "Port {port} is taken by another program, perhaps a {name} server started by hand. Stop it and press Install again."
         ));
     }
+    // Each stack reserves most of the GPU memory, so a second one would start and then fail to load its model.
+    if let Some(other) = Stack::ALL
+        .into_iter()
+        .find(|s| matches!(action, Action::Install) && *s != stack && s.running())
+    {
+        return Err(format!(
+            "{} is running and holds the GPU. Uninstall it, then install {name}.",
+            other.name()
+        ));
+    }
     progress(&match action {
         Action::Install => {
             format!("Pulling images and starting {name}… the first pull is about 10 GB.")
