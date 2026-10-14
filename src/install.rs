@@ -2,7 +2,10 @@ use std::{
     env, fs,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
+
+use serde_json::{Value, json};
 
 const CLM_IMAGE: &str =
     "vllm/vllm-openai@sha256:6bf34e50e2387dc46dc87a9d6a945fdd616a022bccfddd949052f54063ebcb8c";
@@ -282,8 +285,88 @@ fn ensure_docker(progress: &dyn Fn(&str)) -> Result<(), String> {
     Err("Docker Desktop did not start within 3 minutes. Open it manually and try again.".to_owned())
 }
 
+/// Held while an action runs on a stack. Every jeff process takes the same lock file, the server and the CLI
+/// alike, and the OS releases it when the holder exits.
+pub struct Claim {
+    stack: Stack,
+    _lock: fs::File,
+}
+
+impl Claim {
+    /// Claims the stack, or refuses while another action on it runs.
+    pub fn new(stack: Stack) -> Result<Self, String> {
+        Self::in_dir(stack, &home().join(stack.id()))
+    }
+
+    fn in_dir(stack: Stack, dir: &std::path::Path) -> Result<Self, String> {
+        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = dir.join("action.lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { stack, _lock: file }),
+            Err(fs::TryLockError::WouldBlock) => {
+                Err(format!("another {} action is running", stack.name()))
+            }
+            Err(fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// Runs the action on the claimed stack.
+    pub fn run(
+        &self,
+        action: Action,
+        inherit: bool,
+        progress: &dyn Fn(&str),
+    ) -> Result<String, String> {
+        run(self.stack, action, inherit, progress)
+    }
+}
+
+/// The running or last action of each stack, as the admin page shows it.
+pub struct Tasks([Mutex<Value>; 2]);
+
+impl Default for Tasks {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| {
+            Mutex::new(json!({ "state": "idle" }))
+        }))
+    }
+}
+
+impl Tasks {
+    /// The task of a stack; its `state` is idle, running, done or error.
+    pub fn get(&self, stack: Stack) -> Value {
+        self.0[stack as usize].lock().unwrap().clone()
+    }
+
+    /// Claims the stack and runs the action in the background.
+    pub fn start(self: &Arc<Self>, stack: Stack, action: Action) -> Result<Value, String> {
+        let claim = Claim::new(stack)?;
+        *self.0[stack as usize].lock().unwrap() = json!({ "state": "running" });
+        let tasks = self.clone();
+        std::thread::spawn(move || {
+            let task = &tasks.0[stack as usize];
+            let progress =
+                |step: &str| *task.lock().unwrap() = json!({ "state": "running", "step": step });
+            let result = claim.run(action, false, &progress);
+            // Released before the task reads as finished, so a start right after it is not refused.
+            drop(claim);
+            *task.lock().unwrap() = match result {
+                Ok(log) => json!({ "state": "done", "log": log }),
+                Err(e) => json!({ "state": "error", "error": e }),
+            };
+        });
+        Ok(self.get(stack))
+    }
+}
+
 /// Runs `docker compose` for a stack. `inherit` streams progress to this terminal; otherwise output is captured.
-pub fn run(
+fn run(
     stack: Stack,
     action: Action,
     inherit: bool,
@@ -344,4 +427,20 @@ pub fn run(
 
 fn port_free(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_claimed_stack_refuses_a_second_claim() {
+        let dir = env::temp_dir().join(format!("jeff-claim-{}", std::process::id()));
+        let first = Claim::in_dir(Stack::Clm, &dir).unwrap();
+        let refused = Claim::in_dir(Stack::Clm, &dir).err().unwrap();
+        assert_eq!(refused, "another CLM action is running");
+        drop(first);
+        assert!(Claim::in_dir(Stack::Clm, &dir).is_ok());
+        fs::remove_dir_all(&dir).ok();
+    }
 }
