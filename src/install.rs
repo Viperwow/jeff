@@ -354,9 +354,11 @@ impl Tasks {
             let progress =
                 |step: &str| *task.lock().unwrap() = json!({ "state": "running", "step": step });
             let result = claim.run(action, false, &progress);
-            // Released before the task reads as finished, so a start right after it is not refused.
+            // Released under the task lock: a start right after it is not refused, and its `running` cannot be
+            // overwritten by this result.
+            let mut task = task.lock().unwrap();
             drop(claim);
-            *task.lock().unwrap() = match result {
+            *task = match result {
                 Ok(log) => json!({ "state": "done", "log": log }),
                 Err(e) => json!({ "state": "error", "error": e }),
             };
