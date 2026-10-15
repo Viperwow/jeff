@@ -173,37 +173,47 @@ const GUARD_MS = 600;
 /** Disarms the one button currently waiting for confirmation. */
 let disarmCurrent = () => {};
 
-/** The first click arms the button and counts down the seconds left; a second click before then calls `action`. */
+/**
+ * The first click arms the button and counts down the seconds left; a second click before then calls `action`.
+ * The button stays disabled while `action` runs. An action that returns true keeps it locked itself.
+ */
 function confirmClick(button, armedLabel, action) {
   const label = button.textContent;
   let timer;
+  let guard;
   const disarm = () => {
     clearInterval(timer);
+    // A pending guard would re-enable the button later, over a lock set by whoever disarmed it.
+    if (guard) {
+      clearTimeout(guard);
+      guard = undefined;
+      button.disabled = false;
+    }
     button.dataset.confirm = "false";
     button.textContent = label;
   };
   button.onclick = async () => {
-    const until = Date.now() + GUARD_MS;
-    button.disabled = true;
-    try {
-      if (button.dataset.confirm === "true") {
-        disarm();
-        await action();
-      } else {
-        disarmCurrent();
-        disarmCurrent = disarm;
-        button.dataset.confirm = "true";
-        let left = CONFIRM_MS / 1000;
-        button.textContent = `${armedLabel} · ${left}s`;
-        timer = setInterval(() => {
-          left -= 1;
-          if (left > 0) button.textContent = `${armedLabel} · ${left}s`;
-          else disarm();
-        }, 1000);
-      }
-    } finally {
-      setTimeout(() => { button.disabled = false; }, Math.max(0, until - Date.now()));
+    if (button.dataset.confirm === "true") {
+      disarm();
+      button.disabled = true;
+      if (!(await action())) button.disabled = false;
+      return;
     }
+    disarmCurrent();
+    disarmCurrent = disarm;
+    button.disabled = true;
+    guard = setTimeout(() => {
+      guard = undefined;
+      button.disabled = false;
+    }, GUARD_MS);
+    button.dataset.confirm = "true";
+    let left = CONFIRM_MS / 1000;
+    button.textContent = `${armedLabel} · ${left}s`;
+    timer = setInterval(() => {
+      left -= 1;
+      if (left > 0) button.textContent = `${armedLabel} · ${left}s`;
+      else disarm();
+    }, 1000);
   };
 }
 
@@ -314,7 +324,10 @@ function providerCard(p) {
     $(".p-install", card).hidden = false;
     $(".p-task", card).textContent = PRESETS[p.installer].installNote;
     $(".p-install-btn", card).onclick = () => installTask(card, "install");
-    $(".p-remove-btn", card).onclick = () => installTask(card, "remove");
+    confirmClick($(".p-remove-btn", card), "Confirm uninstall", async () => {
+      await installTask(card, "remove");
+      return true;
+    });
   }
   return card;
 }
@@ -524,8 +537,8 @@ async function installTask(card, action) {
   const out = $(".p-task", card);
   const buttons = [$(".p-install-btn", card), $(".p-remove-btn", card)];
   if (action) {
-    if (action === "remove" && !confirm(`Stop and remove the ${name} containers? Downloaded weights are kept.`)) return;
     // Shown and locked before the request, so the click registers at once and cannot start a second action.
+    disarmCurrent();
     for (const b of buttons) b.disabled = true;
     card.dataset.action = action;
     renderSteps(card, { steps: card.installSteps, state: "running", step: action === "remove" ? `Removing the ${name} containers…` : "" });
