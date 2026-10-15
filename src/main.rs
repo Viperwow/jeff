@@ -219,7 +219,7 @@ struct App {
     /// Model lists last fetched from each provider, keyed by provider id.
     listed: RwLock<HashMap<String, Vec<String>>>,
     /// The running or last install action of each local stack, indexed by `install::Stack`.
-    tasks: [Mutex<Value>; 2],
+    tasks: Arc<install::Tasks>,
     /// 0 cold, 1 warming, 2 warm: whether each stack's server has answered its first, slow request.
     warm: [AtomicU8; 2],
     /// Keys from `--api-key` / `JEFF_API_KEY`; they never expire and are managed outside the UI.
@@ -1522,29 +1522,10 @@ async fn install_action(app: Arc<App>, action: String, stack: install::Stack) ->
     let Some(action) = install::Action::parse(&action) else {
         return error(StatusCode::NOT_FOUND, "expected install or remove");
     };
-    let task = &app.tasks[stack as usize];
-    {
-        let mut task = task.lock().unwrap();
-        if task["state"] == "running" {
-            return error(
-                StatusCode::CONFLICT,
-                format!("another {} action is running", stack.name()),
-            );
-        }
-        *task = json!({ "state": "running" });
+    match app.tasks.start(stack, action) {
+        Ok(task) => (StatusCode::ACCEPTED, Json(task)).into_response(),
+        Err(e) => error(StatusCode::CONFLICT, e),
     }
-    let app2 = app.clone();
-    tokio::task::spawn_blocking(move || {
-        let task = &app2.tasks[stack as usize];
-        let progress =
-            |step: &str| *task.lock().unwrap() = json!({ "state": "running", "step": step });
-        let result = install::run(stack, action, false, &progress);
-        *task.lock().unwrap() = match result {
-            Ok(log) => json!({ "state": "done", "log": log }),
-            Err(e) => json!({ "state": "error", "error": e }),
-        };
-    });
-    (StatusCode::ACCEPTED, Json(task.lock().unwrap().clone())).into_response()
 }
 
 async fn install_status(app: Arc<App>, stack: install::Stack) -> Json<Value> {
@@ -1597,7 +1578,7 @@ async fn install_status(app: Arc<App>, stack: install::Stack) -> Json<Value> {
     let steps = tokio::task::spawn_blocking(move || stack.steps(loaded, warm))
         .await
         .unwrap_or_default();
-    let mut out = app.tasks[stack as usize].lock().unwrap().clone();
+    let mut out = app.tasks.get(stack);
     out["steps"] = json!(steps);
     Json(out)
 }
@@ -2443,7 +2424,11 @@ fn run_keys(action: KeysAction, path: &str) {
 }
 
 fn run_install(stack: install::Stack, action: install::Action) {
-    match install::run(stack, action, true, &|step| println!("{step}")) {
+    let claim = install::Claim::new(stack).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
+    match claim.run(action, true, &|step| println!("{step}")) {
         Ok(_) if matches!(action, install::Action::Install) => println!(
             "done: {} is at http://127.0.0.1:{}; {}",
             stack.name(),
@@ -2492,7 +2477,7 @@ async fn serve(args: ServeArgs) {
         config: RwLock::new(config),
         config_path: config_path.clone(),
         listed: RwLock::new(HashMap::new()),
-        tasks: std::array::from_fn(|_| Mutex::new(json!({ "state": "idle" }))),
+        tasks: Default::default(),
         warm: Default::default(),
         static_keys: args
             .api_keys
@@ -2754,7 +2739,7 @@ mod tests {
             config: RwLock::new(Config::default()),
             config_path: config_path.into(),
             listed: RwLock::new(HashMap::new()),
-            tasks: std::array::from_fn(|_| Mutex::new(json!({ "state": "idle" }))),
+            tasks: Default::default(),
             warm: Default::default(),
             static_keys: Vec::new(),
             problems: Mutex::new(Vec::new()),
