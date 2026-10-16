@@ -1132,11 +1132,81 @@ fn key_view(k: &keys::StoredKey) -> Value {
     json!({ "id": k.id, "name": k.name, "role": k.role, "prefix": k.prefix, "created_at": k.created_at, "expires_at": k.expires_at })
 }
 
-async fn list_keys(State(app): State<Arc<App>>) -> Json<Value> {
+async fn list_keys(State(app): State<Arc<App>>, headers: HeaderMap) -> Json<Value> {
     let config = app.config.read().await;
-    Json(
-        json!({ "static_keys": app.static_keys.len(), "keys": config.keys.iter().map(key_view).collect::<Vec<_>>() }),
-    )
+    let digest = bearer(&headers).map(keys::sha256);
+    let current = config
+        .keys
+        .iter()
+        .find(|k| Some(&k.sha256) == digest.as_ref())
+        .map(|k| k.id.clone());
+    Json(json!({
+        "static_keys": app.static_keys.len(),
+        "keys": config.keys.iter().map(key_view).collect::<Vec<_>>(),
+        "current_key_id": current,
+    }))
+}
+
+/// The cookie the admin page signs in with. It holds the key itself, so revoking the key signs the page out.
+const SESSION_COOKIE: &str = "jeff_key";
+
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+}
+
+/// Gives a request without `Authorization` the key from the session cookie. Only the admin port reads the cookie.
+async fn cookie_auth(mut req: Request, next: Next) -> Response {
+    let from_cookie = req
+        .headers()
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| c.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
+        .and_then(|key| HeaderValue::from_str(&format!("Bearer {key}")).ok());
+    if !req.headers().contains_key(header::AUTHORIZATION)
+        && let Some(value) = from_cookie
+    {
+        req.headers_mut().insert(header::AUTHORIZATION, value);
+    }
+    next.run(req).await
+}
+
+/// Trades the admin key in `Authorization`, already checked by `require_admin`, for an HttpOnly cookie that no
+/// script on the page can read.
+async fn sign_in(headers: HeaderMap) -> Response {
+    let key = bearer(&headers).unwrap_or_default();
+    // Behind a TLS proxy jeff sees plain http, so the browser's Origin tells whether the page is on https.
+    let secure = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|o| o.starts_with("https://"));
+    // 400 days is the longest lifetime browsers keep; an expired or revoked key is refused regardless.
+    let cookie = format!(
+        "{SESSION_COOKIE}={key}; Path=/; HttpOnly; SameSite=Strict; Max-Age=34560000{}",
+        if secure { "; Secure" } else { "" }
+    );
+    session_cookie(cookie)
+}
+
+async fn sign_out() -> Response {
+    session_cookie(format!(
+        "{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+    ))
+}
+
+fn session_cookie(cookie: String) -> Response {
+    match HeaderValue::from_str(&cookie) {
+        Ok(value) => (StatusCode::NO_CONTENT, [(header::SET_COOKIE, value)]).into_response(),
+        Err(_) => error(
+            StatusCode::BAD_REQUEST,
+            "the key holds characters a cookie cannot carry",
+        ),
+    }
 }
 
 #[derive(Deserialize)]
@@ -2415,7 +2485,7 @@ fn run_keys(action: KeysAction, path: &str) {
             );
             if role == keys::Role::Admin {
                 eprintln!(
-                    "sign in to the admin page: {}",
+                    "sign in to the admin page while jeff serve runs: {}",
                     sign_in_link(&admin_url, &key)
                 );
             }
@@ -2549,6 +2619,7 @@ async fn serve(args: ServeArgs) {
         .route("/api/status", get(status))
         .route("/api/keys", get(list_keys).post(create_key))
         .route("/api/keys/{id}", delete(revoke_key))
+        .route("/api/session", post(sign_in))
         .route("/api/questions", post(create_questions))
         .route(
             "/api/questions/{key}",
@@ -2615,6 +2686,8 @@ async fn serve(args: ServeArgs) {
                 Json(json!({ "api": api_addr, "api_key_set": info_app.auth_required().await }))
             }),
         )
+        .route("/api/session", delete(sign_out))
+        .layer(middleware::from_fn(cookie_auth))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn_with_state(app.clone(), check_host));
 
@@ -2746,6 +2819,87 @@ mod tests {
             "--description",
             "d"
         ]));
+    }
+
+    fn bearer_headers(key: &str, origin: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {key}")).unwrap(),
+        );
+        if let Some(o) = origin {
+            h.insert(header::ORIGIN, HeaderValue::from_str(o).unwrap());
+        }
+        h
+    }
+
+    fn set_cookie(r: &Response) -> String {
+        r.headers()[header::SET_COOKIE].to_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn sign_in_sets_an_http_only_cookie_secure_only_over_https() {
+        let plain = sign_in(bearer_headers("jeff_k", Some("http://127.0.0.1:8081"))).await;
+        assert_eq!(plain.status(), StatusCode::NO_CONTENT);
+        let cookie = set_cookie(&plain);
+        assert!(cookie.starts_with("jeff_key=jeff_k;"));
+        assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+        assert!(!cookie.contains("Secure"));
+        let tls = sign_in(bearer_headers("jeff_k", Some("https://admin.example"))).await;
+        assert!(set_cookie(&tls).ends_with("; Secure"));
+        assert!(set_cookie(&sign_out().await).contains("Max-Age=0"));
+    }
+
+    #[tokio::test]
+    async fn the_cookie_becomes_the_bearer_unless_a_header_is_sent() {
+        let seen = |req: Request| async move {
+            req.headers()
+                .get(header::AUTHORIZATION)
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default()
+        };
+        let app = Router::new()
+            .route("/", get(seen))
+            .layer(middleware::from_fn(cookie_auth));
+        let call = |cookie: &str, auth: Option<&str>| {
+            let mut req = Request::builder().uri("/").header(header::COOKIE, cookie);
+            if let Some(a) = auth {
+                req = req.header(header::AUTHORIZATION, a);
+            }
+            let app = app.clone();
+            let req = req.body(axum::body::Body::empty()).unwrap();
+            async move {
+                let r = tower::ServiceExt::oneshot(app, req).await.unwrap();
+                String::from_utf8(
+                    axum::body::to_bytes(r.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap()
+            }
+        };
+        assert_eq!(
+            call("theme=dark; jeff_key=jeff_c", None).await,
+            "Bearer jeff_c"
+        );
+        assert_eq!(
+            call("jeff_key=jeff_c", Some("Bearer jeff_h")).await,
+            "Bearer jeff_h"
+        );
+        assert_eq!(call("jeff_keyx=jeff_c", None).await, "");
+    }
+
+    #[tokio::test]
+    async fn the_key_list_names_the_key_of_the_request() {
+        let app = test_app("unused-current.json");
+        let (key, record) = keys::generate("me", keys::Role::Admin, None);
+        let (_, other) = keys::generate("other", keys::Role::Admin, None);
+        app.config.write().await.keys = vec![other, record.clone()];
+        let body = list_keys(State(Arc::new(app)), bearer_headers(&key, None))
+            .await
+            .0;
+        assert_eq!(body["current_key_id"], record.id);
     }
 
     #[test]

@@ -253,11 +253,13 @@ jeff keys revoke 3f9a1c2e0b7d4a6f9e8c1b2a3d4e5f60
 
 A running server picks up changes from the terminal on the next request.
 
-The admin page sends a key too, and your browser remembers it. It gets one in three ways:
+The admin page signs in with an admin key. Once jeff has keys, the page opens on **Sign in to jeff**. It takes a key in three ways:
 
-- **The first key you create on the page.** The page keeps working after the lock turns on.
-- **The link `jeff keys create --role admin` prints**, such as `sign in to the admin page: http://127.0.0.1:8081/#key=jeff_…`. Open it in the browser. The link points at `JEFF_ADMIN_URL`, or at `--admin-url`, when the admin page is elsewhere.
-- **The field on the "needs an admin key" banner.** Paste an admin key and press **Use key**.
+- **The link `jeff keys create --role admin` prints**, such as `sign in to the admin page while jeff serve runs: http://127.0.0.1:8081/#key=jeff_…`. Open it while jeff runs. The link points at `JEFF_ADMIN_URL`, or at `--admin-url`, when the admin page is elsewhere.
+- **The Sign in form.** Paste an admin key and press **Sign in**. A client key is refused.
+- **The first key you create on the page**, while jeff has no keys yet.
+
+The browser keeps the key in an HttpOnly cookie, `jeff_key`, that no script on the page can read. The cookie is `SameSite=Strict`, and `Secure` when the page is on https. Only the admin port reads it; the API port takes the `Authorization` header alone. Revoking the key signs the browser out at once. **Sign out**, at the bottom of the menu, deletes the cookie. On **Access keys**, the key this browser signs in with reads **this browser**, and revoking it asks for **Revoke and sign out**.
 
 Keys that never expire can also come from the environment. They are admin keys, and each must have at least 32 characters:
 

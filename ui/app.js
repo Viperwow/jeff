@@ -113,24 +113,14 @@ const drafts = {
 /** Runs `track` after the click that changed a form, such as adding or removing a row, has done its work. */
 const afterClick = (track) => () => setTimeout(track);
 
-function authHeaders(headers = {}) {
-  const key = store.get("key");
-  return key ? { ...headers, authorization: `Bearer ${key}` } : headers;
-}
-
 async function api(path, opts = {}) {
-  const r = await fetch(path, { ...opts, headers: authHeaders(opts.headers) }).catch(() => {
+  const r = await fetch(path, opts).catch(() => {
     throw new Error("Cannot reach jeff. Start it with jeff serve and reload this page.");
   });
   const body = await r.json().catch(() => ({}));
-  // A client key gets 403 on /api, and the banner lets the operator swap it for an admin key.
-  const locked = r.status === 401 || (r.status === 403 && /admin key/.test(body.error || ""));
-  $("#auth-error").hidden = !locked;
-  if (locked) {
-    $("#auth-error-text").textContent = r.status === 401
-      ? "This page needs an admin key. Paste one, or open the link jeff keys create --role admin prints."
-      : body.error;
-  }
+  if (r.status === 401) showSignIn("");
+  // A client key gets 403 on /api.
+  if (r.status === 403 && /admin key/.test(body.error || "")) showSignIn(body.error);
   if (!r.ok) {
     if (body.code === "config_invalid") checkStatus();
     const err = new Error((body.error || body.detail?.message || body.detail || `HTTP ${r.status}`) + (body.log ? `. Log: ${body.log}` : ""));
@@ -426,6 +416,7 @@ const checked = new Set(store.get("checked") || []);
 
 async function refreshInfo() {
   info = (await api("/api/info")).body;
+  $("#sign-out").hidden = !info.api_key_set;
   updateCurl();
 }
 
@@ -672,8 +663,8 @@ async function createKey() {
     $("#key-value").value = body.key;
     $("#key-created").hidden = false;
     // The first key locks jeff; keep it here so this page does not lock its own operator out.
-    const kept = !store.get("key") && body.role === "admin";
-    if (kept) store.set("key", body.key);
+    const kept = !currentKeyId && body.role === "admin";
+    if (kept) await signIn(body.key);
     $("#key-saved-note").textContent = kept ? "This browser now uses this key for the admin page." : "";
     $("#key-name").value = "";
     drafts.drop("key:new");
@@ -688,10 +679,14 @@ async function createKey() {
 
 $("#key-copy").onclick = () => navigator.clipboard.writeText($("#key-value").value).then(() => flash($("#key-status"), "Key copied"));
 
+/** The id of the key this browser signs in with, from the last key list. */
+let currentKeyId = null;
+
 function keyRow(k, now, last) {
   const li = el("li", "flex flex-wrap items-center gap-x-4 gap-y-1 py-3");
   const main = el("div", "min-w-0 flex-1");
-  main.append(el("div", "font-medium", k.name), el("div", "note font-mono", `${k.prefix}… · ${k.role}`));
+  const mine = k.id === currentKeyId;
+  main.append(el("div", "font-medium", k.name), el("div", "note font-mono", `${k.prefix}… · ${k.role}${mine ? " · this browser" : ""}`));
   const expired = k.expires_at !== null && k.expires_at <= now;
   const when = el("div", "note text-right tabular-nums");
   when.append(el("div", "", `Created ${shortDate(k.created_at)}`));
@@ -701,11 +696,12 @@ function keyRow(k, now, last) {
   when.append(exp);
   const revoke = el("button", "btn btn-danger", "Revoke");
   revoke.type = "button";
-  revoke.title = last ? "Last key: jeff will accept requests without a key." : "Clients using this key stop working at once.";
-  confirmClick(revoke, "Confirm revoke", async () => {
+  revoke.title = mine ? "This page signs in with this key and loses access at once."
+    : last ? "Last key: jeff will accept requests without a key." : "Clients using this key stop working at once.";
+  confirmClick(revoke, mine ? "Revoke and sign out" : "Confirm revoke", async () => {
     try {
       await api(`/api/keys/${encodeURIComponent(k.id)}`, { method: "DELETE" });
-      if ((store.get("key") || "").startsWith(k.prefix)) store.set("key", "");
+      if (mine) location.reload();
       await refreshInfo();
       $("#key-created").hidden = true;
       await loadKeys();
@@ -719,6 +715,7 @@ function keyRow(k, now, last) {
 
 async function loadKeys() {
   const { body } = await api("/api/keys");
+  currentKeyId = body.current_key_id ?? null;
   const now = Math.floor(Date.now() / 1000);
   const count = body.keys.length + body.static_keys;
   $("#key-list").replaceChildren(...body.keys.map((k) => keyRow(k, now, count === 1)));
@@ -1571,25 +1568,67 @@ $("#c-run").onclick = runClassifier;
 
 setInterval(() => !document.hidden && location.hash === "#providers" && modelList && loadModels().catch(() => {}), 15000);
 
-// The link `jeff keys create --role admin` prints carries the key in the fragment, which never reaches a server log.
-function takeLinkedKey() {
-  const linked = new URLSearchParams(location.hash.slice(1)).get("key");
-  if (!linked) return false;
-  store.set("key", linked);
-  history.replaceState(null, "", location.pathname + location.search);
-  return true;
+/* ---------- sign-in ---------- */
+
+function showSignIn(message) {
+  $("#app").hidden = true;
+  $("#sign-in").hidden = false;
+  say($("#sign-in-status"), message, "err");
 }
-takeLinkedKey();
-addEventListener("hashchange", () => takeLinkedKey() && location.reload());
-$("#auth-form").onsubmit = (e) => {
+
+/** Trades a key for the HttpOnly cookie the page signs in with. Returns the error, or "" on success. */
+async function signIn(key) {
+  const r = await fetch("/api/session", { method: "POST", headers: { authorization: `Bearer ${key}` } }).catch(() => null);
+  if (!r) return "Cannot reach jeff.";
+  if (r.ok) return "";
+  if (r.status === 401) return "jeff rejected that key.";
+  return (await r.json().catch(() => ({}))).error || `HTTP ${r.status}`;
+}
+
+// The link `jeff keys create --role admin` prints carries the key in the fragment, which never reaches a server log.
+async function takeLinkedKey() {
+  const linked = new URLSearchParams(location.hash.slice(1)).get("key");
+  if (!linked) return null;
+  history.replaceState(null, "", location.pathname + location.search);
+  return signIn(linked);
+}
+
+/** Moves a key an older version kept in localStorage into the cookie. */
+async function moveStoredKey() {
+  const old = store.get("key");
+  if (!old) return;
+  await signIn(old);
+  try { localStorage.removeItem("jeff.key"); } catch {}
+}
+
+$("#sign-in-form").onsubmit = (e) => {
   e.preventDefault();
-  store.set("key", $("#auth-key").value.trim());
+  busy(e.submitter, async () => {
+    const err = await signIn($("#sign-in-key").value.trim());
+    if (err) say($("#sign-in-status"), err, "err");
+    else location.reload();
+  });
+};
+
+$("#sign-out").onclick = async () => {
+  await fetch("/api/session", { method: "DELETE" }).catch(() => {});
   location.reload();
 };
 
-showTab();
-setView(view);
-loadQuestions().catch((e) => say($("#pg-status"), e.message, "err"));
-loadClassifiers().catch((e) => say($("#c-status"), e.message, "err"));
-loadConfig().catch((e) => say($("#pg-status"), e.message, "err"));
-checkStatus();
+addEventListener("hashchange", async () => {
+  const err = await takeLinkedKey();
+  if (err === "") location.reload();
+  else if (err) showSignIn(err);
+});
+
+(async () => {
+  const linkError = await takeLinkedKey();
+  await moveStoredKey();
+  showTab();
+  setView(view);
+  loadQuestions().catch((e) => say($("#pg-status"), e.message, "err"));
+  loadClassifiers().catch((e) => say($("#c-status"), e.message, "err"));
+  loadConfig().catch((e) => say($("#pg-status"), e.message, "err"));
+  checkStatus();
+  if (linkError) showSignIn(linkError);
+})();

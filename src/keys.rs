@@ -68,7 +68,7 @@ fn random_hex(len: usize) -> String {
     hex(&bytes)
 }
 
-fn sha256(text: &str) -> String {
+pub fn sha256(text: &str) -> String {
     hex(&Sha256::digest(text.as_bytes()))
 }
 
