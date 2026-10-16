@@ -123,8 +123,14 @@ async function api(path, opts = {}) {
     throw new Error("Cannot reach jeff. Start it with jeff serve and reload this page.");
   });
   const body = await r.json().catch(() => ({}));
-  $("#auth-error").hidden = r.status !== 401;
-  if (r.status === 401) $("#auth-error").textContent = body.error || "jeff rejected the access key.";
+  // A client key gets 403 on /api, and the banner lets the operator swap it for an admin key.
+  const locked = r.status === 401 || (r.status === 403 && /admin key/.test(body.error || ""));
+  $("#auth-error").hidden = !locked;
+  if (locked) {
+    $("#auth-error-text").textContent = r.status === 401
+      ? "This page needs an admin key. Paste one, or open the link jeff serve prints."
+      : body.error;
+  }
   if (!r.ok) {
     if (body.code === "config_invalid") checkStatus();
     const err = new Error((body.error || body.detail?.message || body.detail || `HTTP ${r.status}`) + (body.log ? `. Log: ${body.log}` : ""));
@@ -1564,6 +1570,22 @@ $("#c-try").onclick = tryClassifier;
 $("#c-run").onclick = runClassifier;
 
 setInterval(() => !document.hidden && location.hash === "#providers" && modelList && loadModels().catch(() => {}), 15000);
+
+// The link `jeff serve` prints carries its key in the fragment, which never reaches a server log.
+function takeLinkedKey() {
+  const linked = new URLSearchParams(location.hash.slice(1)).get("key");
+  if (!linked) return false;
+  store.set("key", linked);
+  history.replaceState(null, "", location.pathname + location.search);
+  return true;
+}
+takeLinkedKey();
+addEventListener("hashchange", () => takeLinkedKey() && location.reload());
+$("#auth-form").onsubmit = (e) => {
+  e.preventDefault();
+  store.set("key", $("#auth-key").value.trim());
+  location.reload();
+};
 
 showTab();
 setView(view);

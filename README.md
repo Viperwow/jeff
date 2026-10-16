@@ -253,7 +253,11 @@ jeff keys revoke 3f9a1c2e0b7d4a6f9e8c1b2a3d4e5f60
 
 A running server picks up changes from the terminal on the next request.
 
-The admin page sends a key too. The first key you create on that page is remembered by your browser, so the page keeps working after the lock turns on.
+The admin page sends a key too, and your browser remembers it. It gets one in three ways:
+
+- **The first key you create on the page.** The page keeps working after the lock turns on.
+- **The link `jeff serve` prints**, such as `jeff UI  on http://127.0.0.1:8081/#key=jeff_…`. Its key is an admin key that lives in memory until the server stops. It does not turn the lock on, and a restart prints a new one. The key is in the terminal output, so keep that output private.
+- **The field on the "needs an admin key" banner.** Paste an admin key and press **Use key**.
 
 Keys that never expire can also come from the environment. They are admin keys, and each must have at least 32 characters:
 
