@@ -224,8 +224,6 @@ struct App {
     warm: [AtomicU8; 2],
     /// Keys from `--api-key` / `JEFF_API_KEY`; they never expire and are managed outside the UI.
     static_keys: Vec<String>,
-    /// The admin key in the link `jeff serve` prints for the admin page. It lives in memory until the server stops.
-    session_key: Option<String>,
     /// Problems of a config file that failed to reload; the config read before stays in force while it is not empty.
     problems: Mutex<Vec<String>>,
     /// When the config file was last read, so keys created or revoked by `jeff keys` apply without a restart.
@@ -440,12 +438,6 @@ impl App {
         })?;
         *self.config_mtime.lock().unwrap() = modified(&self.config_path);
         Ok(())
-    }
-
-    /// The role a key grants. The session key is checked apart from the others, so it never turns the lock on.
-    async fn role_of(&self, auth: Option<&str>, now: u64) -> Option<keys::Role> {
-        keys::verify(auth, &self.static_keys, &self.config.read().await.keys, now)
-            .or_else(|| keys::verify(auth, self.session_key.as_slice(), &[], now))
     }
 
     async fn auth_required(&self) -> bool {
@@ -1039,7 +1031,7 @@ async fn require_key(
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
-        let role = app.role_of(auth, now).await;
+        let role = keys::verify(auth, &app.static_keys, &app.config.read().await.keys, now);
         if let Some(role) = role
             && !role.allows(needed)
         {
@@ -1789,6 +1781,9 @@ enum KeysAction {
         /// `never`, a number of days such as `30d`, or a date `YYYY-MM-DD` (valid through the end of that day, UTC)
         #[arg(long, default_value = "30d")]
         expires: String,
+        /// The admin page address in the sign-in link printed for an admin key
+        #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url)]
+        admin_url: String,
     },
     /// Revoke a key by its id
     Revoke { id: String },
@@ -1844,6 +1839,11 @@ fn parse_addr(s: &str) -> Result<String, String> {
     s.parse::<std::net::SocketAddr>()
         .map(|_| s.to_owned())
         .map_err(|_| format!("'{s}' is not ADDR:PORT or PORT"))
+}
+
+/// The key rides in the fragment, which the browser never sends to the server.
+fn sign_in_link(admin_url: &str, key: &str) -> String {
+    format!("{}/#key={key}", admin_url.trim_end_matches('/'))
 }
 
 fn parse_url(s: &str) -> Result<String, String> {
@@ -2391,6 +2391,7 @@ fn run_keys(action: KeysAction, path: &str) {
             name,
             role,
             expires,
+            admin_url,
         } => {
             let name = name.trim().to_owned();
             if name.is_empty() || name.chars().count() > 64 {
@@ -2412,6 +2413,12 @@ fn run_keys(action: KeysAction, path: &str) {
                 "id {}; this key is shown only once, store it now",
                 record.id
             );
+            if role == keys::Role::Admin {
+                eprintln!(
+                    "sign in to the admin page: {}",
+                    sign_in_link(&admin_url, &key)
+                );
+            }
         }
         KeysAction::Revoke { id } => {
             let before = config.keys.clone();
@@ -2493,7 +2500,6 @@ async fn serve(args: ServeArgs) {
             .map(|k| k.trim().to_owned())
             .filter(|k| !k.is_empty())
             .collect(),
-        session_key: (!args.no_ui).then(|| keys::generate("session", keys::Role::Admin, None).0),
         config_mtime: Mutex::new(modified(&config_path)),
         problems: Mutex::new(Vec::new()),
         allowed_hosts: args
@@ -2628,8 +2634,7 @@ async fn serve(args: ServeArgs) {
     let ui_listener = tokio::net::TcpListener::bind(&args.ui)
         .await
         .unwrap_or_else(|e| fail(&args.ui, e));
-    let session = app.session_key.clone().unwrap_or_default();
-    println!("jeff UI  on http://{}/#key={session}", args.ui);
+    println!("jeff UI  on http://{}", args.ui);
     let ui_server = axum::serve(
         ui_listener,
         ui.with_state(app)
@@ -2743,6 +2748,18 @@ mod tests {
         ]));
     }
 
+    #[test]
+    fn the_sign_in_link_carries_the_key_in_the_fragment() {
+        assert_eq!(
+            sign_in_link("http://127.0.0.1:8081", "jeff_k"),
+            "http://127.0.0.1:8081/#key=jeff_k"
+        );
+        assert_eq!(
+            sign_in_link("https://admin.example/", "jeff_k"),
+            "https://admin.example/#key=jeff_k"
+        );
+    }
+
     fn test_app(config_path: &str) -> App {
         App {
             clients: Mutex::new(HashMap::new()),
@@ -2752,7 +2769,6 @@ mod tests {
             tasks: Default::default(),
             warm: Default::default(),
             static_keys: Vec::new(),
-            session_key: None,
             problems: Mutex::new(Vec::new()),
             config_mtime: Mutex::new(modified(config_path)),
             allowed_hosts: Vec::new(),
@@ -2768,18 +2784,6 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
-    }
-
-    #[tokio::test]
-    async fn the_session_key_opens_the_admin_page_without_locking_jeff() {
-        let mut app = test_app("unused-session.json");
-        app.session_key = Some("jeff_session".into());
-        assert_eq!(
-            app.role_of(Some("Bearer jeff_session"), 0).await,
-            Some(keys::Role::Admin)
-        );
-        assert_eq!(app.role_of(Some("Bearer jeff_other"), 0).await, None);
-        assert!(!app.auth_required().await);
     }
 
     #[tokio::test]

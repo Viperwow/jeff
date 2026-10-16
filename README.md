@@ -256,7 +256,7 @@ A running server picks up changes from the terminal on the next request.
 The admin page sends a key too, and your browser remembers it. It gets one in three ways:
 
 - **The first key you create on the page.** The page keeps working after the lock turns on.
-- **The link `jeff serve` prints**, such as `jeff UI  on http://127.0.0.1:8081/#key=jeff_…`. Its key is an admin key that lives in memory until the server stops. It does not turn the lock on, and a restart prints a new one. The key is in the terminal output, so keep that output private.
+- **The link `jeff keys create --role admin` prints**, such as `sign in to the admin page: http://127.0.0.1:8081/#key=jeff_…`. Open it in the browser. The link points at `JEFF_ADMIN_URL`, or at `--admin-url`, when the admin page is elsewhere.
 - **The field on the "needs an admin key" banner.** Paste an admin key and press **Use key**.
 
 Keys that never expire can also come from the environment. They are admin keys, and each must have at least 32 characters:
@@ -342,7 +342,7 @@ jeff install h2o-lightning
 jeff remove h2o-lightning
                          stop and remove the H2O-Lightning containers; the weights stay
 jeff keys list           list keys without showing them
-jeff keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|never]
+jeff keys create --name NAME [--role client|admin] [--expires 30d|YYYY-MM-DD|never] [--admin-url URL]
 jeff keys revoke ID
 jeff ask [KEY...] (--state TEXT | --state-file FILE|-) [--questions JSON | --questions-file FILE|-]
          [--model MODEL] [--url URL]

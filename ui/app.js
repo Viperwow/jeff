@@ -128,7 +128,7 @@ async function api(path, opts = {}) {
   $("#auth-error").hidden = !locked;
   if (locked) {
     $("#auth-error-text").textContent = r.status === 401
-      ? "This page needs an admin key. Paste one, or open the link jeff serve prints."
+      ? "This page needs an admin key. Paste one, or open the link jeff keys create --role admin prints."
       : body.error;
   }
   if (!r.ok) {
@@ -1571,7 +1571,7 @@ $("#c-run").onclick = runClassifier;
 
 setInterval(() => !document.hidden && location.hash === "#providers" && modelList && loadModels().catch(() => {}), 15000);
 
-// The link `jeff serve` prints carries its key in the fragment, which never reaches a server log.
+// The link `jeff keys create --role admin` prints carries the key in the fragment, which never reaches a server log.
 function takeLinkedKey() {
   const linked = new URLSearchParams(location.hash.slice(1)).get("key");
   if (!linked) return false;
