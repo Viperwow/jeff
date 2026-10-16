@@ -18,6 +18,47 @@ A jeff with no access keys lets the mod save the classifier with no key. A jeff 
 
 `/jeff-skill-suggestion:setup` hides every user skill from the model's listing, so `/context` counts them at 0. `/jeff-skill-suggestion:setup restore` undoes it.
 
+## Settings
+
+Set an option in the mod's settings under `/plugin`. Set a variable in the environment Claude Code starts in. A non-empty option wins over its variable.
+
+### Connection
+
+| Option | Variable | Default | Meaning |
+|---|---|---|---|
+| `url` | `JEFF_URL` | `http://127.0.0.1:8080` | The jeff API the mod asks. |
+| `adminUrl` | `JEFF_ADMIN_URL` | `http://127.0.0.1:8081` | The jeff admin page, where the mod saves `skill-gate` once. |
+| `apiKey` | `JEFF_API_KEY` | none | The key the mod sends once jeff has access keys. Saving `skill-gate` needs an admin key. Asking needs only a client key. |
+| `allowPrivateHttp` | `JEFF_ALLOW_PRIVATE_HTTP=1` | off | Sends the key over plain http to a private IP address. Either the option or the variable turns it on. |
+
+The mod sends the key over https, or over plain http to this machine (`127.0.0.1`, `localhost`, `[::1]`). To any other http address it sends no key, and a jeff with keys refuses the request.
+
+`allowPrivateHttp` adds the private ranges `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (Tailscale) and `fc00::/7`. No public certificate authority certifies such an address, so a home network has no easy https. The key travels in plain text, and any device on that network can read it. Turn it on only for a network you trust. Public addresses and host names always need https.
+
+### Connect to jeff on another machine
+
+- **Same machine.** Nothing to set.
+- **A PC on your home network.** On the PC, run `jeff keys create --name laptop --role client` and `jeff serve --api 0.0.0.0:8080`, and allow port 8080 in its firewall. On the laptop, set `JEFF_URL=http://<pc-address>:8080`, `JEFF_API_KEY=<the key>` and `JEFF_ALLOW_PRIVATE_HTTP=1`.
+- **A remote server.** Put https in front of jeff, for example Caddy with a domain name, and set `JEFF_URL=https://<domain>` and `JEFF_API_KEY`. Or join both machines to Tailscale and use the server's `100.x` address with `JEFF_ALLOW_PRIVATE_HTTP=1`.
+
+Save `skill-gate` once from the machine jeff runs on, where the admin page is reachable. After that the other machines need only `JEFF_URL` and a client key.
+
+### Behavior
+
+| Option | Default | Meaning |
+|---|---|---|
+| `inject` | `content` | `content` attaches the chosen skill's SKILL.md to the prompt. `suggest` only names the skill, and the model loads it with the Skill tool. |
+| `hideListing` | on | Leaves the engine's skill listing out of the main conversation. |
+| `rerank` | on | Sends a second request that re-reads the shortlist with each SKILL.md opening and can reject them all. |
+| `shortlist` | `3` | How many top-ranked skills the second request re-reads. |
+| `gateThreshold` | `0.2` | The mean `skill-gate` answer under which nothing is suggested. |
+| `fitsThreshold` | `0.3` | The best "does this fit" answer under which the shortlist is dropped. |
+| `excerptChars` | `700` | How many characters of each shortlisted SKILL.md the second request reads. |
+| `alwaysListed` | none | Comma-separated skills that stay in the listing whatever the prompt. |
+| `neverSuggested` | none | Comma-separated skills jeff is never offered. Typing `/name` still reaches them. |
+| `timeoutMs` | `3000` | How long the mod waits for each answer before it lets the prompt through with no suggestion. |
+| `logDecisions` | on | Writes each selection to the session log. |
+
 ## Tested on
 
 Claude Code 2.1.296, jeff 0.3.0, model `typesafe/openjev-latest`.
