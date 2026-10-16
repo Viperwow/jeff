@@ -134,6 +134,17 @@ describe('register', () => {
     expect(sent.every((r) => r.authorization === undefined)).toBe(true)
   })
 
+  test('a jeff on another machine gets the key over plain http with JEFF_ALLOW_HTTP=1', async ($, on) => {
+    const reply = (r: Sent) => (r.url.endsWith('/v1/classifiers/skill-gate') ? json(200, GATE) : systemone(r.body as never, 0.9, 0.9))
+    const { sent } = world(on, reply, { JEFF_API_KEY: 'secret', JEFF_URL: 'http://192.168.1.20:8080', JEFF_ALLOW_HTTP: '1' })
+
+    await $.prompt.submit(typed('deploy the app'))
+
+    expect(sent.length > 0).toBe(true)
+    expect(sent.every((r) => r.url.startsWith('http://192.168.1.20:8080/'))).toBe(true)
+    expect(sent.every((r) => r.authorization === 'Bearer secret')).toBe(true)
+  })
+
   test('a local jeff gets the key in the authorization header', async ($, on) => {
     const reply = (r: Sent) => (r.url.endsWith('/v1/classifiers/skill-gate') ? json(200, GATE) : systemone(r.body as never, 0.9, 0.9))
     const { sent } = world(on, reply, { JEFF_API_KEY: 'secret' })

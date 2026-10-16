@@ -342,8 +342,11 @@ export function modelInvocable(markdown: string | null): boolean {
   return value === 'false' || value === 'no' || value === 'off'
 }
 
-/** Whether `url` is safe to send a key to: https, or plain http to this machine only. */
-export function keySafe(url: string): boolean {
+/**
+ * Whether `url` is safe to send a key to: https, or plain http to this machine. `allowHttp` also allows plain http
+ * to any address, where anyone on the path can read the key.
+ */
+export function keySafe(url: string, allowHttp = false): boolean {
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -351,7 +354,8 @@ export function keySafe(url: string): boolean {
     return false
   }
   if (parsed.protocol === 'https:') return true
-  return parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
+  if (parsed.protocol !== 'http:') return false
+  return allowHttp || ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
 }
 
 /** The classifier in jeff whose questions make the gate. */

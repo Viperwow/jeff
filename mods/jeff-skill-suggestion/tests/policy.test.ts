@@ -307,6 +307,15 @@ disable-model-invocation: ${value}
     expect(keySafe('not a url')).toBe(false)
   })
 
+  test('plain http to another machine carries the key only when allowed', () => {
+    for (const url of ['http://192.168.1.20:8080', 'http://203.0.113.7', 'http://jeff.example']) {
+      expect(keySafe(url)).toBe(false)
+      expect(keySafe(url, true)).toBe(true)
+    }
+    expect(keySafe('ftp://jeff.example', true)).toBe(false)
+    expect(keySafe('not a url', true)).toBe(false)
+  })
+
   test('the suggestion block names the skill, and says "nothing" only while the listing is in place', () => {
     const hidden = suggestionBlock(skills[1] as Skill, true)
     expect(hidden).toContain('Relevant to the current request: pptx-author. Ignore this if it does not fit')

@@ -324,6 +324,8 @@ Measured on 10 prompts, each run 3 times with the mod and 3 times without it, wi
 
 The mod waits for jeff before each prompt, about 1–3 s. [BENCHMARK.md](mods/jeff-skill-suggestion/BENCHMARK.md) has the setup, every prompt and the limits of the measurement.
 
+[Settings](mods/jeff-skill-suggestion/README.md#settings) lists every option and variable of the mod, and how to reach jeff on another machine.
+
 ## Command reference
 
 ```text
