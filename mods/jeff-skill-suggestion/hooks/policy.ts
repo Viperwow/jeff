@@ -343,10 +343,10 @@ export function modelInvocable(markdown: string | null): boolean {
 }
 
 /**
- * Whether `url` is safe to send a key to: https, or plain http to this machine. `privateHttp` also allows plain http
- * to a private address: no public CA certifies one, and anyone on that network can read the key.
+ * Whether `url` is safe to send a key to: https, or plain http to this machine. `allowHttp` also allows plain http
+ * to any address, where anyone on the path can read the key.
  */
-export function keySafe(url: string, privateHttp = false): boolean {
+export function keySafe(url: string, allowHttp = false): boolean {
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -355,16 +355,7 @@ export function keySafe(url: string, privateHttp = false): boolean {
   }
   if (parsed.protocol === 'https:') return true
   if (parsed.protocol !== 'http:') return false
-  return ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname) || (privateHttp && privateAddress(parsed.hostname))
-}
-
-/** An IP literal in 10/8, 172.16/12, 192.168/16, 100.64/10 (Tailscale and other CGNAT) or fc00::/7. */
-function privateAddress(host: string): boolean {
-  if (/^\[f[cd]/i.test(host)) return true
-  const octets = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host)
-  if (!octets) return false
-  const [a, b] = [Number(octets[1]), Number(octets[2])]
-  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127)
+  return allowHttp || ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
 }
 
 /** The classifier in jeff whose questions make the gate. */

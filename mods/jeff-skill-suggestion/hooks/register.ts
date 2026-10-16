@@ -160,7 +160,7 @@ export const register: Register = (on, options) => {
   let displayToId: Map<string, string> | null = null
 
   // Options win over the environment, which is where the jeff CLI reads them.
-  let jeff: { url: string; adminUrl: string; apiKey: string; privateHttp: boolean } | null = null
+  let jeff: { url: string; adminUrl: string; apiKey: string; allowHttp: boolean } | null = null
   // `skill-gate` as jeff holds it, read once per session once it answers.
   let gate: Gate | null = null
 
@@ -182,10 +182,10 @@ export const register: Register = (on, options) => {
         url: baseUrl(text('url', (await $.env.get('JEFF_URL')) || DEFAULT_URL)),
         adminUrl: baseUrl(text('adminUrl', (await $.env.get('JEFF_ADMIN_URL')) || DEFAULT_ADMIN_URL)),
         apiKey: text('apiKey', (await $.env.get('JEFF_API_KEY')) ?? ''),
-        privateHttp: flag('allowPrivateHttp', false) || (await $.env.get('JEFF_ALLOW_PRIVATE_HTTP')) === '1',
+        allowHttp: flag('allowHttp', false) || (await $.env.get('JEFF_ALLOW_HTTP')) === '1',
       }
     }
-    const { url, adminUrl, apiKey, privateHttp } = jeff
+    const { url, adminUrl, apiKey, allowHttp } = jeff
 
     // Notifications and peer messages are not tasks; a typed `/name` already
     // names its skill. Neither gets a suggestion.
@@ -204,13 +204,13 @@ export const register: Register = (on, options) => {
     /** The key for `target`, or none when it would cross the network in plain text. */
     const sendKey = (target: string) => {
       if (!apiKey || keySafe(target)) return apiKey
-      if (keySafe(target, privateHttp)) {
-        once('private-http', `sending JEFF_API_KEY to ${new URL(target).origin} over plain http`)
+      if (keySafe(target, allowHttp)) {
+        once('plain-http', `sending JEFF_API_KEY to ${new URL(target).origin} over plain http`)
         return apiKey
       }
       once(
         'insecure',
-        `not sending JEFF_API_KEY to ${new URL(target).origin}: use https, http on localhost, or JEFF_ALLOW_PRIVATE_HTTP=1 for a private address`,
+        `not sending JEFF_API_KEY to ${new URL(target).origin}: use https, http on localhost, or JEFF_ALLOW_HTTP=1`,
       )
       return ''
     }

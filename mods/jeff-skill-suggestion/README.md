@@ -29,17 +29,17 @@ Set an option in the mod's settings under `/plugin`. Set a variable in the envir
 | `url` | `JEFF_URL` | `http://127.0.0.1:8080` | The jeff API the mod asks. |
 | `adminUrl` | `JEFF_ADMIN_URL` | `http://127.0.0.1:8081` | The jeff admin page, where the mod saves `skill-gate` once. |
 | `apiKey` | `JEFF_API_KEY` | none | The key the mod sends once jeff has access keys. Saving `skill-gate` needs an admin key. Asking needs only a client key. |
-| `allowPrivateHttp` | `JEFF_ALLOW_PRIVATE_HTTP=1` | off | Sends the key over plain http to a private IP address. Either the option or the variable turns it on. |
+| `allowHttp` | `JEFF_ALLOW_HTTP=1` | off | Sends the key over plain http to any address. Either the option or the variable turns it on. |
 
 The mod sends the key over https, or over plain http to this machine (`127.0.0.1`, `localhost`, `[::1]`). To any other http address it sends no key, and a jeff with keys refuses the request.
 
-`allowPrivateHttp` adds the private ranges `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (Tailscale) and `fc00::/7`. No public certificate authority certifies such an address, so a home network has no easy https. The key travels in plain text, and any device on that network can read it. Turn it on only for a network you trust. Public addresses and host names always need https.
+With `allowHttp` on, the key travels in plain text, and anyone on the network path can read it and use it. Turn it on only for a network you trust, such as your home network or Tailscale. Over the internet, use https. The mod logs a warning the first time it sends the key over plain http.
 
 ### Connect to jeff on another machine
 
 - **Same machine.** Nothing to set.
-- **A PC on your home network.** On the PC, run `jeff keys create --name laptop --role client` and `jeff serve --api 0.0.0.0:8080`, and allow port 8080 in its firewall. On the laptop, set `JEFF_URL=http://<pc-address>:8080`, `JEFF_API_KEY=<the key>` and `JEFF_ALLOW_PRIVATE_HTTP=1`.
-- **A remote server.** Put https in front of jeff, for example Caddy with a domain name, and set `JEFF_URL=https://<domain>` and `JEFF_API_KEY`. Or join both machines to Tailscale and use the server's `100.x` address with `JEFF_ALLOW_PRIVATE_HTTP=1`.
+- **A PC on your home network.** On the PC, run `jeff keys create --name laptop --role client` and `jeff serve --api 0.0.0.0:8080`, and allow port 8080 in its firewall. On the laptop, set `JEFF_URL=http://<pc-address>:8080`, `JEFF_API_KEY=<the key>` and `JEFF_ALLOW_HTTP=1`.
+- **A remote server.** Put https in front of jeff, for example Caddy with a domain name, and set `JEFF_URL=https://<domain>` and `JEFF_API_KEY`. Or join both machines to Tailscale and use the server's `100.x` address with `JEFF_ALLOW_HTTP=1`.
 
 Save `skill-gate` once from the machine jeff runs on, where the admin page is reachable. After that the other machines need only `JEFF_URL` and a client key.
 
@@ -71,14 +71,14 @@ gating hook with .catch: prompt.submit
 gating hook with .catch: session.compact
 calls: $.clock.now, $.clock.sleep, $.command.list, $.env.get, $.fs.exists, $.fs.list, $.fs.read, $.http.fetch, $.session.cwd, $.ui.log
 env writes: nothing
-env reads: HOME, JEFF_ADMIN_URL, JEFF_ALLOW_PRIVATE_HTTP, JEFF_API_KEY, JEFF_URL
+env reads: HOME, JEFF_ADMIN_URL, JEFF_ALLOW_HTTP, JEFF_API_KEY, JEFF_URL
 ```
 
 ## Threat model
 
 - **Reads.** The prompt text, the names and descriptions of every command, the SKILL.md of shortlisted skills under the project's and the user's `.claude/`, `~/.claude/plugins/installed_plugins.json`, and `~/.claude/settings.json` for the setup command. A skill or plugin name holding a path separator or `..` is never spliced into a path.
 - **Runs.** No process.
-- **Sends.** To jeff at `url` (default `http://127.0.0.1:8080`): the prompt text, every candidate skill's name and description, and up to `excerptChars` of each shortlisted SKILL.md. jeff forwards them to the model it routes the questions to, which may be a cloud provider. To `adminUrl` (default `http://127.0.0.1:8081`): the three `skill-gate` questions and the classifier, once, when jeff has none. The key goes in the `authorization` header only, and never into a log line. It goes over https, or over plain http to this machine. `allowPrivateHttp` or `JEFF_ALLOW_PRIVATE_HTTP=1` also sends it over plain http to a private address, where anyone on that network can read it.
+- **Sends.** To jeff at `url` (default `http://127.0.0.1:8080`): the prompt text, every candidate skill's name and description, and up to `excerptChars` of each shortlisted SKILL.md. jeff forwards them to the model it routes the questions to, which may be a cloud provider. To `adminUrl` (default `http://127.0.0.1:8081`): the three `skill-gate` questions and the classifier, once, when jeff has none. The key goes in the `authorization` header only, and never into a log line. It goes over https, or over plain http to this machine. `allowHttp` or `JEFF_ALLOW_HTTP=1` also sends it over plain http to any address, where anyone on the path can read it.
 - **Writes.** Nothing to disk itself. The setup command has the model edit `~/.claude/settings.json` and write a backup beside it, each after the user says yes.
 - **Persists.** Nothing: state lives in memory and resets on reload.
 - **Crafted data.** The prompt reaches jeff only as the JSON `state` string. A crafted skill description reaches jeff as a choice criterion and can sway which skill is suggested; the chosen SKILL.md goes to the model as context it is told it may ignore. A crafted jeff answer can pick any skill on the shortlist, never one outside it.

@@ -29,10 +29,10 @@
       "default": "",
       "sensitive": true
     },
-    "allowPrivateHttp": {
+    "allowHttp": {
       "type": "boolean",
-      "title": "Send the key over http on a private network",
-      "description": "Also send the key over plain http to private addresses (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7); anyone on that network can read it. JEFF_ALLOW_PRIVATE_HTTP=1 turns it on too",
+      "title": "Send the key over plain http",
+      "description": "Also send the key over plain http to any address; anyone on the path can read it. JEFF_ALLOW_HTTP=1 turns it on too",
       "default": false
     },
     "inject": {
