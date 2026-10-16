@@ -691,7 +691,8 @@ $("#key-copy").onclick = () => navigator.clipboard.writeText($("#key-value").val
 function keyRow(k, now, last) {
   const li = el("li", "flex flex-wrap items-center gap-x-4 gap-y-1 py-3");
   const main = el("div", "min-w-0 flex-1");
-  main.append(el("div", "font-medium", k.name), el("div", "note font-mono", `${k.prefix}… · ${k.role}`));
+  const mine = (store.get("key") || "").startsWith(k.prefix);
+  main.append(el("div", "font-medium", k.name), el("div", "note font-mono", `${k.prefix}… · ${k.role}${mine ? " · this browser" : ""}`));
   const expired = k.expires_at !== null && k.expires_at <= now;
   const when = el("div", "note text-right tabular-nums");
   when.append(el("div", "", `Created ${shortDate(k.created_at)}`));
@@ -701,8 +702,9 @@ function keyRow(k, now, last) {
   when.append(exp);
   const revoke = el("button", "btn btn-danger", "Revoke");
   revoke.type = "button";
-  revoke.title = last ? "Last key: jeff will accept requests without a key." : "Clients using this key stop working at once.";
-  confirmClick(revoke, "Confirm revoke", async () => {
+  revoke.title = mine ? "This page signs in with this key and loses access at once."
+    : last ? "Last key: jeff will accept requests without a key." : "Clients using this key stop working at once.";
+  confirmClick(revoke, mine ? "Revoke and sign out" : "Confirm revoke", async () => {
     try {
       await api(`/api/keys/${encodeURIComponent(k.id)}`, { method: "DELETE" });
       if ((store.get("key") || "").startsWith(k.prefix)) store.set("key", "");
