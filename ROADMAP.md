@@ -54,7 +54,7 @@ Build on Jeff's existing Jev-compatible discovery and request forwarding, using 
 - [ ] **Audio input.** The same for audio, as its own feature: record which models hear audio, refuse it for the others, and document formats, length and size limits per model. Accept it through the API, a file in the CLI and an upload in the UI.
 - [ ] **Video input.** After images and audio, and only where a model supports it: the heaviest input, with the strictest limits on length and size.
 - [x] **Version in the UI.** Show the running jeff version, as `jeff --version` prints it, in the bottom-left corner of every page.
-- [ ] **Admin page sign-in.** A way to enter a key in a browser that did not create it.
+- [x] **Admin page sign-in.** A way to enter a key in a browser that did not create it.
 - [ ] **Recent unsaved questions.** List questions asked through Try, `jeff ask` or inline `/v1/systemone` maps but not saved, newest first, so a good question can be saved or used as a template in one click instead of typed again.
 - [ ] **Streaming mode.** Deliver each model's answers as they arrive, through the API and `jeff ask`, instead of waiting for the slowest model.
 - [x] **Answer cache.** jeff caches successful answers by provider and exact request body. `cache.entries` and `cache.ttl_secs` in `jeff.json` set the size and lifetime. `x-jeff-cache` reports a hit. `Cache-Control: no-cache` skips the cache.

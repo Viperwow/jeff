@@ -1781,6 +1781,9 @@ enum KeysAction {
         /// `never`, a number of days such as `30d`, or a date `YYYY-MM-DD` (valid through the end of that day, UTC)
         #[arg(long, default_value = "30d")]
         expires: String,
+        /// The admin page address in the sign-in link printed for an admin key
+        #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url)]
+        admin_url: String,
     },
     /// Revoke a key by its id
     Revoke { id: String },
@@ -1836,6 +1839,11 @@ fn parse_addr(s: &str) -> Result<String, String> {
     s.parse::<std::net::SocketAddr>()
         .map(|_| s.to_owned())
         .map_err(|_| format!("'{s}' is not ADDR:PORT or PORT"))
+}
+
+/// The key rides in the fragment, which the browser never sends to the server.
+fn sign_in_link(admin_url: &str, key: &str) -> String {
+    format!("{}/#key={key}", admin_url.trim_end_matches('/'))
 }
 
 fn parse_url(s: &str) -> Result<String, String> {
@@ -2383,6 +2391,7 @@ fn run_keys(action: KeysAction, path: &str) {
             name,
             role,
             expires,
+            admin_url,
         } => {
             let name = name.trim().to_owned();
             if name.is_empty() || name.chars().count() > 64 {
@@ -2404,6 +2413,12 @@ fn run_keys(action: KeysAction, path: &str) {
                 "id {}; this key is shown only once, store it now",
                 record.id
             );
+            if role == keys::Role::Admin {
+                eprintln!(
+                    "sign in to the admin page: {}",
+                    sign_in_link(&admin_url, &key)
+                );
+            }
         }
         KeysAction::Revoke { id } => {
             let before = config.keys.clone();
@@ -2731,6 +2746,18 @@ mod tests {
             "--description",
             "d"
         ]));
+    }
+
+    #[test]
+    fn the_sign_in_link_carries_the_key_in_the_fragment() {
+        assert_eq!(
+            sign_in_link("http://127.0.0.1:8081", "jeff_k"),
+            "http://127.0.0.1:8081/#key=jeff_k"
+        );
+        assert_eq!(
+            sign_in_link("https://admin.example/", "jeff_k"),
+            "https://admin.example/#key=jeff_k"
+        );
     }
 
     fn test_app(config_path: &str) -> App {

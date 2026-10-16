@@ -18,7 +18,13 @@
   </nav>
 
   <main class="min-w-0 flex-1 lg:flex lg:h-screen lg:flex-col">
-    <p id="auth-error" role="alert" class="m-6 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-red-800 max-sm:m-4 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200" hidden></p>
+    <div id="auth-error" role="alert" class="m-6 flex flex-wrap items-center gap-3 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-red-800 max-sm:m-4 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200" hidden>
+      <p id="auth-error-text" class="min-w-0 flex-1"></p>
+      <form id="auth-form" class="flex flex-wrap items-center gap-2">
+        <input id="auth-key" type="password" class="control w-72 font-mono" placeholder="jeff_…" autocomplete="off" aria-label="Admin key" required>
+        <button type="submit" class="btn">Use key</button>
+      </form>
+    </div>
     <div id="config-banner" role="status" class="m-6 flex flex-wrap items-center gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-2 text-amber-900 max-sm:m-4 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200" hidden>
       <p class="min-w-0 flex-1"><strong id="config-problems"></strong> jeff keeps running on the previous config. Log: <code id="config-log">jeff.log</code></p>
       <button id="config-recheck" type="button" class="btn">Recheck</button>
