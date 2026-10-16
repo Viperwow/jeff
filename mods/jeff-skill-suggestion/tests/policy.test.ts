@@ -307,6 +307,16 @@ disable-model-invocation: ${value}
     expect(keySafe('not a url')).toBe(false)
   })
 
+  test('plain http to a private address carries the key only when allowed', () => {
+    const allowed = ['http://192.168.1.20:8080', 'http://10.0.0.5', 'http://172.16.0.1', 'http://172.31.255.1', 'http://100.101.102.103', 'http://[fd7a:115c::1]']
+    for (const url of allowed) {
+      expect(keySafe(url)).toBe(false)
+      expect(keySafe(url, true)).toBe(true)
+    }
+    const refused = ['http://203.0.113.7:8080', 'http://172.32.0.1', 'http://100.128.0.1', 'http://192.169.0.1', 'http://jeff.example', 'http://192.168.1.20.evil.example', 'http://[2001:db8::1]']
+    for (const url of refused) expect(keySafe(url, true)).toBe(false)
+  })
+
   test('the suggestion block names the skill, and says "nothing" only while the listing is in place', () => {
     const hidden = suggestionBlock(skills[1] as Skill, true)
     expect(hidden).toContain('Relevant to the current request: pptx-author. Ignore this if it does not fit')

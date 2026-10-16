@@ -30,14 +30,14 @@ gating hook with .catch: prompt.submit
 gating hook with .catch: session.compact
 calls: $.clock.now, $.clock.sleep, $.command.list, $.env.get, $.fs.exists, $.fs.list, $.fs.read, $.http.fetch, $.session.cwd, $.ui.log
 env writes: nothing
-env reads: HOME, JEFF_ADMIN_URL, JEFF_API_KEY, JEFF_URL
+env reads: HOME, JEFF_ADMIN_URL, JEFF_ALLOW_PRIVATE_HTTP, JEFF_API_KEY, JEFF_URL
 ```
 
 ## Threat model
 
 - **Reads.** The prompt text, the names and descriptions of every command, the SKILL.md of shortlisted skills under the project's and the user's `.claude/`, `~/.claude/plugins/installed_plugins.json`, and `~/.claude/settings.json` for the setup command. A skill or plugin name holding a path separator or `..` is never spliced into a path.
 - **Runs.** No process.
-- **Sends.** To jeff at `url` (default `http://127.0.0.1:8080`): the prompt text, every candidate skill's name and description, and up to `excerptChars` of each shortlisted SKILL.md. jeff forwards them to the model it routes the questions to, which may be a cloud provider. To `adminUrl` (default `http://127.0.0.1:8081`): the three `skill-gate` questions and the classifier, once, when jeff has none. The key goes in the `authorization` header only, and never into a log line.
+- **Sends.** To jeff at `url` (default `http://127.0.0.1:8080`): the prompt text, every candidate skill's name and description, and up to `excerptChars` of each shortlisted SKILL.md. jeff forwards them to the model it routes the questions to, which may be a cloud provider. To `adminUrl` (default `http://127.0.0.1:8081`): the three `skill-gate` questions and the classifier, once, when jeff has none. The key goes in the `authorization` header only, and never into a log line. It goes over https, or over plain http to this machine. `allowPrivateHttp` or `JEFF_ALLOW_PRIVATE_HTTP=1` also sends it over plain http to a private address, where anyone on that network can read it.
 - **Writes.** Nothing to disk itself. The setup command has the model edit `~/.claude/settings.json` and write a backup beside it, each after the user says yes.
 - **Persists.** Nothing: state lives in memory and resets on reload.
 - **Crafted data.** The prompt reaches jeff only as the JSON `state` string. A crafted skill description reaches jeff as a choice criterion and can sway which skill is suggested; the chosen SKILL.md goes to the model as context it is told it may ignore. A crafted jeff answer can pick any skill on the shortlist, never one outside it.

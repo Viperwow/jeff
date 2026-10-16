@@ -29,6 +29,12 @@
       "default": "",
       "sensitive": true
     },
+    "allowPrivateHttp": {
+      "type": "boolean",
+      "title": "Send the key over http on a private network",
+      "description": "Also send the key over plain http to private addresses (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7); anyone on that network can read it. JEFF_ALLOW_PRIVATE_HTTP=1 turns it on too",
+      "default": false
+    },
     "inject": {
       "type": "string",
       "title": "How the chosen skill reaches the model",
