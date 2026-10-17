@@ -264,7 +264,7 @@ Signing in starts a session in two halves. One half sits in an HttpOnly cookie, 
 
 jeff keeps sessions in `sessions.json`, next to the config, so a restart keeps every browser signed in. The file holds only the SHA-256 of both halves and of the key. Deleting an entry from the file signs that browser out without a restart. If the file breaks, jeff keeps the sessions it read before, refuses new sign-ins, and logs `sessions_invalid` to `jeff.log` until the file is fixed or deleted.
 
-Revoking the key signs the browser out at once. **Sign out**, at the bottom of the menu, ends the session. On **Access keys**, the key this browser signs in with reads **this browser**, and revoking it asks for **Revoke and sign out**.
+Revoking the key signs the browser out at once. **Sign out**, at the bottom of the menu, ends the session. On **Access keys**, the key this browser signs in with carries a **This browser** chip, and revoking it asks for **Revoke and sign out**.
 
 Keys that never expire can also come from the environment. They are admin keys, and each must have at least 32 characters:
 
