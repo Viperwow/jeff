@@ -690,7 +690,10 @@ function keyRow(k, now, last) {
   const li = el("li", "flex flex-wrap items-center gap-x-4 gap-y-1 py-3");
   const main = el("div", "min-w-0 flex-1");
   const mine = k.id === currentKeyId;
-  main.append(el("div", "font-medium", k.name), el("div", "note font-mono", `${k.prefix}… · ${k.role}${mine ? " · this browser" : ""}`));
+  const title = el("div", "flex flex-wrap items-center gap-2");
+  title.append(el("span", "font-medium", k.name));
+  if (mine) title.append(el("span", "rounded-full border border-green-600/50 px-2 py-px text-[11px] font-medium text-green-700 dark:border-green-400/50 dark:text-green-300", "This browser"));
+  main.append(title, el("div", "note font-mono", `${k.prefix}… · ${k.role}`));
   const expired = k.expires_at !== null && k.expires_at <= now;
   const when = el("div", "note text-right tabular-nums");
   when.append(el("div", "", `Created ${shortDate(k.created_at)}`));
