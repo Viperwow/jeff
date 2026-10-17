@@ -73,7 +73,9 @@ impl Sessions {
                 }
             }
             Err(e) => {
-                let line = format!("{file}: {e}; jeff keeps the sessions read before");
+                let line = format!(
+                    "{file}: {e}. jeff keeps the sessions read before. Fix or delete the file."
+                );
                 eprintln!("error[sessions_invalid]: {line}");
                 log::write(&self.config_path, "sessions_invalid", &line, &[]);
                 self.problem = Some(format!("{file}: {e}"));
@@ -99,6 +101,7 @@ impl Sessions {
         known: impl Fn(&str) -> bool,
     ) -> Result<(String, String), String> {
         self.refresh();
+        let before = self.by_digest.clone();
         let (cookie, header) = (keys::random_hex(32), keys::random_hex(32));
         self.by_digest.insert(
             digest(&cookie, &header),
@@ -110,27 +113,35 @@ impl Sessions {
         );
         self.by_digest
             .retain(|_, s| s.expires_at > now && known(&s.key_sha256));
-        self.save()?;
+        self.save(before)?;
         Ok((cookie, header))
     }
 
     pub fn remove(&mut self, cookie: &str, header: &str) -> Result<(), String> {
         self.refresh();
+        let before = self.by_digest.clone();
         if self.by_digest.remove(&digest(cookie, header)).is_none() {
             return Ok(());
         }
-        self.save()
+        self.save(before)
     }
 
-    fn save(&mut self) -> Result<(), String> {
-        if let Some(problem) = &self.problem {
-            return Err(format!("{problem}; fix or delete the file"));
-        }
+    /// Writes the sessions, or restores `before` and logs the cause, so memory never holds what the file lacks.
+    fn save(&mut self, before: HashMap<String, Session>) -> Result<(), String> {
         let path = self.path.to_string_lossy().into_owned();
-        write_private(
-            &path,
-            &serde_json::to_string_pretty(&self.by_digest).unwrap(),
-        )?;
+        let written = match &self.problem {
+            Some(problem) => Err(format!("{problem}. Fix or delete the file.")),
+            None => write_private(
+                &path,
+                &serde_json::to_string_pretty(&self.by_digest).unwrap(),
+            ),
+        };
+        if let Err(e) = written {
+            self.by_digest = before;
+            eprintln!("error[sessions_not_saved]: {e}");
+            log::write(&self.config_path, "sessions_not_saved", &e, &[]);
+            return Err(e);
+        }
         self.mtime = modified(&path);
         Ok(())
     }
@@ -181,6 +192,20 @@ mod tests {
         assert_eq!(s.find(&cookie, &header, 101), None);
         assert!(s.create("k1", 101, |_| true).is_err());
         assert_eq!(fs::read_to_string(path(&config)).unwrap(), "{ broken");
+    }
+
+    #[test]
+    fn a_failed_save_keeps_memory_as_the_file_is() {
+        let config = temp("rollback");
+        let mut s = Sessions::new(&config);
+        let (cookie, header) = s.create("k1", 100, |_| true).unwrap();
+        s.mtime = Some(SystemTime::UNIX_EPOCH);
+        let text = fs::read_to_string(path(&config)).unwrap();
+        fs::write(path(&config), format!("{text} broken")).unwrap();
+        assert!(s.remove(&cookie, &header).is_err());
+        assert_eq!(s.find(&cookie, &header, 101).as_deref(), Some("k1"));
+        assert!(s.create("k1", 101, |_| true).is_err());
+        assert_eq!(s.by_digest.len(), 1);
     }
 
     #[test]

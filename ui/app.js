@@ -1610,7 +1610,12 @@ $("#sign-in-form").onsubmit = (e) => {
 };
 
 $("#sign-out").onclick = async () => {
-  await fetch("/api/session", { method: "DELETE", headers: sessionHeader() }).catch(() => {});
+  try {
+    await api("/api/session", { method: "DELETE" });
+  } catch (e) {
+    alert(e.message);
+    return;
+  }
   try { localStorage.removeItem("jeff.session"); } catch {}
   location.reload();
 };

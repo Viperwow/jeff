@@ -1219,7 +1219,7 @@ async fn sign_in(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     let Some(key) = bearer(&headers) else {
         return error(
             StatusCode::UNAUTHORIZED,
-            "sign in with an admin key: Authorization: Bearer <key>",
+            "No admin key in the request. Send it as Authorization: Bearer <key>.",
         );
     };
     let known: Vec<String> = app
@@ -1238,12 +1238,8 @@ async fn sign_in(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
         .create(&keys::sha256(key), keys::now(), |k| {
             known.iter().any(|s| s == k)
         });
-    let (cookie, half) = match created {
-        Ok(halves) => halves,
-        Err(e) => {
-            eprintln!("{e}");
-            return error(StatusCode::INTERNAL_SERVER_ERROR, e);
-        }
+    let Ok((cookie, half)) = created else {
+        return sessions_not_saved();
     };
     // Behind a TLS proxy jeff sees plain http, so the browser's Origin tells whether the page is on https.
     let secure = headers
@@ -1262,12 +1258,20 @@ async fn sign_in(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
         .into_response()
 }
 
-/// Clears the cookie even when the file cannot be written: the browser then holds no half of the session.
+/// The cause is in the console and `jeff.log`; the client never sees the server's path.
+fn sessions_not_saved() -> Response {
+    error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Couldn't save sessions.json. Check jeff.log for the cause.",
+    )
+}
+
+/// Keeps the cookie when the file cannot be written, so a session left on disk is never hidden from its browser.
 async fn sign_out(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     if let Some((cookie, header)) = session_halves(&headers)
-        && let Err(e) = app.sessions.lock().unwrap().remove(cookie, header)
+        && app.sessions.lock().unwrap().remove(cookie, header).is_err()
     {
-        eprintln!("{e}");
+        return sessions_not_saved();
     }
     (
         StatusCode::NO_CONTENT,
@@ -2963,6 +2967,23 @@ mod tests {
             .unwrap()
             .find(&cookie_half, &header_half, keys::now());
         assert_eq!(found, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_session_save_names_no_server_path() {
+        let dir = env::temp_dir().join(format!("jeff-test-no-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("sessions.json"), "{ broken").unwrap();
+        let app = test_app(dir.join("config.json").to_str().unwrap());
+        let (key, record) = keys::generate("me", keys::Role::Admin, None);
+        app.config.write().await.keys = vec![record];
+        let r = sign_in(State(Arc::new(app)), bearer_headers(&key, None)).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body_of(r).await["error"],
+            "Couldn't save sessions.json. Check jeff.log for the cause."
+        );
     }
 
     #[tokio::test]
