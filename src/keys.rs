@@ -148,22 +148,24 @@ pub fn parse_expiry(s: &str, now: u64) -> Result<Option<u64>, String> {
     let at = if let Some(days) = s.strip_suffix('d') {
         let days: u64 = days
             .parse()
-            .map_err(|_| format!("'{s}': expected a number of days such as 30d"))?;
+            .map_err(|_| format!("'{s}' is not a number of days. Use a form such as 30d."))?;
         days.checked_mul(86_400)
             .and_then(|secs| now.checked_add(secs))
-            .ok_or_else(|| format!("'{s}': too many days"))?
+            .ok_or_else(|| format!("'{s}' is too many days. Use fewer days or never."))?
     } else {
         let parts: Vec<i64> = s.split('-').map(|p| p.parse().unwrap_or(-1)).collect();
         let [y, m, d] = parts[..] else {
-            return Err(format!("'{s}': expected never, 30d or YYYY-MM-DD"));
+            return Err(format!(
+                "'{s}' is not an expiry. Use never, 30d or YYYY-MM-DD."
+            ));
         };
         if !(1..=12).contains(&m) || !(1..=31).contains(&d) || y < 1970 {
-            return Err(format!("'{s}' is not a valid date"));
+            return Err(format!("'{s}' is not a valid date. Use YYYY-MM-DD."));
         }
         (days_from_civil(y, m, d) + 1) as u64 * 86_400 - 1
     };
     if at <= now {
-        return Err(format!("'{s}' is already in the past"));
+        return Err(format!("'{s}' is in the past. Pick a future date."));
     }
     Ok(Some(at))
 }

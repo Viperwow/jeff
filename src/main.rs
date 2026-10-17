@@ -312,10 +312,12 @@ fn check_ip(ip: IpAddr, allow_private: bool) -> Result<(), String> {
         }
     };
     if forbidden {
-        Err(format!("{ip} is a link-local or metadata address"))
+        Err(format!(
+            "{ip} is a link-local or metadata address. Use the provider's public address."
+        ))
     } else if private && !allow_private {
         Err(format!(
-            "{ip} is in a private network; start jeff with --allow-private-providers"
+            "{ip} is in a private network. Start jeff with --allow-private-providers to allow it."
         ))
     } else {
         Ok(())
@@ -325,16 +327,18 @@ fn check_ip(ip: IpAddr, allow_private: bool) -> Result<(), String> {
 fn parse_provider_url(url: &str, allow_private: bool) -> Result<reqwest::Url, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("URL '{url}': {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("URL must start with http:// or https://".into());
+        return Err(
+            "The URL does not start with http:// or https://. Start it with https://.".into(),
+        );
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("put the provider key in the key field, not in the URL".into());
+        return Err("The URL holds a provider key. Put the key in the key field instead.".into());
     }
     match parsed.host() {
         Some(url::Host::Ipv4(ip)) => check_ip(ip.into(), allow_private)?,
         Some(url::Host::Ipv6(ip)) => check_ip(ip.into(), allow_private)?,
         Some(url::Host::Domain(_)) => {}
-        None => return Err("URL has no host".into()),
+        None => return Err("The URL has no host. Add the provider's host name.".into()),
     }
     Ok(parsed)
 }
@@ -372,7 +376,7 @@ impl App {
             // A deleted file leaves no hand edits to protect; the next save writes the config back.
             if !std::mem::take(&mut *self.problems.lock().unwrap()).is_empty() {
                 let line = format!(
-                    "{} removed; the next save writes it again",
+                    "{} was removed. The next save writes it again.",
                     self.config_path
                 );
                 eprintln!("{line}");
@@ -388,7 +392,7 @@ impl App {
                     *self.config.write().await = config;
                     let was = std::mem::take(&mut *self.problems.lock().unwrap());
                     if !was.is_empty() {
-                        let line = format!("{path} fixed; config reloaded");
+                        let line = format!("{path} is fixed. jeff reloaded the config.");
                         eprintln!("{line}");
                         log::write(path, "config_fixed", &line, &[]);
                     }
@@ -396,12 +400,12 @@ impl App {
                 Err(problems) => {
                     let n = problems.len();
                     let summary = format!(
-                        "{path}: {}; jeff keeps the previous config",
+                        "{path}: {}. jeff keeps the previous config until you fix the file.",
                         count_problems(n)
                     );
                     log::write(path, "config_invalid", &summary, &problems);
                     eprintln!(
-                        "error[config_invalid]: {}; jeff keeps the previous config",
+                        "error[config_invalid]: {}. jeff keeps the previous config until you fix the file.",
                         problems_text(path, n)
                     );
                     *self.problems.lock().unwrap() = problems;
@@ -425,19 +429,21 @@ impl App {
                     StatusCode::CONFLICT,
                     Json(json!({
                         "code": "config_changed",
-                        "error": format!("{} changed on disk since jeff read it; try again", file_name(path)),
+                        "error": format!("{} changed on disk since jeff read it. Reload and try again.", file_name(path)),
                     })),
                 )
                     .into_response(),
             ));
         }
         save_config(path, config).map_err(|e| {
-            eprintln!("{e}");
+            eprintln!("error[config_not_saved]: {e}");
+            let logged = log::write(path, "config_not_saved", &e, &[]);
             Box::new(error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!(
-                    "could not save {}; the server console has the cause",
-                    file_name(path)
+                    "Couldn't save {}. Check {} for the cause.",
+                    file_name(path),
+                    log::cause_in(logged)
                 ),
             ))
         })?;
@@ -515,7 +521,7 @@ fn config_invalid(config_path: &str, n: usize) -> Response {
         StatusCode::CONFLICT,
         Json(json!({
             "code": "config_invalid",
-            "error": format!("{}; fix it before changing questions or classifiers", problems_text(config_path, n)),
+            "error": format!("{}. Fix it before changing questions or classifiers.", problems_text(config_path, n)),
             "log": "jeff.log",
         })),
     )
@@ -600,7 +606,7 @@ async fn find_model(
         (
             StatusCode::BAD_REQUEST,
             format!(
-                "unknown model '{model}': use provider/model, for example {}",
+                "Unknown model '{model}'. Use provider/model, for example {}.",
                 config.default_model
             ),
         )
@@ -656,7 +662,10 @@ async fn forward(
     let late = || {
         (
             StatusCode::GATEWAY_TIMEOUT,
-            format!("provider '{}' did not answer within {max}s", p.id),
+            format!(
+                "Provider '{}' did not answer within {max}s. Try again, or raise its max_time.",
+                p.id
+            ),
         )
     };
     // Clients get the provider id only; the provider URL and the transport error stay in the server log.
@@ -677,7 +686,10 @@ async fn forward(
     let bytes = read_capped(resp, total).await.map_err(|e| match e {
         ReadError::TooLarge => (
             StatusCode::BAD_GATEWAY,
-            format!("the answer is larger than {} MB", MAX_UPSTREAM_BYTES >> 20),
+            format!(
+                "The answer is larger than {} MB. Ask fewer questions per request.",
+                MAX_UPSTREAM_BYTES >> 20
+            ),
         ),
         ReadError::Failed(e) if e.is_timeout() => late(),
         ReadError::Failed(e) => {
@@ -748,7 +760,7 @@ fn batch(resolved: Vec<Batch>) -> Vec<Batch> {
 fn unreadable(provider: &str) -> (StatusCode, String) {
     (
         StatusCode::BAD_GATEWAY,
-        format!("provider '{provider}' sent an unreadable response"),
+        format!("Provider '{provider}' sent an unreadable response. Check jeff.log for the cause."),
     )
 }
 
@@ -788,7 +800,7 @@ async fn answer(
     let Some(obj) = body.as_object_mut() else {
         return Err(error(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "body must be a JSON object",
+            "The request body is not a JSON object. Send a JSON object.",
         )
         .into());
     };
@@ -858,7 +870,9 @@ async fn answer(
 
 /// The classifier's questions replace any `questions` the client sent.
 fn call_body(mut body: Value, questions: Value) -> Result<Value, String> {
-    let obj = body.as_object_mut().ok_or("body must be a JSON object")?;
+    let obj = body
+        .as_object_mut()
+        .ok_or("The request body is not a JSON object. Send a JSON object.")?;
     obj.insert("questions".into(), questions);
     Ok(body)
 }
@@ -890,7 +904,7 @@ async fn provider_models(app: &App, p: &Provider) -> Value {
             .await
             .unwrap_or(false)
     {
-        return json!({ "id": p.id, "name": p.name, "ok": false, "warning": "downloading the model", "models": fallback() });
+        return json!({ "id": p.id, "name": p.name, "ok": false, "warning": "Downloading the model. Wait until it finishes.", "models": fallback() });
     }
     // clm-serve lists {"models": [{"name"}]}; OpenAI-style servers list {"data": [{"id"}]}.
     let names: Vec<Value> = listed
@@ -915,7 +929,7 @@ async fn provider_models(app: &App, p: &Provider) -> Value {
         && let Some(stack) = stack
         && !model_loaded(app, p, stack).await
     {
-        out["warning"] = json!("model is loading");
+        out["warning"] = json!("The model is loading. Wait a moment.");
     }
     out
 }
@@ -1029,7 +1043,7 @@ async fn require_key(
         if blocked {
             return error(
                 StatusCode::TOO_MANY_REQUESTS,
-                "too many failed key checks; try again in a minute",
+                "Too many failed key checks. Try again in a minute.",
             );
         }
         let auth = req
@@ -1051,7 +1065,7 @@ async fn require_key(
         {
             return error(
                 StatusCode::FORBIDDEN,
-                "this is a client key; managing jeff needs an admin key",
+                "This is a client key. Use an admin key to manage jeff.",
             );
         }
         if role.is_none() {
@@ -1073,7 +1087,7 @@ async fn require_key(
             );
             return error(
                 StatusCode::UNAUTHORIZED,
-                "a valid jeff API key is required: Authorization: Bearer <key>",
+                "No valid jeff key in the request. Send it as Authorization: Bearer <key>.",
             );
         }
     }
@@ -1102,7 +1116,7 @@ async fn check_host(State(app): State<Arc<App>>, req: Request, next: Next) -> Re
     if !ok {
         return error(
             StatusCode::MISDIRECTED_REQUEST,
-            format!("host '{name}' is not allowed; start jeff with --allowed-host {name}"),
+            format!("Host '{name}' is not allowed. Start jeff with --allowed-host {name}."),
         );
     }
     // A page on any site can send a plain POST to 127.0.0.1 without a CORS preflight; browsers mark it
@@ -1115,7 +1129,10 @@ async fn check_host(State(app): State<Arc<App>>, req: Request, next: Next) -> Re
         && req.method() != Method::HEAD
         && origin.is_some_and(|o| o.split_once("://").map(|(_, h)| h) != Some(host))
     {
-        return error(StatusCode::FORBIDDEN, "cross-site requests are not allowed");
+        return error(
+            StatusCode::FORBIDDEN,
+            "Cross-site request refused. Open the admin page directly.",
+        );
     }
     next.run(req).await
 }
@@ -1238,8 +1255,9 @@ async fn sign_in(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
         .create(&keys::sha256(key), keys::now(), |k| {
             known.iter().any(|s| s == k)
         });
-    let Ok((cookie, half)) = created else {
-        return sessions_not_saved();
+    let (cookie, half) = match created {
+        Ok(halves) => halves,
+        Err(cause_in) => return sessions_not_saved(cause_in),
     };
     // Behind a TLS proxy jeff sees plain http, so the browser's Origin tells whether the page is on https.
     let secure = headers
@@ -1258,20 +1276,20 @@ async fn sign_in(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
         .into_response()
 }
 
-/// The cause is in the console and `jeff.log`; the client never sees the server's path.
-fn sessions_not_saved() -> Response {
+/// The client never sees the server's path.
+fn sessions_not_saved(cause_in: &str) -> Response {
     error(
         StatusCode::INTERNAL_SERVER_ERROR,
-        "Couldn't save sessions.json. Check jeff.log for the cause.",
+        format!("Couldn't save sessions.json. Check {cause_in} for the cause."),
     )
 }
 
 /// Keeps the cookie when the file cannot be written, so a session left on disk is never hidden from its browser.
 async fn sign_out(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     if let Some((cookie, header)) = session_halves(&headers)
-        && app.sessions.lock().unwrap().remove(cookie, header).is_err()
+        && let Err(cause_in) = app.sessions.lock().unwrap().remove(cookie, header)
     {
-        return sessions_not_saved();
+        return sessions_not_saved(cause_in);
     }
     (
         StatusCode::NO_CONTENT,
@@ -1294,16 +1312,22 @@ struct KeyInput {
 async fn create_key(State(app): State<Arc<App>>, Json(input): Json<KeyInput>) -> Response {
     let name = input.name.trim();
     if name.is_empty() || name.chars().count() > 64 {
-        return error(StatusCode::BAD_REQUEST, "name must be 1 to 64 characters");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The name is empty or longer than 64 characters. Use 1 to 64 characters.",
+        );
     }
     if input.expires_at.is_some_and(|t| t <= keys::now()) {
-        return error(StatusCode::BAD_REQUEST, "expiry must be in the future");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The expiry is in the past. Pick a future date.",
+        );
     }
     let mut config = app.config.write().await;
     if input.role == keys::Role::Client && !app.has_admin(&config.keys) {
         return error(
             StatusCode::BAD_REQUEST,
-            "create an admin key first, or this page loses access once the first key exists",
+            "The first key must be an admin key. Create an admin key first, or this page loses access.",
         );
     }
     let (key, record) = keys::generate(name, input.role, input.expires_at);
@@ -1323,12 +1347,15 @@ async fn revoke_key(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
     let mut next = config.clone();
     next.keys.retain(|k| k.id != id);
     if next.keys.len() == config.keys.len() {
-        return error(StatusCode::NOT_FOUND, format!("no key with id '{id}'"));
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("No key with id '{id}'. Check the id with jeff keys list."),
+        );
     }
     if !next.keys.is_empty() && app.has_admin(&config.keys) && !app.has_admin(&next.keys) {
         return error(
             StatusCode::CONFLICT,
-            "this is the last admin key; create another admin key or revoke the client keys first",
+            "This is the last admin key. Create another admin key or revoke the client keys first.",
         );
     }
     if let Err(r) = app.save(&next).await {
@@ -1345,7 +1372,10 @@ async fn list_questions(State(app): State<Arc<App>>) -> Json<questions::Question
 async fn get_question(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
     match app.config.read().await.questions.get(&key) {
         Some(q) => Json(q.clone()).into_response(),
-        None => error(StatusCode::NOT_FOUND, format!("unknown question '{key}'")),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("No question '{key}'. Check the key or create the question first."),
+        ),
     }
 }
 
@@ -1401,7 +1431,10 @@ async fn list_classifiers(State(app): State<Arc<App>>) -> Json<classifiers::Clas
 }
 
 fn unknown_classifier(key: &str) -> Response {
-    error(StatusCode::NOT_FOUND, format!("unknown classifier '{key}'"))
+    error(
+        StatusCode::NOT_FOUND,
+        format!("No classifier '{key}'. Check the key or create the classifier first."),
+    )
 }
 
 async fn get_classifier(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
@@ -1439,10 +1472,12 @@ async fn try_classifier(
 
 /// Splits `{"classifier": {...}, ...}` into the classifier and the rest of the call body.
 fn take_draft(mut body: Value) -> Result<(Value, Value), String> {
-    let obj = body.as_object_mut().ok_or("body must be a JSON object")?;
+    let obj = body
+        .as_object_mut()
+        .ok_or("The request body is not a JSON object. Send a JSON object.")?;
     match obj.remove("classifier") {
         Some(c @ Value::Object(_)) => Ok((c, body)),
-        _ => Err("classifier must be an object with questions".into()),
+        _ => Err("The classifier is not an object. Send an object with a questions array.".into()),
     }
 }
 
@@ -1550,10 +1585,14 @@ fn build_config(
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         {
-            return Err(format!("provider id '{id}' must use a-z, 0-9 and '-'"));
+            return Err(format!(
+                "Provider id '{id}' has characters other than a-z, 0-9 and '-'. Rename it."
+            ));
         }
         if providers.iter().any(|q: &Provider| q.id == id) {
-            return Err(format!("provider id '{id}' is used twice"));
+            return Err(format!(
+                "Provider id '{id}' is used twice. Rename one of them."
+            ));
         }
         let url = p.url.trim().to_owned();
         let parsed = parse_provider_url(&url, allow_private).map_err(|e| format!("{id}: {e}"))?;
@@ -1568,7 +1607,7 @@ fn build_config(
         };
         if key.is_some() && parsed.scheme() == "http" && !is_loopback_url(&parsed) {
             return Err(format!(
-                "{id}: use https:// so the provider key is not sent in clear text"
+                "Provider '{id}' sends its key over http://. Use https://."
             ));
         }
         let models = p
@@ -1582,7 +1621,7 @@ fn build_config(
             .unwrap_or_else(|| id.clone());
         if p.connect_timeout == Some(0) || p.max_time == Some(0) {
             return Err(format!(
-                "{id}: connect_timeout and max_time must be at least 1 second"
+                "Provider '{id}' has a timeout of 0. Set connect_timeout and max_time to 1 second or more."
             ));
         }
         let stored = current.providers.iter().find(|q| q.id == id);
@@ -1606,7 +1645,7 @@ fn build_config(
         .split_once('/')
         .is_some_and(|(id, m)| !m.is_empty() && providers.iter().any(|p| p.id == id));
     if !known {
-        return Err("default model must be provider/model with a configured provider".into());
+        return Err("The default model names no configured provider. Use provider/model with a provider from the list.".into());
     }
     Ok(Config {
         default_model,
@@ -1664,7 +1703,10 @@ async fn put_config(State(app): State<Arc<App>>, Json(input): Json<ConfigInput>)
 
 async fn install_action(app: Arc<App>, action: String, stack: install::Stack) -> Response {
     let Some(action) = install::Action::parse(&action) else {
-        return error(StatusCode::NOT_FOUND, "expected install or remove");
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("Unknown action '{action}'. Use install or remove."),
+        );
     };
     match app.tasks.start(stack, action) {
         Ok(task) => (StatusCode::ACCEPTED, Json(task)).into_response(),
@@ -1982,7 +2024,9 @@ fn parse_addr(s: &str) -> Result<String, String> {
     }
     s.parse::<std::net::SocketAddr>()
         .map(|_| s.to_owned())
-        .map_err(|_| format!("'{s}' is not ADDR:PORT or PORT"))
+        .map_err(|_| {
+            format!("'{s}' is not ADDR:PORT or PORT. Use a form such as 127.0.0.1:8080 or 8080.")
+        })
 }
 
 /// The key rides in the fragment, which the browser never sends to the server.
@@ -1994,7 +2038,7 @@ fn parse_url(s: &str) -> Result<String, String> {
     if s.starts_with("http://") || s.starts_with("https://") {
         Ok(s.to_owned())
     } else {
-        Err("must start with http:// or https://".into())
+        Err("The URL does not start with http:// or https://. Start it with https://.".into())
     }
 }
 
@@ -2033,7 +2077,7 @@ fn read_input(file: &str) -> Result<String, String> {
             .map_err(|e| e.to_string())?;
         Ok(text)
     } else {
-        fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))
+        fs::read_to_string(file).map_err(|e| format!("Couldn't read {file}: {e}. Check the path."))
     }
 }
 
@@ -2048,10 +2092,10 @@ fn ask_body(
     match questions {
         None => {}
         Some(Value::Object(extra)) => map.extend(extra),
-        Some(_) => return Err("--questions must be a JSON map of key to question".into()),
+        Some(_) => return Err("--questions is not a JSON map of key to question. Pass an object keyed by question key.".into()),
     }
     if map.is_empty() {
-        return Err("name a saved question or pass --questions".into());
+        return Err("No question given. Name a saved question or pass --questions.".into());
     }
     let mut body = json!({ "state": state, "questions": map });
     if let Some(m) = model {
@@ -2069,7 +2113,7 @@ fn ask_request(
         let mut body: Value =
             serde_json::from_str(&read(file)?).map_err(|e| format!("{file}: {e}"))?;
         let Some(obj) = body.as_object_mut() else {
-            return Err("--request must be a JSON object with state and questions".into());
+            return Err("--request is not a JSON object with state and questions. Pass an object with both fields.".into());
         };
         if let Some(m) = &args.model {
             obj.insert("model".into(), json!(m));
@@ -2078,7 +2122,7 @@ fn ask_request(
     }
     if args.state_file.as_deref() == Some("-") && args.questions_file.as_deref() == Some("-") {
         return Err(
-            "--state-file and --questions-file cannot both read stdin; use --request -".into(),
+            "--state-file and --questions-file both read stdin. Use --request - instead.".into(),
         );
     }
     let state = match (&args.state, &args.state_file) {
@@ -2088,7 +2132,7 @@ fn ask_request(
     };
     let questions = match (&args.questions, &args.questions_file) {
         (Some(json), _) => Some(serde_json::from_str(json).map_err(|e| {
-            format!("--questions is not valid JSON: {e}; to read a file, use --questions-file")
+            format!("--questions is not valid JSON: {e}. To read a file, use --questions-file.")
         })?),
         (None, Some(file)) => {
             Some(serde_json::from_str(&read(file)?).map_err(|e| format!("{file}: {e}"))?)
@@ -2109,7 +2153,7 @@ fn ask_request(
 /// Writes pretty JSON to `path` and prints the path.
 fn write_json(path: &str, value: &Value) -> Result<(), String> {
     let text = serde_json::to_string_pretty(value).unwrap() + "\n";
-    fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
+    fs::write(path, text).map_err(|e| format!("Couldn't write {path}: {e}. Check the path."))?;
     println!("{path}");
     Ok(())
 }
@@ -2232,11 +2276,19 @@ async fn run_ask(args: AskArgs) {
     }
     let failed = |e: reqwest::Error| -> ! {
         if e.is_connect() {
-            fail(format!("cannot connect to {base}"))
+            fail(format!(
+                "Couldn't connect to {base}. Start jeff with jeff serve."
+            ))
         } else if e.is_timeout() {
-            fail(format!("jeff did not answer within {}s", args.max_time))
+            fail(format!(
+                "jeff did not answer within {}s. Try again, or check jeff.log.",
+                args.max_time
+            ))
         } else {
-            fail(format!("{url}: {}", e.without_url()))
+            fail(format!(
+                "Couldn't reach {url}: {}. Check that jeff runs and the URL is right.",
+                e.without_url()
+            ))
         }
     };
     let resp = req.send().await.unwrap_or_else(|e| failed(e));
@@ -2253,7 +2305,9 @@ async fn run_ask(args: AskArgs) {
     match (answer, args.output) {
         (Ok(v), Some(path)) => write_json(&path, &v).unwrap_or_else(|e| fail(e)),
         (Ok(v), None) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
-        (Err(_), _) => fail(format!("jeff sent an answer that is not JSON: {text}")),
+        (Err(_), _) => fail(format!(
+            "jeff sent an answer that is not JSON: {text}. Check that the URL points at jeff."
+        )),
     }
 }
 
@@ -2278,7 +2332,7 @@ fn error_lines(status: u16, text: &str) -> String {
         // A proxy page or an empty body says nothing beyond the status.
         let text = text.trim();
         return match text.is_empty() || text.starts_with('<') {
-            true => head,
+            true => format!("{head}. Check the URL and jeff.log."),
             false => format!("{head}: {text}"),
         };
     };
@@ -2319,8 +2373,13 @@ async fn admin_call(
     }
     let failed = |e: reqwest::Error| -> ! {
         match e.is_connect() {
-            true => fail(format!("cannot connect to {base}; start jeff first")),
-            false => fail(format!("{base}{path}: {}", e.without_url())),
+            true => fail(format!(
+                "Couldn't connect to {base}. Start jeff with jeff serve."
+            )),
+            false => fail(format!(
+                "Couldn't reach {base}{path}: {}. Check that jeff runs and the URL is right.",
+                e.without_url()
+            )),
         }
     };
     let resp = req.send().await.unwrap_or_else(|e| failed(e));
@@ -2332,10 +2391,11 @@ async fn admin_call(
     if text.trim().is_empty() {
         return None;
     }
-    Some(
-        serde_json::from_str(&text)
-            .unwrap_or_else(|_| fail(format!("jeff sent a reply that is not JSON: {text}"))),
-    )
+    Some(serde_json::from_str(&text).unwrap_or_else(|_| {
+        fail(format!(
+            "jeff sent an answer that is not JSON: {text}. Check that the URL points at jeff."
+        ))
+    }))
 }
 
 fn print_json(value: &Value, output: Option<String>) {
@@ -2354,7 +2414,8 @@ fn read_json(file: &str) -> Value {
         std::process::exit(1)
     };
     let text = read_input(file).unwrap_or_else(|e| fail(e));
-    serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{file}: {e}")))
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| fail(format!("{file}: {e}. Fix the JSON in the file.")))
 }
 
 /// A key as one URL path segment; the server refuses keys that need more than this, but the CLI must not build a
@@ -2539,7 +2600,10 @@ fn run_keys(action: KeysAction, path: &str) {
         } => {
             let name = name.trim().to_owned();
             if name.is_empty() || name.chars().count() > 64 {
-                fail("name must be 1 to 64 characters".into());
+                fail(
+                    "The name is empty or longer than 64 characters. Use 1 to 64 characters."
+                        .into(),
+                );
             }
             let expires_at = keys::parse_expiry(&expires, keys::now()).unwrap_or_else(|e| fail(e));
             if role == keys::Role::Client && !has_admin(&config.keys) {
@@ -2554,7 +2618,7 @@ fn run_keys(action: KeysAction, path: &str) {
             save_config(path, &config).unwrap_or_else(|e| fail(e));
             println!("{key}");
             eprintln!(
-                "id {}; this key is shown only once, store it now",
+                "id {}. jeff shows this key only once. Store it now.",
                 record.id
             );
             if role == keys::Role::Admin {
@@ -2568,11 +2632,13 @@ fn run_keys(action: KeysAction, path: &str) {
             let before = config.keys.clone();
             config.keys.retain(|k| k.id != id);
             if config.keys.len() == before.len() {
-                fail(format!("no key with id '{id}'"));
+                fail(format!(
+                    "No key with id '{id}'. Check the id with jeff keys list."
+                ));
             }
             if !config.keys.is_empty() && has_admin(&before) && !has_admin(&config.keys) {
                 fail(
-                    "this is the last admin key; create another admin key or revoke the client keys first"
+                    "This is the last admin key. Create another admin key or revoke the client keys first."
                         .into(),
                 );
             }
@@ -2606,10 +2672,13 @@ async fn serve(args: ServeArgs) {
     let config_path = config_file(args.config.clone());
     let config = load_config(&config_path).unwrap_or_else(|problems| {
         let n = problems.len();
-        let summary = format!("{config_path}: {}; jeff did not start", count_problems(n));
+        let summary = format!(
+            "{config_path}: {}. Fix the file, then start jeff again.",
+            count_problems(n)
+        );
         log::write(&config_path, "config_invalid", &summary, &problems);
         fail_with(&format!(
-            "error[config_invalid]: {}\nlog: {}",
+            "error[config_invalid]: {}. Fix the file, then start jeff again.\nlog: {}",
             problems_text(&config_path, n),
             log::path(&config_path).display()
         ))
@@ -2621,7 +2690,7 @@ async fn serve(args: ServeArgs) {
         .find(|k| !k.is_empty() && k.len() < MIN_STATIC_KEY_LEN)
     {
         fail_with(&format!(
-            "--api-key '{}…' is shorter than {MIN_STATIC_KEY_LEN} characters; generate one with `jeff keys create`",
+            "--api-key '{}…' is shorter than {MIN_STATIC_KEY_LEN} characters. Create a key with `jeff keys create`.",
             &short[..short.len().min(4)]
         ));
     }
@@ -2665,8 +2734,8 @@ async fn serve(args: ServeArgs) {
             &args.api
         };
         fail_with(&format!(
-            "refusing to listen on {addr} without an access key: anyone who reaches it could use the stored \
-             provider keys.\ncreate one first with `jeff keys create --name NAME --role admin`, or pass --api-key"
+            "Refusing to listen on {addr} without an access key: anyone who reaches it could use the stored \
+             provider keys.\nCreate one first with `jeff keys create --name NAME --role admin`, or pass --api-key."
         ));
     }
 
@@ -2793,7 +2862,9 @@ async fn serve(args: ServeArgs) {
 }
 
 fn fail(addr: &str, e: std::io::Error) -> ! {
-    fail_with(&format!("cannot listen on {addr}: {e}"))
+    fail_with(&format!(
+        "Couldn't listen on {addr}: {e}. Stop the program on that port or pick another address."
+    ))
 }
 
 fn fail_with(message: &str) -> ! {
@@ -2810,13 +2881,16 @@ mod tests {
         assert_eq!(
             error_lines(
                 409,
-                r#"{"code":"config_invalid","error":"jeff.json has 2 problems; fix it before changing questions or classifiers","log":"jeff.log"}"#
+                r#"{"code":"config_invalid","error":"jeff.json has 2 problems. Fix it before changing questions or classifiers.","log":"jeff.log"}"#
             ),
-            "error[config_invalid]: jeff.json has 2 problems; fix it before changing questions or classifiers\nlog: jeff.log"
+            "error[config_invalid]: jeff.json has 2 problems. Fix it before changing questions or classifiers.\nlog: jeff.log"
         );
         assert_eq!(
-            error_lines(404, r#"{"error":"unknown classifier 'x'"}"#),
-            "error: unknown classifier 'x'"
+            error_lines(
+                404,
+                r#"{"error":"No classifier 'x'. Check the key or create the classifier first."}"#
+            ),
+            "error: No classifier 'x'. Check the key or create the classifier first."
         );
         assert_eq!(
             error_lines(
@@ -2825,10 +2899,13 @@ mod tests {
             ),
             "error: HTTP 415 Unsupported Media Type: Expected request with `Content-Type: application/json`"
         );
-        assert_eq!(error_lines(404, ""), "error: HTTP 404 Not Found");
+        assert_eq!(
+            error_lines(404, ""),
+            "error: HTTP 404 Not Found. Check the URL and jeff.log."
+        );
         assert_eq!(
             error_lines(502, "<html>\n<body>Bad Gateway</body>\n</html>"),
-            "error: HTTP 502 Bad Gateway"
+            "error: HTTP 502 Bad Gateway. Check the URL and jeff.log."
         );
     }
 
@@ -3144,7 +3221,7 @@ mod tests {
         let body = body_of(*r).await;
         assert_eq!(
             body["error"],
-            "could not save jeff.json; the server console has the cause"
+            "Couldn't save jeff.json. Check the server console for the cause."
         );
     }
 
@@ -3164,7 +3241,7 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             body,
-            json!({"code": "config_invalid", "error": "jeff.json has 2 problems; fix it before changing questions or classifiers", "log": "jeff.log"})
+            json!({"code": "config_invalid", "error": "jeff.json has 2 problems. Fix it before changing questions or classifiers.", "log": "jeff.log"})
         );
     }
 
@@ -3387,7 +3464,7 @@ mod tests {
         let args = ask_args(&["--state-file", "-", "--questions-file", "-"]).unwrap();
         assert_eq!(
             ask_request(&args, stdin_is("{}")).unwrap_err(),
-            "--state-file and --questions-file cannot both read stdin; use --request -"
+            "--state-file and --questions-file both read stdin. Use --request - instead."
         );
     }
 
@@ -3397,7 +3474,10 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(e.contains("must start with http:// or https://"), "{e}");
+        assert!(
+            e.contains("The URL does not start with http:// or https://. Start it with https://."),
+            "{e}"
+        );
         assert!(ask_args(&["u", "--state", "x", "--url", "https://jeff.example"]).is_ok());
     }
 
@@ -3480,7 +3560,7 @@ mod tests {
         let result = load_config(path.to_str().unwrap());
         let _ = fs::remove_file(&path);
         let e = result.err().expect("an invalid question must be refused");
-        assert!(e[0].contains("question 'a b'"), "{e:?}");
+        assert!(e[0].contains("Question 'a b'"), "{e:?}");
     }
 
     #[test]
@@ -3494,7 +3574,7 @@ mod tests {
         let read = read_config(path);
         let _ = fs::remove_file(path);
         let e = loaded.err().expect("an invalid classifier must be refused");
-        assert!(e[0].contains("classifier 'k'"), "{e:?}");
+        assert!(e[0].contains("Classifier 'k'"), "{e:?}");
         assert!(read.unwrap().classifiers.contains_key("k"));
     }
 
@@ -3513,10 +3593,10 @@ mod tests {
         let problems = load_config(&path).err().unwrap();
         let _ = fs::remove_file(&path);
         assert_eq!(problems.len(), 2, "{problems:?}");
-        assert!(problems[0].starts_with("question 'a b': "), "{problems:?}");
+        assert!(problems[0].starts_with("Question 'a b': "), "{problems:?}");
         assert_eq!(
             problems[1],
-            "classifier 'triage': unknown field 'modle'; a classifier has questions, model and description"
+            "Classifier 'triage': Unknown field 'modle'. Keep only questions, model and description."
         );
     }
 

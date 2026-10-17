@@ -873,7 +873,7 @@ export function setupInstructions(
 export function setupAborted(reason: string): string {
   return [
     '<jeff_skill_suggestion_setup>',
-    `The jeff-skill-suggestion setup could not be prepared: ${reason}.`,
+    `Couldn't prepare the jeff-skill-suggestion setup: ${reason}.`,
     'Tell the user, and do not edit any settings file. They can fix the cause and run the command again.',
     '</jeff_skill_suggestion_setup>',
   ].join('\n')

@@ -5,7 +5,7 @@ pub type Questions = serde_json::Map<String, Value>;
 
 /// Checks the fields jeff relies on; any other field passes through to the provider.
 pub fn validate(key: &str, q: &Value) -> Result<(), String> {
-    check(key, q).map_err(|e| format!("question '{key}': {e}"))
+    check(key, q).map_err(|e| format!("Question '{key}': {e}"))
 }
 
 /// The key appears in URL paths.
@@ -16,7 +16,7 @@ pub fn check_key(key: &str) -> Result<(), &'static str> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err("key must be 1-64 characters of A-Z, a-z, 0-9, '_' and '-'");
+        return Err("The key is not 1-64 characters of A-Z, a-z, 0-9, '_' and '-'. Rename it.");
     }
     Ok(())
 }
@@ -24,14 +24,14 @@ pub fn check_key(key: &str) -> Result<(), &'static str> {
 fn check(key: &str, q: &Value) -> Result<(), &'static str> {
     check_key(key)?;
     let Some(q) = q.as_object() else {
-        return Err("must be an object");
+        return Err("It is not an object. Send the question as a JSON object.");
     };
     if !q
         .get("instructions")
         .and_then(Value::as_str)
         .is_some_and(|s| !s.trim().is_empty())
     {
-        return Err("instructions must be a non-empty string");
+        return Err("The instructions are empty. Write instructions for the question.");
     }
     let criteria = q.get("criteria");
     match q.get("type").and_then(Value::as_str) {
@@ -41,7 +41,9 @@ fn check(key: &str, q: &Value) -> Result<(), &'static str> {
                 .and_then(Value::as_object)
                 .is_some_and(|c| c.len() >= 2)
             {
-                return Err("choice criteria must be an object with at least two options");
+                return Err(
+                    "A choice question needs at least two options. Add options to criteria.",
+                );
             }
         }
         Some("score") => {
@@ -49,22 +51,22 @@ fn check(key: &str, q: &Value) -> Result<(), &'static str> {
                 .and_then(Value::as_array)
                 .is_some_and(|c| c.len() >= 2)
             {
-                return Err("score criteria must be an array with at least two levels");
+                return Err("A score question needs at least two levels. Add levels to criteria.");
             }
         }
-        _ => return Err("type must be noul, choice or score"),
+        _ => return Err("The type is not noul, choice or score. Pick one of them."),
     }
     if q.get("model")
         .is_some_and(|m| m.as_str().is_none_or(|m| m.trim().is_empty()))
     {
-        return Err("model must be a non-empty string");
+        return Err("The model is empty. Name a model or remove the field.");
     }
     Ok(())
 }
 
 pub fn validate_all(input: &Questions) -> Result<(), String> {
     if input.is_empty() {
-        return Err("no questions given".into());
+        return Err("No questions given. Send at least one question.".into());
     }
     input.iter().try_for_each(|(k, q)| validate(k, q))
 }
@@ -78,14 +80,18 @@ pub enum Change {
 }
 
 fn not_found(key: &str) -> Change {
-    Change::NotFound(format!("unknown question '{key}'"))
+    Change::NotFound(format!(
+        "No question '{key}'. Check the key or create the question first."
+    ))
 }
 
 /// Adds new questions; one invalid or existing key refuses them all.
 pub fn create(saved: &mut Questions, input: Questions) -> Result<(), Change> {
     validate_all(&input).map_err(Change::Invalid)?;
     if let Some(key) = input.keys().find(|k| saved.contains_key(*k)) {
-        return Err(Change::Exists(format!("question '{key}' already exists")));
+        return Err(Change::Exists(format!(
+            "Question '{key}' already exists. Pick another key or update the saved one."
+        )));
     }
     saved.extend(input);
     Ok(())
@@ -104,9 +110,9 @@ pub fn remove(saved: &mut Questions, key: &str) -> Result<(), Change> {
 
 /// A hand-edited config may hold an invalid question; it stays saved but cannot be asked.
 fn saved_question<'a>(saved: &'a Questions, key: &str) -> Result<&'a Value, String> {
-    let q = saved
-        .get(key)
-        .ok_or_else(|| format!("unknown question '{key}'"))?;
+    let q = saved.get(key).ok_or_else(|| {
+        format!("No question '{key}'. Check the key or create the question first.")
+    })?;
     validate(key, q)?;
     Ok(q)
 }
@@ -140,16 +146,22 @@ pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
             let mut out = Questions::new();
             for key in keys {
                 let Some(key) = key.as_str() else {
-                    return Err("saved question keys must be strings".into());
+                    return Err(
+                        "A saved question key is not a string. List the keys as strings.".into(),
+                    );
                 };
                 out.insert(key.to_owned(), saved_question(saved, key)?.clone());
             }
             out
         }
-        _ => return Err("questions must be a map or an array of saved keys".into()),
+        _ => {
+            return Err(
+                "questions is neither a map nor an array of saved keys. Send one of them.".into(),
+            );
+        }
     };
     if out.is_empty() {
-        return Err("questions must not be empty".into());
+        return Err("questions is empty. Add at least one question.".into());
     }
     Ok(out)
 }
@@ -169,7 +181,7 @@ pub fn group(
             Some(Value::String(m)) if !m.trim().is_empty() => m,
             Some(_) => {
                 return Err(format!(
-                    "question '{key}': model must be a non-empty string"
+                    "Question '{key}': The model is empty. Name a model or remove the field."
                 ));
             }
         };
@@ -182,7 +194,7 @@ pub fn group(
     }
     if groups.len() > MAX_MODELS {
         return Err(format!(
-            "questions use {} models; one request may use at most {MAX_MODELS}",
+            "The questions use {} models, more than {MAX_MODELS} per request. Split the request.",
             groups.len()
         ));
     }
@@ -302,7 +314,7 @@ mod tests {
         ];
         for (key, q) in bad {
             let e = validate(key, &q).unwrap_err();
-            assert!(e.starts_with(&format!("question '{key}': ")), "{e}");
+            assert!(e.starts_with(&format!("Question '{key}': ")), "{e}");
         }
     }
 
@@ -316,15 +328,15 @@ mod tests {
         assert_eq!(expand(&json!(["u", "u"]), &saved).unwrap(), saved);
         assert_eq!(
             expand(&json!(["nope"]), &saved).unwrap_err(),
-            "unknown question 'nope'"
+            "No question 'nope'. Check the key or create the question first."
         );
         assert_eq!(
             expand(&json!([]), &saved).unwrap_err(),
-            "questions must not be empty"
+            "questions is empty. Add at least one question."
         );
         assert_eq!(
             expand(&json!({}), &saved).unwrap_err(),
-            "questions must not be empty"
+            "questions is empty. Add at least one question."
         );
         assert!(expand(&json!("u"), &saved).is_err());
         assert!(expand(&json!([1]), &saved).is_err());
@@ -337,7 +349,7 @@ mod tests {
         let saved = map(json!({"bad": {"type": "maybe", "instructions": "x"}}));
         for input in [json!(["bad"]), json!({"bad": {}})] {
             let e = expand(&input, &saved).unwrap_err();
-            assert!(e.starts_with("question 'bad': "), "{e}");
+            assert!(e.starts_with("Question 'bad': "), "{e}");
         }
     }
 
@@ -345,7 +357,7 @@ mod tests {
     fn expand_refuses_an_override_that_breaks_the_saved_question() {
         let saved = map(json!({"u": {"type": "noul", "instructions": "x"}}));
         let e = expand(&json!({"u": {"instructions": ""}}), &saved).unwrap_err();
-        assert!(e.starts_with("question 'u': "), "{e}");
+        assert!(e.starts_with("Question 'u': "), "{e}");
     }
 
     #[test]
@@ -361,7 +373,7 @@ mod tests {
         );
         assert_eq!(
             expand(&json!({"nope": {}}), &saved).unwrap_err(),
-            "unknown question 'nope'"
+            "No question 'nope'. Check the key or create the question first."
         );
         let inline = json!({"u": {"type": "score", "instructions": "y", "criteria": ["a", "b"]}});
         assert_eq!(Value::Object(expand(&inline, &saved).unwrap()), inline);
@@ -399,7 +411,7 @@ mod tests {
             let qs = map(json!({"a": {"type": "noul", "instructions": "x", "model": model}}));
             assert_eq!(
                 group(qs, "p/m").unwrap_err(),
-                "question 'a': model must be a non-empty string"
+                "Question 'a': The model is empty. Name a model or remove the field."
             );
         }
     }
@@ -419,7 +431,7 @@ mod tests {
         assert_eq!(
             group(many(MAX_MODELS + 1), "p/m0").unwrap_err(),
             format!(
-                "questions use {} models; one request may use at most {MAX_MODELS}",
+                "The questions use {} models, more than {MAX_MODELS} per request. Split the request.",
                 MAX_MODELS + 1
             )
         );
@@ -460,7 +472,9 @@ mod tests {
         let fresh = json!({"type": "noul", "instructions": "y"});
         assert_eq!(
             create(&mut saved, map(json!({"v": fresh, "u": fresh}))).unwrap_err(),
-            Change::Exists("question 'u' already exists".into())
+            Change::Exists(
+                "Question 'u' already exists. Pick another key or update the saved one.".into()
+            )
         );
         assert!(matches!(
             create(&mut saved, map(json!({"a b": fresh}))),
@@ -475,7 +489,9 @@ mod tests {
     fn update_and_remove_need_existing_key() {
         let mut saved = map(json!({"u": {"type": "noul", "instructions": "x"}}));
         let q = json!({"type": "noul", "instructions": "y"});
-        let missing = Change::NotFound("unknown question 'nope'".into());
+        let missing = Change::NotFound(
+            "No question 'nope'. Check the key or create the question first.".into(),
+        );
         assert_eq!(update(&mut saved, "nope", q.clone()).unwrap_err(), missing);
         assert!(matches!(
             update(&mut saved, "u", json!({"type": "noul"})),
@@ -492,7 +508,7 @@ mod tests {
     fn validate_all_rejects_empty_input() {
         assert_eq!(
             validate_all(&Questions::new()).unwrap_err(),
-            "no questions given"
+            "No questions given. Send at least one question."
         );
     }
 }

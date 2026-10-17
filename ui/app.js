@@ -100,7 +100,7 @@ const drafts = {
     if (!d) return null;
     if (d.base === base) return d.value;
     this.drop(id);
-    say(status, "Draft discarded: the saved data changed since it was written.", "err");
+    say(status, "Draft discarded: the saved data changed since it was written. Make the edit again.", "err");
     return null;
   },
   track(id, snapshot) {
@@ -126,7 +126,7 @@ async function api(path, opts = {}) {
   if (r.status === 403 && /admin key/.test(body.error || "")) showSignIn(body.error);
   if (!r.ok) {
     if (body.code === "config_invalid") checkStatus();
-    const err = new Error((body.error || body.detail?.message || body.detail || `HTTP ${r.status}`) + (body.log ? `. Log: ${body.log}` : ""));
+    const err = new Error((body.error || body.detail?.message || body.detail || `HTTP ${r.status}`) + (body.log ? ` Log: ${body.log}.` : ""));
     err.code = body.code;
     err.log = body.log;
     throw err;
@@ -555,7 +555,7 @@ async function installTask(card, action) {
   try { t = (await api(`/api/${stack}`)).body; }
   catch (e) {
     // One failed status read must not stop the polling and leave the buttons locked.
-    say(out, `Could not read the ${name} status: ${e.message}. Retrying…`, "err");
+    say(out, `Couldn't read the ${name} status: ${e.message} jeff retries on its own.`, "err");
     setTimeout(() => installTask(card), 2000);
     return;
   }
@@ -807,8 +807,8 @@ function readQuestions() {
   const out = {};
   for (const card of $$("#q-form-card .q")) {
     const key = $(".q-key", card).value.trim();
-    if (!key) throw new Error("Every question needs a key.");
-    if (out[key]) throw new Error(`Question key "${key}" is used twice.`);
+    if (!key) throw new Error("A question has no key. Give it a key.");
+    if (out[key]) throw new Error(`Question key "${key}" is used twice. Rename one of them.`);
     const q = { type: card.dataset.type, instructions: $(".q-instr", card).value.trim() };
     if (q.type === "choice") {
       q.criteria = {};
@@ -816,10 +816,10 @@ function readQuestions() {
         const k = $(".q-opt-key", row).value.trim();
         if (k) q.criteria[k] = $(".q-opt-desc", row).value.trim() || k;
       }
-      if (Object.keys(q.criteria).length < 2) throw new Error(`"${key}" needs at least two options.`);
+      if (Object.keys(q.criteria).length < 2) throw new Error(`"${key}" has fewer than two options. Add another option.`);
     } else if (q.type === "score") {
       q.criteria = $$(".q-level", card).map((i) => i.value.trim()).filter(Boolean);
-      if (q.criteria.length < 2) throw new Error(`"${key}" needs at least two levels.`);
+      if (q.criteria.length < 2) throw new Error(`"${key}" has fewer than two levels. Add another level.`);
     }
     out[key] = q;
   }
@@ -1003,7 +1003,7 @@ function metaChips(out, headers, ms, model) {
 async function run() {
   const status = $("#pg-status");
   const body = runBody();
-  if (!body.questions.length) { say(status, "Check at least one question.", "err"); return; }
+  if (!body.questions.length) { say(status, "No question is checked. Check at least one question.", "err"); return; }
   try {
     const { out, headers, ms } = await ask(body, status, $("#pg-run"));
     last = out;
@@ -1301,7 +1301,7 @@ $("#c-model").onchange = (e) => { store.set("c-model", e.target.value); updateCl
 async function runClassifier() {
   const status = $("#c-status");
   const key = selectedClassifier();
-  if (!key) { say(status, "Create a classifier first.", "err"); return; }
+  if (!key) { say(status, "No classifiers yet. Create a classifier first.", "err"); return; }
   const c = classifiers[key];
   const body = classifierBody();
   try {
@@ -1501,7 +1501,7 @@ function openClassifierForm(key = null) {
 
 /** The form's classifier, without its key. */
 function classifierDraft() {
-  if (!picked.length) throw new Error("Add at least one question.");
+  if (!picked.length) throw new Error("The classifier has no questions. Add at least one question.");
   const c = { questions: [...picked] };
   if ($("#c-form-model").value) c.model = $("#c-form-model").value;
   const description = $("#c-description").value.trim();
@@ -1513,7 +1513,7 @@ async function saveClassifier() {
   const status = $("#c-form-status");
   try {
     const key = cEditing || $("#c-key").value.trim();
-    if (!key) throw new Error("The classifier needs a key.");
+    if (!key) throw new Error("The classifier has no key. Give it a key.");
     const c = classifierDraft();
     const json = { "content-type": "application/json" };
     if (cEditing) await api(`/api/classifiers/${encodeURIComponent(key)}`, { method: "PUT", headers: json, body: JSON.stringify(c) });

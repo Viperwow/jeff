@@ -210,7 +210,7 @@ export const register: Register = (on, options) => {
       }
       once(
         'insecure',
-        `not sending JEFF_API_KEY to ${new URL(target).origin}: use https, http on localhost, or JEFF_ALLOW_HTTP=1`,
+        `Not sending JEFF_API_KEY to ${new URL(target).origin} over plain http. Use https or localhost, or set JEFF_ALLOW_HTTP=1.`,
       )
       return ''
     }
@@ -314,7 +314,7 @@ export const register: Register = (on, options) => {
           }
         }
       } catch (error) {
-        $.ui.log(`could not read /${skill.name}: ${String(error)}`)
+        $.ui.log(`Couldn't read /${skill.name}: ${String(error)}. Check that its SKILL.md exists and is readable.`)
       }
       files.set(skill.name, found)
       return found
@@ -339,7 +339,7 @@ export const register: Register = (on, options) => {
       }
       commands = canonical(commands, displayToId ?? new Map())
     } catch (error) {
-      $.ui.log(`could not list the skills: ${String(error)}`)
+      $.ui.log(`Couldn't list the skills: ${String(error)}. Check that the skills folders are readable.`)
       return next(e)
     }
     // Loading the skill itself, the mod is not bound to what the engine would
@@ -413,7 +413,7 @@ export const register: Register = (on, options) => {
     return next({ ...e, context: [...(e.context ?? []), block] })
   }).catch(($, e, next) => {
     // A suggestion is never worth a lost prompt: it goes through as typed.
-    $.ui.log(`no suggestion: ${next.error.kind}`)
+    $.ui.log(`No suggestion: ${next.error.kind}. The prompt went through as typed.`)
     return next(e)
   })
 
@@ -454,7 +454,7 @@ export const register: Register = (on, options) => {
       }
       commands = canonical(commands, displayToId ?? new Map())
     } catch (error) {
-      $.ui.log(`setup: could not list the skills: ${String(error)}`)
+      $.ui.log(`Setup: Couldn't list the skills: ${String(error)}. Check that the skills folders are readable.`)
       return next({ ...e, text: setupAborted(`the skills could not be listed (${String(error)})`) })
     }
     const home = (await $.env.get('HOME')) ?? '~'
@@ -464,7 +464,7 @@ export const register: Register = (on, options) => {
     try {
       if (await $.fs.exists(settingsPath)) json = await $.fs.read(settingsPath)
     } catch (error) {
-      $.ui.log(`setup: could not read ${settingsPath}: ${String(error)}`)
+      $.ui.log(`Setup: Couldn't read ${settingsPath}: ${String(error)}. Check that the file is valid JSON.`)
       return next({ ...e, text: setupAborted(`${settingsPath} exists but could not be read (${String(error)})`) })
     }
     const settings = readSkillSettings(json)
@@ -476,7 +476,7 @@ export const register: Register = (on, options) => {
     try {
       backupExists = await $.fs.exists(backupPath)
       if (backupExists && !validBackup(await $.fs.read(backupPath))) {
-        $.ui.log(`setup: ${backupPath} is not a valid backup`)
+        $.ui.log(`Setup: ${backupPath} is not a valid backup. Fix or delete the file.`)
         return next({
           ...e,
           text: setupAborted(
@@ -485,7 +485,7 @@ export const register: Register = (on, options) => {
         })
       }
     } catch (error) {
-      $.ui.log(`setup: could not read ${backupPath}: ${String(error)}`)
+      $.ui.log(`Setup: Couldn't read ${backupPath}: ${String(error)}. Fix or delete the file.`)
       return next({ ...e, text: setupAborted(`${backupPath} could not be read (${String(error)})`) })
     }
     return next({ ...e, text: setupInstructions(mode, plan, settings, settingsPath, backupPath, backupExists) })
