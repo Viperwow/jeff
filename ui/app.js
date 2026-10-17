@@ -157,6 +157,11 @@ function showTab() {
   for (const t of PAGES) $("#page-" + t).hidden = t !== id;
   for (const n of $$(".unsaved-providers")) n.hidden = !store.get("draft:providers");
   if (id === "keys" && config) loadKeys().catch((e) => say($("#key-status"), e.message, "err"));
+  // A ready note has done its job once it was on screen and the page is left; one that arrived while away waits.
+  for (const n of $$(".p-task[data-tone=ok]")) {
+    if (id === "providers") n.dataset.seen = "1";
+    else if (n.dataset.seen) say(n, "");
+  }
   for (const a of $$(".tab")) {
     if (a.getAttribute("href") === "#" + id) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
@@ -493,7 +498,8 @@ function renderSteps(card, t) {
     current.replaceChildren(stepIcon("spin"), el("span", "shrink-0 font-medium", "Uninstalling"), el("span", "note min-w-0", t.step || `Removing the ${stackName(card)} containers…`));
     return false;
   }
-  const started = running || t.state === "error" || steps.slice(1).some((s) => s.done);
+  // Images and weights stay on disk after an uninstall, so only running containers mean an install is under way.
+  const started = running || t.state === "error" || steps.some((s) => s.id === "containers" && s.done);
   let active = steps.findIndex((s) => !s.done);
   // A reinstall recreates running containers, so every step still reads done until compose stops them.
   const restarting = running && steps.length > 0 && active === -1;
@@ -541,11 +547,17 @@ async function installTask(card, action) {
     disarmCurrent();
     for (const b of buttons) b.disabled = true;
     card.dataset.action = action;
+    // Set at the click, so an action that ends before the first status read still gets its note.
+    card.dataset.sawWork = "1";
+    if (action === "remove") card.dataset.removing = "1";
+    else delete card.dataset.removing;
     renderSteps(card, { steps: card.installSteps, state: "running", step: action === "remove" ? `Removing the ${name} containers…` : "" });
     try { await api(`/api/${stack}/${action}`, { method: "POST" }); }
     catch (e) {
       for (const b of buttons) b.disabled = false;
       delete card.dataset.action;
+      delete card.dataset.removing;
+      delete card.dataset.sawWork;
       renderSteps(card, { steps: card.installSteps, state: "idle" });
       say(out, e.message, "err");
       return;
@@ -573,10 +585,21 @@ async function installTask(card, action) {
     buttons[0].textContent = containersUp ? "Reinstall" : "Install";
     card.dataset.labelSet = "1";
   }
+  // A done note marks the end of work seen on this page; a stack ready on arrival needs no note.
+  if (busy) card.dataset.sawWork = "1";
+  const done = (text) => {
+    say(out, card.dataset.sawWork ? text : "", "ok");
+    out.dataset.seen = $("#page-providers").hidden ? "" : "1";
+    delete card.dataset.sawWork;
+  };
   if (t.state === "error") say(out, t.error, "err");
-  else if (ready) say(out, `${name} is installed and ready.`, "ok");
+  else if (ready) done(`${name} is installed and ready.`);
   else if (t.state === "running") say(out, t.step || "Working…");
   else if (containersUp) say(out, "Downloading and loading the model. You can close this page; it keeps going.");
+  else if (card.dataset.removing) {
+    done(`${name} is uninstalled.`);
+    delete card.dataset.removing;
+  }
   if (t.state === "running" || (containersUp && !ready)) setTimeout(() => installTask(card), 2000);
   else if (ready && !card.dataset.wasReady) { card.dataset.wasReady = "1"; loadModels().catch(() => {}); }
 }
