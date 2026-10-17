@@ -29,9 +29,9 @@ pub fn utc(secs: u64) -> String {
     )
 }
 
-/// Appends one entry. A write failure is ignored: the console line still reports the problem. The log is readable by
-/// its owner only, like the config: a parse error may quote a value from it, such as a provider key.
-pub fn write(config_path: &str, event: &str, summary: &str, problems: &[String]) {
+/// Appends one entry and says whether it landed; the console line still reports a problem the log missed. The log is
+/// readable by its owner only, like the config: a parse error may quote a value from it, such as a provider key.
+pub fn write(config_path: &str, event: &str, summary: &str, problems: &[String]) -> bool {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -43,9 +43,19 @@ pub fn write(config_path: &str, event: &str, summary: &str, problems: &[String])
     options.create(true).append(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let _ = options
+    options
         .open(path(config_path))
-        .and_then(|mut f| f.write_all(entry.as_bytes()));
+        .and_then(|mut f| f.write_all(entry.as_bytes()))
+        .is_ok()
+}
+
+/// Where an error message should send the reader for a cause that `write` reported as `logged` or not.
+pub fn cause_in(logged: bool) -> &'static str {
+    if logged {
+        "jeff.log"
+    } else {
+        "the server console"
+    }
 }
 
 #[cfg(test)]

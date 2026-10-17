@@ -99,7 +99,7 @@ impl Sessions {
         key_sha256: &str,
         now: u64,
         known: impl Fn(&str) -> bool,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), &'static str> {
         self.refresh();
         let before = self.by_digest.clone();
         let (cookie, header) = (keys::random_hex(32), keys::random_hex(32));
@@ -117,7 +117,7 @@ impl Sessions {
         Ok((cookie, header))
     }
 
-    pub fn remove(&mut self, cookie: &str, header: &str) -> Result<(), String> {
+    pub fn remove(&mut self, cookie: &str, header: &str) -> Result<(), &'static str> {
         self.refresh();
         let before = self.by_digest.clone();
         if self.by_digest.remove(&digest(cookie, header)).is_none() {
@@ -126,8 +126,9 @@ impl Sessions {
         self.save(before)
     }
 
-    /// Writes the sessions, or restores `before` and logs the cause, so memory never holds what the file lacks.
-    fn save(&mut self, before: HashMap<String, Session>) -> Result<(), String> {
+    /// Writes the sessions, or restores `before` and logs the cause, so memory never holds what the file lacks. The
+    /// error names where the cause went.
+    fn save(&mut self, before: HashMap<String, Session>) -> Result<(), &'static str> {
         let path = self.path.to_string_lossy().into_owned();
         let written = match &self.problem {
             Some(problem) => Err(format!("{problem}. Fix or delete the file.")),
@@ -139,8 +140,8 @@ impl Sessions {
         if let Err(e) = written {
             self.by_digest = before;
             eprintln!("error[sessions_not_saved]: {e}");
-            log::write(&self.config_path, "sessions_not_saved", &e, &[]);
-            return Err(e);
+            let logged = log::write(&self.config_path, "sessions_not_saved", &e, &[]);
+            return Err(log::cause_in(logged));
         }
         self.mtime = modified(&path);
         Ok(())

@@ -437,12 +437,13 @@ impl App {
         }
         save_config(path, config).map_err(|e| {
             eprintln!("error[config_not_saved]: {e}");
-            log::write(path, "config_not_saved", &e, &[]);
+            let logged = log::write(path, "config_not_saved", &e, &[]);
             Box::new(error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!(
-                    "Couldn't save {}. Check jeff.log for the cause.",
-                    file_name(path)
+                    "Couldn't save {}. Check {} for the cause.",
+                    file_name(path),
+                    log::cause_in(logged)
                 ),
             ))
         })?;
@@ -1254,8 +1255,9 @@ async fn sign_in(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
         .create(&keys::sha256(key), keys::now(), |k| {
             known.iter().any(|s| s == k)
         });
-    let Ok((cookie, half)) = created else {
-        return sessions_not_saved();
+    let (cookie, half) = match created {
+        Ok(halves) => halves,
+        Err(cause_in) => return sessions_not_saved(cause_in),
     };
     // Behind a TLS proxy jeff sees plain http, so the browser's Origin tells whether the page is on https.
     let secure = headers
@@ -1274,20 +1276,20 @@ async fn sign_in(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
         .into_response()
 }
 
-/// The cause is in the console and `jeff.log`; the client never sees the server's path.
-fn sessions_not_saved() -> Response {
+/// The client never sees the server's path.
+fn sessions_not_saved(cause_in: &str) -> Response {
     error(
         StatusCode::INTERNAL_SERVER_ERROR,
-        "Couldn't save sessions.json. Check jeff.log for the cause.",
+        format!("Couldn't save sessions.json. Check {cause_in} for the cause."),
     )
 }
 
 /// Keeps the cookie when the file cannot be written, so a session left on disk is never hidden from its browser.
 async fn sign_out(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     if let Some((cookie, header)) = session_halves(&headers)
-        && app.sessions.lock().unwrap().remove(cookie, header).is_err()
+        && let Err(cause_in) = app.sessions.lock().unwrap().remove(cookie, header)
     {
-        return sessions_not_saved();
+        return sessions_not_saved(cause_in);
     }
     (
         StatusCode::NO_CONTENT,
@@ -3219,7 +3221,7 @@ mod tests {
         let body = body_of(*r).await;
         assert_eq!(
             body["error"],
-            "Couldn't save jeff.json. Check jeff.log for the cause."
+            "Couldn't save jeff.json. Check the server console for the cause."
         );
     }
 
