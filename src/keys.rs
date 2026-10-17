@@ -62,7 +62,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn random_hex(len: usize) -> String {
+pub fn random_hex(len: usize) -> String {
     let mut bytes = vec![0u8; len];
     getrandom::fill(&mut bytes).expect("the OS random generator is unavailable");
     hex(&bytes)

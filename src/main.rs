@@ -224,6 +224,9 @@ struct App {
     warm: [AtomicU8; 2],
     /// Keys from `--api-key` / `JEFF_API_KEY`; they never expire and are managed outside the UI.
     static_keys: Vec<String>,
+    /// Admin page sign-ins: session token to the key it stands for.
+    // shortcut: held in memory, so a restart signs every browser out; persist them if that gets in the way.
+    sessions: Mutex<HashMap<String, String>>,
     /// Problems of a config file that failed to reload; the config read before stays in force while it is not empty.
     problems: Mutex<Vec<String>>,
     /// When the config file was last read, so keys created or revoked by `jeff keys` apply without a restart.
@@ -1147,8 +1150,18 @@ async fn list_keys(State(app): State<Arc<App>>, headers: HeaderMap) -> Json<Valu
     }))
 }
 
-/// The cookie the admin page signs in with. It holds the key itself, so revoking the key signs the page out.
-const SESSION_COOKIE: &str = "jeff_key";
+/// The cookie the admin page signs in with. It holds a random session token, never the key: browsers send a
+/// cookie to every port of the host, so other local servers see it.
+const SESSION_COOKIE: &str = "jeff_session";
+
+fn session_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| c.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
+}
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -1158,15 +1171,11 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
-/// Gives a request without `Authorization` the key from the session cookie. Only the admin port reads the cookie.
-async fn cookie_auth(mut req: Request, next: Next) -> Response {
-    let from_cookie = req
-        .headers()
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .find_map(|c| c.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
+/// Gives a request without `Authorization` the key its session cookie stands for, so the key check that follows
+/// still refuses a revoked or expired key. Only the admin port reads the cookie.
+async fn cookie_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
+    let from_cookie = session_token(req.headers())
+        .and_then(|token| app.sessions.lock().unwrap().get(token).cloned())
         .and_then(|key| HeaderValue::from_str(&format!("Bearer {key}")).ok());
     if !req.headers().contains_key(header::AUTHORIZATION)
         && let Some(value) = from_cookie
@@ -1176,37 +1185,35 @@ async fn cookie_auth(mut req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// Trades the admin key in `Authorization`, already checked by `require_admin`, for an HttpOnly cookie that no
-/// script on the page can read.
-async fn sign_in(headers: HeaderMap) -> Response {
-    let key = bearer(&headers).unwrap_or_default();
+/// Trades the admin key in `Authorization`, already checked by `require_admin`, for an HttpOnly session cookie.
+async fn sign_in(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let token = keys::random_hex(32);
+    let key = bearer(&headers).unwrap_or_default().to_owned();
+    app.sessions.lock().unwrap().insert(token.clone(), key);
     // Behind a TLS proxy jeff sees plain http, so the browser's Origin tells whether the page is on https.
     let secure = headers
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|o| o.starts_with("https://"));
     // 400 days is the longest lifetime browsers keep; an expired or revoked key is refused regardless.
-    let cookie = format!(
-        "{SESSION_COOKIE}={key}; Path=/; HttpOnly; SameSite=Strict; Max-Age=34560000{}",
+    session_cookie(format!(
+        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=34560000{}",
         if secure { "; Secure" } else { "" }
-    );
-    session_cookie(cookie)
+    ))
 }
 
-async fn sign_out() -> Response {
+async fn sign_out(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    if let Some(token) = session_token(&headers) {
+        app.sessions.lock().unwrap().remove(token);
+    }
     session_cookie(format!(
         "{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
     ))
 }
 
 fn session_cookie(cookie: String) -> Response {
-    match HeaderValue::from_str(&cookie) {
-        Ok(value) => (StatusCode::NO_CONTENT, [(header::SET_COOKIE, value)]).into_response(),
-        Err(_) => error(
-            StatusCode::BAD_REQUEST,
-            "the key holds characters a cookie cannot carry",
-        ),
-    }
+    let value = HeaderValue::from_str(&cookie).expect("a hex token makes a valid header");
+    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, value)]).into_response()
 }
 
 #[derive(Deserialize)]
@@ -2570,6 +2577,7 @@ async fn serve(args: ServeArgs) {
             .map(|k| k.trim().to_owned())
             .filter(|k| !k.is_empty())
             .collect(),
+        sessions: Mutex::new(HashMap::new()),
         config_mtime: Mutex::new(modified(&config_path)),
         problems: Mutex::new(Vec::new()),
         allowed_hosts: args
@@ -2687,7 +2695,7 @@ async fn serve(args: ServeArgs) {
             }),
         )
         .route("/api/session", delete(sign_out))
-        .layer(middleware::from_fn(cookie_auth))
+        .layer(middleware::from_fn_with_state(app.clone(), cookie_auth))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn_with_state(app.clone(), check_host));
 
@@ -2838,16 +2846,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_in_sets_an_http_only_cookie_secure_only_over_https() {
-        let plain = sign_in(bearer_headers("jeff_k", Some("http://127.0.0.1:8081"))).await;
+    async fn sign_in_sets_a_session_token_never_the_key() {
+        let app = Arc::new(test_app("unused-sign-in.json"));
+        let plain = sign_in(
+            State(app.clone()),
+            bearer_headers("jeff_k", Some("http://127.0.0.1:8081")),
+        )
+        .await;
         assert_eq!(plain.status(), StatusCode::NO_CONTENT);
         let cookie = set_cookie(&plain);
-        assert!(cookie.starts_with("jeff_key=jeff_k;"));
+        assert!(!cookie.contains("jeff_k"));
         assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
         assert!(!cookie.contains("Secure"));
-        let tls = sign_in(bearer_headers("jeff_k", Some("https://admin.example"))).await;
+        let token = cookie["jeff_session=".len()..]
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(app.sessions.lock().unwrap()[&token], "jeff_k");
+
+        let tls = sign_in(
+            State(app.clone()),
+            bearer_headers("jeff_k", Some("https://admin.example")),
+        )
+        .await;
         assert!(set_cookie(&tls).ends_with("; Secure"));
-        assert!(set_cookie(&sign_out().await).contains("Max-Age=0"));
+
+        let mut out = HeaderMap::new();
+        out.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("jeff_session={token}")).unwrap(),
+        );
+        assert!(set_cookie(&sign_out(State(app.clone()), out).await).contains("Max-Age=0"));
+        assert!(!app.sessions.lock().unwrap().contains_key(&token));
     }
 
     #[tokio::test]
@@ -2858,9 +2889,15 @@ mod tests {
                 .map(|v| v.to_str().unwrap().to_owned())
                 .unwrap_or_default()
         };
+        let state = test_app("unused-cookie.json");
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("t1".into(), "jeff_c".into());
         let app = Router::new()
             .route("/", get(seen))
-            .layer(middleware::from_fn(cookie_auth));
+            .layer(middleware::from_fn_with_state(Arc::new(state), cookie_auth));
         let call = |cookie: &str, auth: Option<&str>| {
             let mut req = Request::builder().uri("/").header(header::COOKIE, cookie);
             if let Some(a) = auth {
@@ -2880,14 +2917,15 @@ mod tests {
             }
         };
         assert_eq!(
-            call("theme=dark; jeff_key=jeff_c", None).await,
+            call("theme=dark; jeff_session=t1", None).await,
             "Bearer jeff_c"
         );
         assert_eq!(
-            call("jeff_key=jeff_c", Some("Bearer jeff_h")).await,
+            call("jeff_session=t1", Some("Bearer jeff_h")).await,
             "Bearer jeff_h"
         );
-        assert_eq!(call("jeff_keyx=jeff_c", None).await, "");
+        assert_eq!(call("jeff_session=unknown", None).await, "");
+        assert_eq!(call("jeff_sessionx=t1", None).await, "");
     }
 
     #[tokio::test]
@@ -2923,6 +2961,7 @@ mod tests {
             tasks: Default::default(),
             warm: Default::default(),
             static_keys: Vec::new(),
+            sessions: Mutex::new(HashMap::new()),
             problems: Mutex::new(Vec::new()),
             config_mtime: Mutex::new(modified(config_path)),
             allowed_hosts: Vec::new(),

@@ -253,13 +253,14 @@ jeff keys revoke 3f9a1c2e0b7d4a6f9e8c1b2a3d4e5f60
 
 A running server picks up changes from the terminal on the next request.
 
-The admin page signs in with an admin key. Once jeff has keys, the page opens on **Sign in to jeff**. It takes a key in three ways:
+The admin page signs in with an admin key. Once jeff has keys, the page opens on **Sign in to jeff**. It takes a key in two ways:
 
 - **The link `jeff keys create --role admin` prints**, such as `sign in to the admin page while jeff serve runs: http://127.0.0.1:8081/#key=jeff_…`. Open it while jeff runs. The link points at `JEFF_ADMIN_URL`, or at `--admin-url`, when the admin page is elsewhere.
 - **The Sign in form.** Paste an admin key and press **Sign in**. A client key is refused.
-- **The first key you create on the page**, while jeff has no keys yet.
 
-The browser keeps the key in an HttpOnly cookie, `jeff_key`, that no script on the page can read. The cookie is `SameSite=Strict`, and `Secure` when the page is on https. Only the admin port reads it; the API port takes the `Authorization` header alone. Revoking the key signs the browser out at once. **Sign out**, at the bottom of the menu, deletes the cookie. On **Access keys**, the key this browser signs in with reads **this browser**, and revoking it asks for **Revoke and sign out**.
+A first key created on the page, while jeff has no keys yet, stays on screen to copy; sign in with it next.
+
+The browser keeps a random session token in an HttpOnly cookie, `jeff_session`, that no script on the page can read. The cookie never holds the key, because browsers send a cookie to every port of the host. jeff keeps sessions in memory, so a restart signs every browser out. The cookie is `SameSite=Strict`, and `Secure` when the page is on https. Only the admin port reads it; the API port takes the `Authorization` header alone. Revoking the key signs the browser out at once. **Sign out**, at the bottom of the menu, deletes the cookie. On **Access keys**, the key this browser signs in with reads **this browser**, and revoking it asks for **Revoke and sign out**.
 
 Keys that never expire can also come from the environment. They are admin keys, and each must have at least 32 characters:
 

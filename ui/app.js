@@ -662,14 +662,15 @@ async function createKey() {
     });
     $("#key-value").value = body.key;
     $("#key-created").hidden = false;
-    // The first key locks jeff; keep it here so this page does not lock its own operator out.
-    const kept = !currentKeyId && body.role === "admin";
-    if (kept) await signIn(body.key);
-    $("#key-saved-note").textContent = kept ? "This browser now uses this key for the admin page." : "";
+    // The first key locks jeff, and this page has no sign-in yet: its next request would end on the Sign in page
+    // and hide the key, which is shown only once.
+    const locked = !info.api_key_set;
+    $("#key-saved-note").textContent = locked ? "jeff now requires a key. Copy this one, then sign in with it." : "";
     $("#key-name").value = "";
     drafts.drop("key:new");
     $("#k-draft").hidden = true;
     flash($("#key-status"), "Key created");
+    if (locked) return;
     await refreshInfo();
     await loadKeys();
   } catch (err) {
@@ -1593,14 +1594,6 @@ async function takeLinkedKey() {
   return signIn(linked);
 }
 
-/** Moves a key an older version kept in localStorage into the cookie. */
-async function moveStoredKey() {
-  const old = store.get("key");
-  if (!old) return;
-  await signIn(old);
-  try { localStorage.removeItem("jeff.key"); } catch {}
-}
-
 $("#sign-in-form").onsubmit = (e) => {
   e.preventDefault();
   busy(e.submitter, async () => {
@@ -1623,7 +1616,6 @@ addEventListener("hashchange", async () => {
 
 (async () => {
   const linkError = await takeLinkedKey();
-  await moveStoredKey();
   showTab();
   setView(view);
   loadQuestions().catch((e) => say($("#pg-status"), e.message, "err"));
