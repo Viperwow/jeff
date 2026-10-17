@@ -546,6 +546,8 @@ async function installTask(card, action) {
     disarmCurrent();
     for (const b of buttons) b.disabled = true;
     card.dataset.action = action;
+    if (action === "remove") card.dataset.removing = "1";
+    else delete card.dataset.removing;
     renderSteps(card, { steps: card.installSteps, state: "running", step: action === "remove" ? `Removing the ${name} containers…` : "" });
     try { await api(`/api/${stack}/${action}`, { method: "POST" }); }
     catch (e) {
@@ -578,16 +580,21 @@ async function installTask(card, action) {
     buttons[0].textContent = containersUp ? "Reinstall" : "Install";
     card.dataset.labelSet = "1";
   }
-  // The ready note marks the end of work seen on this page; a stack ready on arrival needs no note.
+  // A done note marks the end of work seen on this page; a stack ready on arrival needs no note.
   if (busy) card.dataset.sawWork = "1";
-  if (t.state === "error") say(out, t.error, "err");
-  else if (ready) {
-    say(out, card.dataset.sawWork ? `${name} is installed and ready.` : "", "ok");
+  const done = (text) => {
+    say(out, card.dataset.sawWork ? text : "", "ok");
     out.dataset.seen = $("#page-providers").hidden ? "" : "1";
     delete card.dataset.sawWork;
-  }
+  };
+  if (t.state === "error") say(out, t.error, "err");
+  else if (ready) done(`${name} is installed and ready.`);
   else if (t.state === "running") say(out, t.step || "Working…");
   else if (containersUp) say(out, "Downloading and loading the model. You can close this page; it keeps going.");
+  else if (card.dataset.removing) {
+    done(`${name} is uninstalled.`);
+    delete card.dataset.removing;
+  }
   if (t.state === "running" || (containersUp && !ready)) setTimeout(() => installTask(card), 2000);
   else if (ready && !card.dataset.wasReady) { card.dataset.wasReady = "1"; loadModels().catch(() => {}); }
 }
