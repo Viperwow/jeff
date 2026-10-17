@@ -228,7 +228,7 @@ Its model is `h2o-lightning/h2oai/h2o-lightning-4b`. Stop it with **Uninstall** 
 
 Without keys jeff accepts every request. Keep it that way only on your own machine.
 
-Once one key exists, every `/v1` and `/api` request on both ports needs `Authorization: Bearer <key>`. Requests without a valid key get `401`. After 20 failures in a minute, the address gets `429` until the minute ends.
+Once one key exists, every `/v1` request on the API port needs `Authorization: Bearer <key>`. Every `/v1` and `/api` request on the admin port needs that header or an admin page session. Requests without a valid key get `401`. After 20 failures in a minute, the address gets `429` until the minute ends.
 
 Each key has a role:
 
@@ -260,7 +260,11 @@ The admin page signs in with an admin key. Once jeff has keys, the page opens on
 
 A first key created on the page, while jeff has no keys yet, stays on screen to copy; sign in with it next.
 
-The browser keeps a random session token in an HttpOnly cookie, `jeff_session`, that no script on the page can read. The cookie never holds the key, because browsers send a cookie to every port of the host. jeff keeps sessions in memory, so a restart signs every browser out. The cookie is `SameSite=Strict`, and `Secure` when the page is on https. Only the admin port reads it; the API port takes the `Authorization` header alone. Revoking the key signs the browser out at once. **Sign out**, at the bottom of the menu, deletes the cookie. On **Access keys**, the key this browser signs in with reads **this browser**, and revoking it asks for **Revoke and sign out**.
+Signing in starts a session in two halves. One half sits in an HttpOnly cookie, `jeff_session`, that no script on the page can read. The other half sits in the page's local storage and goes in the `X-Jeff-Session` header. A request needs both halves. Browsers send a cookie to every port of the host, so another server on the same host can see the cookie half, but never the header half. Neither half holds the key. The cookie is `SameSite=Strict`, and `Secure` when the page is on https. Only the admin port reads sessions; the API port takes the `Authorization` header alone. A session lasts 30 days. A session cannot start another one: signing in takes the key itself.
+
+jeff keeps sessions in `sessions.json`, next to the config, so a restart keeps every browser signed in. The file holds only the SHA-256 of both halves and of the key. Deleting an entry from the file signs that browser out without a restart. If the file breaks, jeff keeps the sessions it read before, refuses new sign-ins, and logs `sessions_invalid` to `jeff.log` until the file is fixed or deleted.
+
+Revoking the key signs the browser out at once. **Sign out**, at the bottom of the menu, ends the session. On **Access keys**, the key this browser signs in with reads **this browser**, and revoking it asks for **Revoke and sign out**.
 
 Keys that never expire can also come from the environment. They are admin keys, and each must have at least 32 characters:
 

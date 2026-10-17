@@ -113,8 +113,11 @@ const drafts = {
 /** Runs `track` after the click that changed a form, such as adding or removing a row, has done its work. */
 const afterClick = (track) => () => setTimeout(track);
 
+/** The half of the session this page sends; the other half rides in the HttpOnly cookie. */
+const sessionHeader = () => ({ "x-jeff-session": store.get("session") || "" });
+
 async function api(path, opts = {}) {
-  const r = await fetch(path, opts).catch(() => {
+  const r = await fetch(path, { ...opts, headers: { ...opts.headers, ...sessionHeader() } }).catch(() => {
     throw new Error("Cannot reach jeff. Start it with jeff serve and reload this page.");
   });
   const body = await r.json().catch(() => ({}));
@@ -1577,11 +1580,14 @@ function showSignIn(message) {
   say($("#sign-in-status"), message, "err");
 }
 
-/** Trades a key for the HttpOnly cookie the page signs in with. Returns the error, or "" on success. */
+/** Trades a key for a session. Returns the error, or "" on success. */
 async function signIn(key) {
   const r = await fetch("/api/session", { method: "POST", headers: { authorization: `Bearer ${key}` } }).catch(() => null);
   if (!r) return "Cannot reach jeff.";
-  if (r.ok) return "";
+  if (r.ok) {
+    store.set("session", (await r.json()).session);
+    return "";
+  }
   if (r.status === 401) return "jeff rejected that key.";
   return (await r.json().catch(() => ({}))).error || `HTTP ${r.status}`;
 }
@@ -1604,7 +1610,8 @@ $("#sign-in-form").onsubmit = (e) => {
 };
 
 $("#sign-out").onclick = async () => {
-  await fetch("/api/session", { method: "DELETE" }).catch(() => {});
+  await fetch("/api/session", { method: "DELETE", headers: sessionHeader() }).catch(() => {});
+  try { localStorage.removeItem("jeff.session"); } catch {}
   location.reload();
 };
 

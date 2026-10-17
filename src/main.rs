@@ -3,9 +3,10 @@ mod install;
 mod keys;
 mod log;
 mod questions;
+mod sessions;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
@@ -183,7 +184,10 @@ fn read_config(path: &str) -> Result<Config, String> {
 /// Writes the config readable by its owner only: it holds provider keys and access-key hashes. The text goes to a
 /// temporary file first, so a crash mid-write cannot leave a truncated config behind.
 fn save_config(path: &str, config: &Config) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(config).unwrap();
+    write_private(path, &serde_json::to_string_pretty(config).unwrap())
+}
+
+fn write_private(path: &str, text: &str) -> Result<(), String> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -224,9 +228,7 @@ struct App {
     warm: [AtomicU8; 2],
     /// Keys from `--api-key` / `JEFF_API_KEY`; they never expire and are managed outside the UI.
     static_keys: Vec<String>,
-    /// Admin page sign-ins: session token to the key it stands for.
-    // shortcut: held in memory, so a restart signs every browser out; persist them if that gets in the way.
-    sessions: Mutex<HashMap<String, String>>,
+    sessions: Mutex<sessions::Sessions>,
     /// Problems of a config file that failed to reload; the config read before stays in force while it is not empty.
     problems: Mutex<Vec<String>>,
     /// When the config file was last read, so keys created or revoked by `jeff keys` apply without a restart.
@@ -1034,7 +1036,16 @@ async fn require_key(
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
-        let role = keys::verify(auth, &app.static_keys, &app.config.read().await.keys, now);
+        let role = {
+            let config = app.config.read().await;
+            let stored = &config.keys;
+            match req.extensions().get::<SessionKey>() {
+                Some(SessionKey(digest)) => {
+                    keys::verify_digest(digest, &app.static_keys, stored, now)
+                }
+                None => keys::verify(auth, &app.static_keys, stored, now),
+            }
+        };
         if let Some(role) = role
             && !role.allows(needed)
         {
@@ -1135,9 +1146,16 @@ fn key_view(k: &keys::StoredKey) -> Value {
     json!({ "id": k.id, "name": k.name, "role": k.role, "prefix": k.prefix, "created_at": k.created_at, "expires_at": k.expires_at })
 }
 
-async fn list_keys(State(app): State<Arc<App>>, headers: HeaderMap) -> Json<Value> {
+async fn list_keys(
+    State(app): State<Arc<App>>,
+    session: Option<Extension<SessionKey>>,
+    headers: HeaderMap,
+) -> Json<Value> {
     let config = app.config.read().await;
-    let digest = bearer(&headers).map(keys::sha256);
+    let digest = match session {
+        Some(Extension(SessionKey(digest))) => Some(digest),
+        None => bearer(&headers).map(keys::sha256),
+    };
     let current = config
         .keys
         .iter()
@@ -1150,17 +1168,24 @@ async fn list_keys(State(app): State<Arc<App>>, headers: HeaderMap) -> Json<Valu
     }))
 }
 
-/// The cookie the admin page signs in with. It holds a random session token, never the key: browsers send a
-/// cookie to every port of the host, so other local servers see it.
+/// The cookie that carries one half of an admin page session; `SESSION_HEADER` carries the other.
 const SESSION_COOKIE: &str = "jeff_session";
+const SESSION_HEADER: &str = "x-jeff-session";
 
-fn session_token(headers: &HeaderMap) -> Option<&str> {
-    headers
+/// The SHA-256 of the key a request's session stands for, set by `cookie_auth` for `require_key`.
+#[derive(Clone)]
+struct SessionKey(String);
+
+/// The cookie half and the header half of the request's session.
+fn session_halves(headers: &HeaderMap) -> Option<(&str, &str)> {
+    let cookie = headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
-        .find_map(|c| c.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
+        .find_map(|c| c.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))?;
+    let header = headers.get(SESSION_HEADER)?.to_str().ok()?;
+    Some((cookie, header))
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -1171,49 +1196,87 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
-/// Gives a request without `Authorization` the key its session cookie stands for, so the key check that follows
-/// still refuses a revoked or expired key. Only the admin port reads the cookie.
+/// Marks a request without `Authorization` with the key its session stands for, so the key check that follows
+/// still refuses a revoked or expired key. Only the admin port reads sessions.
 async fn cookie_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
-    let from_cookie = session_token(req.headers())
-        .and_then(|token| app.sessions.lock().unwrap().get(token).cloned())
-        .and_then(|key| HeaderValue::from_str(&format!("Bearer {key}")).ok());
+    let key = session_halves(req.headers()).and_then(|(cookie, header)| {
+        app.sessions
+            .lock()
+            .unwrap()
+            .find(cookie, header, keys::now())
+    });
     if !req.headers().contains_key(header::AUTHORIZATION)
-        && let Some(value) = from_cookie
+        && let Some(key) = key
     {
-        req.headers_mut().insert(header::AUTHORIZATION, value);
+        req.extensions_mut().insert(SessionKey(key));
     }
     next.run(req).await
 }
 
-/// Trades the admin key in `Authorization`, already checked by `require_admin`, for an HttpOnly session cookie.
+/// Trades the admin key in `Authorization`, already checked by `require_admin`, for a session. A session cannot
+/// start another, so a copied session ends at sign-out.
 async fn sign_in(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    let token = keys::random_hex(32);
-    let key = bearer(&headers).unwrap_or_default().to_owned();
-    app.sessions.lock().unwrap().insert(token.clone(), key);
+    let Some(key) = bearer(&headers) else {
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "sign in with an admin key: Authorization: Bearer <key>",
+        );
+    };
+    let known: Vec<String> = app
+        .config
+        .read()
+        .await
+        .keys
+        .iter()
+        .map(|k| k.sha256.clone())
+        .chain(app.static_keys.iter().map(|k| keys::sha256(k)))
+        .collect();
+    let created = app
+        .sessions
+        .lock()
+        .unwrap()
+        .create(&keys::sha256(key), keys::now(), |k| {
+            known.iter().any(|s| s == k)
+        });
+    let (cookie, half) = match created {
+        Ok(halves) => halves,
+        Err(e) => {
+            eprintln!("{e}");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+    };
     // Behind a TLS proxy jeff sees plain http, so the browser's Origin tells whether the page is on https.
     let secure = headers
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|o| o.starts_with("https://"));
-    // 400 days is the longest lifetime browsers keep; an expired or revoked key is refused regardless.
-    session_cookie(format!(
-        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=34560000{}",
+    let cookie = format!(
+        "{SESSION_COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
+        sessions::LIFETIME_SECS,
         if secure { "; Secure" } else { "" }
-    ))
+    );
+    (
+        [(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap())],
+        Json(json!({ "session": half })),
+    )
+        .into_response()
 }
 
+/// Clears the cookie even when the file cannot be written: the browser then holds no half of the session.
 async fn sign_out(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    if let Some(token) = session_token(&headers) {
-        app.sessions.lock().unwrap().remove(token);
+    if let Some((cookie, header)) = session_halves(&headers)
+        && let Err(e) = app.sessions.lock().unwrap().remove(cookie, header)
+    {
+        eprintln!("{e}");
     }
-    session_cookie(format!(
-        "{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
-    ))
-}
-
-fn session_cookie(cookie: String) -> Response {
-    let value = HeaderValue::from_str(&cookie).expect("a hex token makes a valid header");
-    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, value)]).into_response()
+    (
+        StatusCode::NO_CONTENT,
+        [(
+            header::SET_COOKIE,
+            HeaderValue::from_static("jeff_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
+        )],
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -1888,7 +1951,7 @@ struct ServeArgs {
     #[arg(long, env = "JEFF_CONFIG")]
     config: Option<String>,
     /// A key that never expires; repeat the flag or comma-separate the env var for several. With any key here or in
-    /// the config, every /v1 and /api request on both ports must send `Authorization: Bearer <key>`
+    /// the config, every /v1 and /api request must send `Authorization: Bearer <key>`; the admin page signs in instead
     #[arg(
         long = "api-key",
         env = "JEFF_API_KEY",
@@ -2577,7 +2640,7 @@ async fn serve(args: ServeArgs) {
             .map(|k| k.trim().to_owned())
             .filter(|k| !k.is_empty())
             .collect(),
-        sessions: Mutex::new(HashMap::new()),
+        sessions: Mutex::new(sessions::Sessions::new(&config_path)),
         config_mtime: Mutex::new(modified(&config_path)),
         problems: Mutex::new(Vec::new()),
         allowed_hosts: args
@@ -2846,60 +2909,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_in_sets_a_session_token_never_the_key() {
-        let app = Arc::new(test_app("unused-sign-in.json"));
+    async fn sign_in_gives_two_halves_and_never_the_key() {
+        let dir = env::temp_dir().join(format!("jeff-test-sign-in-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let app = test_app(dir.join("config.json").to_str().unwrap());
+        let (key, record) = keys::generate("me", keys::Role::Admin, None);
+        app.config.write().await.keys = vec![record];
+        let app = Arc::new(app);
         let plain = sign_in(
             State(app.clone()),
-            bearer_headers("jeff_k", Some("http://127.0.0.1:8081")),
+            bearer_headers(&key, Some("http://127.0.0.1:8081")),
         )
         .await;
-        assert_eq!(plain.status(), StatusCode::NO_CONTENT);
+        assert_eq!(plain.status(), StatusCode::OK);
         let cookie = set_cookie(&plain);
-        assert!(!cookie.contains("jeff_k"));
+        assert!(!cookie.contains(&key));
         assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
-        assert!(!cookie.contains("Secure"));
-        let token = cookie["jeff_session=".len()..]
+        assert!(cookie.contains("Max-Age=2592000") && !cookie.contains("Secure"));
+        let cookie_half = cookie["jeff_session=".len()..]
             .split(';')
             .next()
             .unwrap()
             .to_owned();
-        assert_eq!(app.sessions.lock().unwrap()[&token], "jeff_k");
+        let header_half = body_of(plain).await["session"].as_str().unwrap().to_owned();
+        let digest = app
+            .sessions
+            .lock()
+            .unwrap()
+            .find(&cookie_half, &header_half, keys::now());
+        assert_eq!(digest, Some(keys::sha256(&key)));
 
         let tls = sign_in(
             State(app.clone()),
-            bearer_headers("jeff_k", Some("https://admin.example")),
+            bearer_headers(&key, Some("https://admin.example")),
         )
         .await;
         assert!(set_cookie(&tls).ends_with("; Secure"));
 
-        let mut out = HeaderMap::new();
-        out.insert(
+        let mut session = HeaderMap::new();
+        session.insert(
             header::COOKIE,
-            HeaderValue::from_str(&format!("jeff_session={token}")).unwrap(),
+            HeaderValue::from_str(&format!("jeff_session={cookie_half}")).unwrap(),
         );
-        assert!(set_cookie(&sign_out(State(app.clone()), out).await).contains("Max-Age=0"));
-        assert!(!app.sessions.lock().unwrap().contains_key(&token));
-    }
+        session.insert(SESSION_HEADER, HeaderValue::from_str(&header_half).unwrap());
+        let again = sign_in(State(app.clone()), session.clone()).await;
+        assert_eq!(again.status(), StatusCode::UNAUTHORIZED);
 
-    #[tokio::test]
-    async fn the_cookie_becomes_the_bearer_unless_a_header_is_sent() {
-        let seen = |req: Request| async move {
-            req.headers()
-                .get(header::AUTHORIZATION)
-                .map(|v| v.to_str().unwrap().to_owned())
-                .unwrap_or_default()
-        };
-        let state = test_app("unused-cookie.json");
-        state
+        assert!(set_cookie(&sign_out(State(app.clone()), session).await).contains("Max-Age=0"));
+        let found = app
             .sessions
             .lock()
             .unwrap()
-            .insert("t1".into(), "jeff_c".into());
+            .find(&cookie_half, &header_half, keys::now());
+        assert_eq!(found, None);
+    }
+
+    #[tokio::test]
+    async fn a_session_needs_the_cookie_and_the_header_and_no_authorization() {
+        let seen = |req: Request| async move {
+            req.extensions()
+                .get::<SessionKey>()
+                .map(|k| k.0.clone())
+                .unwrap_or_default()
+        };
+        let dir = env::temp_dir().join(format!("jeff-test-halves-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app(dir.join("config.json").to_str().unwrap());
+        let (c, h) = state
+            .sessions
+            .lock()
+            .unwrap()
+            .create("k1", keys::now(), |_| true)
+            .unwrap();
         let app = Router::new()
             .route("/", get(seen))
             .layer(middleware::from_fn_with_state(Arc::new(state), cookie_auth));
-        let call = |cookie: &str, auth: Option<&str>| {
+        let call = |cookie: String, half: Option<&str>, auth: Option<&str>| {
             let mut req = Request::builder().uri("/").header(header::COOKIE, cookie);
+            if let Some(v) = half {
+                req = req.header(SESSION_HEADER, v);
+            }
             if let Some(a) = auth {
                 req = req.header(header::AUTHORIZATION, a);
             }
@@ -2917,15 +3008,19 @@ mod tests {
             }
         };
         assert_eq!(
-            call("theme=dark; jeff_session=t1", None).await,
-            "Bearer jeff_c"
+            call(format!("theme=dark; jeff_session={c}"), Some(&h), None).await,
+            "k1"
+        );
+        assert_eq!(call(format!("jeff_session={c}"), None, None).await, "");
+        assert_eq!(call("theme=dark".into(), Some(&h), None).await, "");
+        assert_eq!(
+            call(format!("jeff_session={c}"), Some("other"), None).await,
+            ""
         );
         assert_eq!(
-            call("jeff_session=t1", Some("Bearer jeff_h")).await,
-            "Bearer jeff_h"
+            call(format!("jeff_session={c}"), Some(&h), Some("Bearer jeff_h")).await,
+            ""
         );
-        assert_eq!(call("jeff_session=unknown", None).await, "");
-        assert_eq!(call("jeff_sessionx=t1", None).await, "");
     }
 
     #[tokio::test]
@@ -2934,10 +3029,19 @@ mod tests {
         let (key, record) = keys::generate("me", keys::Role::Admin, None);
         let (_, other) = keys::generate("other", keys::Role::Admin, None);
         app.config.write().await.keys = vec![other, record.clone()];
-        let body = list_keys(State(Arc::new(app)), bearer_headers(&key, None))
+        let app = Arc::new(app);
+        let by_key = list_keys(State(app.clone()), None, bearer_headers(&key, None))
             .await
             .0;
-        assert_eq!(body["current_key_id"], record.id);
+        assert_eq!(by_key["current_key_id"], record.id);
+        let by_session = list_keys(
+            State(app),
+            Some(Extension(SessionKey(record.sha256.clone()))),
+            HeaderMap::new(),
+        )
+        .await
+        .0;
+        assert_eq!(by_session["current_key_id"], record.id);
     }
 
     #[test]
@@ -2961,7 +3065,7 @@ mod tests {
             tasks: Default::default(),
             warm: Default::default(),
             static_keys: Vec::new(),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(sessions::Sessions::new(config_path)),
             problems: Mutex::new(Vec::new()),
             config_mtime: Mutex::new(modified(config_path)),
             allowed_hosts: Vec::new(),

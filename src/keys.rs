@@ -101,11 +101,20 @@ pub fn verify(
     now: u64,
 ) -> Option<Role> {
     let given = header?.strip_prefix("Bearer ")?;
-    let digest = sha256(given);
+    verify_digest(&sha256(given), static_keys, stored, now)
+}
+
+/// The role of the key whose SHA-256 is `digest`, as an admin page session names it.
+pub fn verify_digest(
+    digest: &str,
+    static_keys: &[String],
+    stored: &[StoredKey],
+    now: u64,
+) -> Option<Role> {
     // Every key is checked without stopping at the first match, so timing does not reveal which one matched.
-    let static_ok = static_keys
-        .iter()
-        .fold(false, |ok, k| ok | same(given.as_bytes(), k.as_bytes()));
+    let static_ok = static_keys.iter().fold(false, |ok, k| {
+        ok | same(digest.as_bytes(), sha256(k).as_bytes())
+    });
     let stored_role = stored.iter().fold(None, |role, k| {
         if same(digest.as_bytes(), k.sha256.as_bytes()) & !k.expired(now) {
             Some(k.role)
