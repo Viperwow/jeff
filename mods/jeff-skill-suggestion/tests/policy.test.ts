@@ -480,7 +480,7 @@ disable-model-invocation: ${value}
 
   test('a setup that cannot be planned tells the model to change nothing', () => {
     const text = setupAborted('the skills could not be listed')
-    expect(text).toContain('could not be prepared: the skills could not be listed')
+    expect(text).toContain("Couldn't prepare the jeff-skill-suggestion setup: the skills could not be listed")
     expect(text).toContain('do not edit any settings file')
   })
 

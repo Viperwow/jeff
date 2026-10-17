@@ -309,9 +309,10 @@ impl Claim {
             .map_err(|e| format!("{}: {e}", path.display()))?;
         match file.try_lock() {
             Ok(()) => Ok(Self { stack, _lock: file }),
-            Err(fs::TryLockError::WouldBlock) => {
-                Err(format!("another {} action is running", stack.name()))
-            }
+            Err(fs::TryLockError::WouldBlock) => Err(format!(
+                "Another {} action is running. Wait for it to finish.",
+                stack.name()
+            )),
             Err(fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
         }
     }
@@ -440,7 +441,10 @@ mod tests {
         let dir = env::temp_dir().join(format!("jeff-claim-{}", std::process::id()));
         let first = Claim::in_dir(Stack::Clm, &dir).unwrap();
         let refused = Claim::in_dir(Stack::Clm, &dir).err().unwrap();
-        assert_eq!(refused, "another CLM action is running");
+        assert_eq!(
+            refused,
+            "Another CLM action is running. Wait for it to finish."
+        );
         drop(first);
         assert!(Claim::in_dir(Stack::Clm, &dir).is_ok());
         fs::remove_dir_all(&dir).ok();

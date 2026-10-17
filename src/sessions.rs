@@ -67,7 +67,7 @@ impl Sessions {
             Ok(by_digest) => {
                 self.by_digest = by_digest;
                 if self.problem.take().is_some() {
-                    let line = format!("{file} fixed; sessions reloaded");
+                    let line = format!("{file} is fixed. jeff reloaded the sessions.");
                     eprintln!("{line}");
                     log::write(&self.config_path, "sessions_fixed", &line, &[]);
                 }

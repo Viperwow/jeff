@@ -9,7 +9,7 @@ pub type Classifiers = Map<String, Value>;
 
 /// Fields beyond `questions`, `model` and `description` are refused, so a typo such as `modle` does not pass silently.
 pub fn validate(key: &str, c: &Value) -> Result<(), String> {
-    check(key, c).map_err(|e| format!("classifier '{key}': {e}"))?;
+    check(key, c).map_err(|e| format!("Classifier '{key}': {e}"))?;
     let unknown = c
         .as_object()
         .into_iter()
@@ -17,7 +17,7 @@ pub fn validate(key: &str, c: &Value) -> Result<(), String> {
         .find(|f| !["questions", "model", "description"].contains(&f.as_str()));
     match unknown {
         Some(f) => Err(format!(
-            "classifier '{key}': unknown field '{f}'; a classifier has questions, model and description"
+            "Classifier '{key}': Unknown field '{f}'. Keep only questions, model and description."
         )),
         None => Ok(()),
     }
@@ -26,52 +26,62 @@ pub fn validate(key: &str, c: &Value) -> Result<(), String> {
 fn check(key: &str, c: &Value) -> Result<(), &'static str> {
     questions::check_key(key)?;
     let Some(c) = c.as_object() else {
-        return Err("must be an object");
+        return Err("It is not an object. Send the classifier as a JSON object.");
     };
     let Some(keys) = c
         .get("questions")
         .and_then(Value::as_array)
         .filter(|a| !a.is_empty())
     else {
-        return Err("questions must be a non-empty array of question keys");
+        return Err("questions is not a non-empty array of question keys. List the question keys.");
     };
     let mut seen = HashSet::new();
     for k in keys {
         let Some(k) = k.as_str() else {
-            return Err("questions must be a non-empty array of question keys");
+            return Err(
+                "questions is not a non-empty array of question keys. List the question keys.",
+            );
         };
         if !seen.insert(k) {
-            return Err("questions must not repeat a key");
+            return Err("questions repeats a key. List each key once.");
         }
     }
     if c.get("model")
         .is_some_and(|m| m.as_str().is_none_or(|m| m.trim().is_empty()))
     {
-        return Err("model must be a non-empty string");
+        return Err("The model is empty. Name a model or remove the field.");
     }
     if c.get("description").is_some_and(|d| {
         d.as_str()
             .is_none_or(|d| d.trim().is_empty() || d.chars().count() > 1000)
     }) {
-        return Err("description must be a non-empty string of up to 1000 characters");
+        return Err(
+            "The description is empty or longer than 1000 characters. Use 1 to 1000 characters.",
+        );
     }
     Ok(())
 }
 
 fn not_found(key: &str) -> Change {
-    Change::NotFound(format!("unknown classifier '{key}'"))
+    Change::NotFound(format!(
+        "No classifier '{key}'. Check the key or create the classifier first."
+    ))
 }
 
 /// Adds new classifiers; one invalid or existing key refuses them all.
 pub fn create(saved: &mut Classifiers, input: Classifiers) -> Result<(), Change> {
     if input.is_empty() {
-        return Err(Change::Invalid("no classifiers given".into()));
+        return Err(Change::Invalid(
+            "No classifiers given. Send at least one classifier.".into(),
+        ));
     }
     for (k, c) in &input {
         validate(k, c).map_err(Change::Invalid)?;
     }
     if let Some(key) = input.keys().find(|k| saved.contains_key(*k)) {
-        return Err(Change::Exists(format!("classifier '{key}' already exists")));
+        return Err(Change::Exists(format!(
+            "Classifier '{key}' already exists. Pick another key or update the saved one."
+        )));
     }
     saved.extend(input);
     Ok(())
@@ -114,7 +124,9 @@ pub fn skip_reason(key: &str, saved: &Questions) -> String {
     } else {
         "is not saved"
     };
-    format!("question '{key}' {why}; the classifier skips it")
+    format!(
+        "Question '{key}' {why}, so the classifier skips it. Fix the question or remove it from the classifier."
+    )
 }
 
 /// Turns a classifier into the `questions` input of `/v1/systemone`, with the keys it skips. The override goes
@@ -126,7 +138,9 @@ pub fn resolve(key: &str, c: &Value, saved: &Questions) -> Result<(Value, Vec<St
         .filter(|k| !skipped.iter().any(|s| s == k))
         .collect();
     if working.is_empty() {
-        return Err(format!("classifier '{key}' has no working questions"));
+        return Err(format!(
+            "Classifier '{key}' has no working questions. Fix its questions or add saved ones."
+        ));
     }
     let input = match c.get("model") {
         Some(model) => Value::Object(
@@ -217,7 +231,10 @@ mod tests {
     #[test]
     fn resolve_needs_one_working_question() {
         let e = resolve("c", &json!({"questions": ["gone"]}), &Questions::new()).unwrap_err();
-        assert_eq!(e, "classifier 'c' has no working questions");
+        assert_eq!(
+            e,
+            "Classifier 'c' has no working questions. Fix its questions or add saved ones."
+        );
     }
 
     #[test]
@@ -225,11 +242,11 @@ mod tests {
         let saved = qs(json!({"bad": {"type": "maybe", "instructions": "x"}}));
         assert_eq!(
             skip_reason("gone", &saved),
-            "question 'gone' is not saved; the classifier skips it"
+            "Question 'gone' is not saved, so the classifier skips it. Fix the question or remove it from the classifier."
         );
         assert_eq!(
             skip_reason("bad", &saved),
-            "question 'bad' is invalid; the classifier skips it"
+            "Question 'bad' is invalid, so the classifier skips it. Fix the question or remove it from the classifier."
         );
     }
 
@@ -258,7 +275,7 @@ mod tests {
         assert_eq!(
             e,
             Change::Invalid(
-                "classifier 'k': unknown field 'modle'; a classifier has questions, model and description"
+                "Classifier 'k': Unknown field 'modle'. Keep only questions, model and description."
                     .into()
             )
         );
@@ -278,7 +295,7 @@ mod tests {
         for bad in [json!(""), json!("  "), json!(1), json!("x".repeat(1001))] {
             assert_eq!(
                 with(bad).unwrap_err(),
-                "classifier 'k': description must be a non-empty string of up to 1000 characters"
+                "Classifier 'k': The description is empty or longer than 1000 characters. Use 1 to 1000 characters."
             );
         }
     }
@@ -309,7 +326,9 @@ mod tests {
         remove(&mut saved, "k").unwrap();
         assert_eq!(
             remove(&mut saved, "k"),
-            Err(Change::NotFound("unknown classifier 'k'".into()))
+            Err(Change::NotFound(
+                "No classifier 'k'. Check the key or create the classifier first.".into()
+            ))
         );
     }
 }
