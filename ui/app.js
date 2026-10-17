@@ -157,8 +157,11 @@ function showTab() {
   for (const t of PAGES) $("#page-" + t).hidden = t !== id;
   for (const n of $$(".unsaved-providers")) n.hidden = !store.get("draft:providers");
   if (id === "keys" && config) loadKeys().catch((e) => say($("#key-status"), e.message, "err"));
-  // A ready note has done its job once the page is left.
-  if (id !== "providers") for (const n of $$(".p-task[data-tone=ok]")) say(n, "");
+  // A ready note has done its job once it was on screen and the page is left; one that arrived while away waits.
+  for (const n of $$(".p-task[data-tone=ok]")) {
+    if (id === "providers") n.dataset.seen = "1";
+    else if (n.dataset.seen) say(n, "");
+  }
   for (const a of $$(".tab")) {
     if (a.getAttribute("href") === "#" + id) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
@@ -580,6 +583,7 @@ async function installTask(card, action) {
   if (t.state === "error") say(out, t.error, "err");
   else if (ready) {
     say(out, card.dataset.sawWork ? `${name} is installed and ready.` : "", "ok");
+    out.dataset.seen = $("#page-providers").hidden ? "" : "1";
     delete card.dataset.sawWork;
   }
   else if (t.state === "running") say(out, t.step || "Working…");
