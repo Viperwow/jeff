@@ -157,6 +157,8 @@ function showTab() {
   for (const t of PAGES) $("#page-" + t).hidden = t !== id;
   for (const n of $$(".unsaved-providers")) n.hidden = !store.get("draft:providers");
   if (id === "keys" && config) loadKeys().catch((e) => say($("#key-status"), e.message, "err"));
+  // A ready note has done its job once the page is left.
+  if (id !== "providers") for (const n of $$(".p-task[data-tone=ok]")) say(n, "");
   for (const a of $$(".tab")) {
     if (a.getAttribute("href") === "#" + id) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
@@ -573,8 +575,13 @@ async function installTask(card, action) {
     buttons[0].textContent = containersUp ? "Reinstall" : "Install";
     card.dataset.labelSet = "1";
   }
+  // The ready note marks the end of work seen on this page; a stack ready on arrival needs no note.
+  if (busy) card.dataset.sawWork = "1";
   if (t.state === "error") say(out, t.error, "err");
-  else if (ready) say(out, `${name} is installed and ready.`, "ok");
+  else if (ready) {
+    say(out, card.dataset.sawWork ? `${name} is installed and ready.` : "", "ok");
+    delete card.dataset.sawWork;
+  }
   else if (t.state === "running") say(out, t.step || "Working…");
   else if (containersUp) say(out, "Downloading and loading the model. You can close this page; it keeps going.");
   if (t.state === "running" || (containersUp && !ready)) setTimeout(() => installTask(card), 2000);
