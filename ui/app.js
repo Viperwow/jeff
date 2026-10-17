@@ -547,6 +547,8 @@ async function installTask(card, action) {
     disarmCurrent();
     for (const b of buttons) b.disabled = true;
     card.dataset.action = action;
+    // Set at the click, so an action that ends before the first status read still gets its note.
+    card.dataset.sawWork = "1";
     if (action === "remove") card.dataset.removing = "1";
     else delete card.dataset.removing;
     renderSteps(card, { steps: card.installSteps, state: "running", step: action === "remove" ? `Removing the ${name} containers…` : "" });
@@ -555,6 +557,7 @@ async function installTask(card, action) {
       for (const b of buttons) b.disabled = false;
       delete card.dataset.action;
       delete card.dataset.removing;
+      delete card.dataset.sawWork;
       renderSteps(card, { steps: card.installSteps, state: "idle" });
       say(out, e.message, "err");
       return;
