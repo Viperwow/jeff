@@ -498,7 +498,8 @@ function renderSteps(card, t) {
     current.replaceChildren(stepIcon("spin"), el("span", "shrink-0 font-medium", "Uninstalling"), el("span", "note min-w-0", t.step || `Removing the ${stackName(card)} containers…`));
     return false;
   }
-  const started = running || t.state === "error" || steps.slice(1).some((s) => s.done);
+  // Images and weights stay on disk after an uninstall, so only running containers mean an install is under way.
+  const started = running || t.state === "error" || steps.some((s) => s.id === "containers" && s.done);
   let active = steps.findIndex((s) => !s.done);
   // A reinstall recreates running containers, so every step still reads done until compose stops them.
   const restarting = running && steps.length > 0 && active === -1;
@@ -553,6 +554,7 @@ async function installTask(card, action) {
     catch (e) {
       for (const b of buttons) b.disabled = false;
       delete card.dataset.action;
+      delete card.dataset.removing;
       renderSteps(card, { steps: card.installSteps, state: "idle" });
       say(out, e.message, "err");
       return;
