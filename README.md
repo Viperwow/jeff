@@ -411,6 +411,7 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 - **Commit hook.** Run `pnpm install` in the repository root once. A git hook then checks every commit message.
 - **Pull requests.** CI checks the commit messages of every pull request, plus `cargo fmt`, `cargo clippy` and `cargo test`.
 - **Releases.** A `feat` or `fix` merged into `main` publishes a new release with binaries for every system.
+- **Error messages.** Each error says what happened, then what to do next: `Couldn't save jeff.json. Check jeff.log for the cause.` One situation gets one wording in the API, the CLI, the admin page and the mod. An error that has its cause on the server names `jeff.log`. An error a client receives never holds a server path.
 
 ## License
 
