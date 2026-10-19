@@ -804,6 +804,12 @@ function renumber(card) {
   $$(".q-level-n", card).forEach((n, i) => (n.textContent = String(i)));
 }
 
+/** Options that let a choice question decline: the model can say it lacks context or is unsure instead of guessing. */
+const UNSURE = {
+  insufficient_context: "Not enough context to answer.",
+  uncertain: "Not sure about the answer.",
+};
+
 function setType(card, type, rows) {
   const info = TYPE_INFO[type];
   card.dataset.type = type;
@@ -812,6 +818,7 @@ function setType(card, type, rows) {
   $(".q-badge", card).dataset.type = type;
   $(".q-rows", card).replaceChildren();
   $(".q-add", card).hidden = type === "noul";
+  $(".q-unsure", card).hidden = type !== "choice";
   $(".q-add", card).textContent = info.add;
   $(".q-help", card).textContent = info.help;
   for (const r of rows || []) addRow(card, type, ...r);
@@ -824,6 +831,7 @@ function addQuestion(q) {
   $(".q-instr", card).value = q.instructions || "";
   $(".q-type", card).onchange = (e) => setType(card, e.target.value);
   $(".q-add", card).onclick = () => addRow(card, card.dataset.type);
+  $(".q-unsure-on", card).checked = q.unsure ?? true;
   setType(card, q.type || "noul", q.rows);
   $("#q-form-card").replaceChildren(card);
   return card;
@@ -843,6 +851,7 @@ function readQuestions() {
         if (k) q.criteria[k] = $(".q-opt-desc", row).value.trim() || k;
       }
       if (Object.keys(q.criteria).length < 2) throw new Error(`"${key}" has fewer than two options. Add another option.`);
+      if ($(".q-unsure-on", card).checked) Object.assign(q.criteria, UNSURE);
     } else if (q.type === "score") {
       q.criteria = $$(".q-level", card).map((i) => i.value.trim()).filter(Boolean);
       if (q.criteria.length < 2) throw new Error(`"${key}" has fewer than two levels. Add another level.`);
@@ -877,8 +886,10 @@ function nativeOf(q) {
 
 /** Turns a saved question into what `addQuestion` takes. */
 function builderOf(key, q) {
-  const rows = q.type === "choice" ? Object.entries(q.criteria || {}) : q.type === "score" ? (q.criteria || []).map((c) => [c]) : undefined;
-  return { key, type: q.type, instructions: q.instructions, rows };
+  const unsure = q.type === "choice" && Object.keys(UNSURE).every((k) => k in (q.criteria || {}));
+  const rows = q.type === "choice" ? Object.entries(q.criteria || {}).filter(([k]) => !(unsure && k in UNSURE))
+    : q.type === "score" ? (q.criteria || []).map((c) => [c]) : undefined;
+  return { key, type: q.type, instructions: q.instructions, rows, unsure };
 }
 
 // The Playground kept the state inside `draft`; saveState below moves it to `state`.
@@ -1150,7 +1161,7 @@ function questionSnapshot() {
   const type = card.dataset.type;
   const rows = type === "choice" ? $$(".q-row", card).map((r) => [$(".q-opt-key", r).value, $(".q-opt-desc", r).value])
     : type === "score" ? $$(".q-level", card).map((i) => [i.value]) : undefined;
-  return { q: { key: $(".q-key", card).value, type, instructions: $(".q-instr", card).value, rows }, model: $("#q-form-model").value };
+  return { q: { key: $(".q-key", card).value, type, instructions: $(".q-instr", card).value, rows, unsure: $(".q-unsure-on", card).checked }, model: $("#q-form-model").value };
 }
 
 const trackQuestion = () => { if (!$("#q-form-view").hidden) drafts.track(questionDraftId(), questionSnapshot()); };

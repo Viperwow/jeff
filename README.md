@@ -139,6 +139,8 @@ Save a question once and ask it by key. Manage saved questions on the admin page
 
 A key uses `A-Z`, `a-z`, `0-9`, `_` and `-`, up to 64 characters.
 
+On the admin page, a `choice` question can add two options that let the model decline instead of guessing: `insufficient_context` (not enough context to answer) and `uncertain` (not sure about the answer). New questions start with them on. They are saved as ordinary options, so the API and the CLI see them like any other.
+
 To ask saved questions, pass their keys as an array:
 
 ```sh
