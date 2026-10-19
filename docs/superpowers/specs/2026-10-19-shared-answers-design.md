@@ -17,7 +17,8 @@ In scope:
 - Storage and the management API `/api/answers`.
 - `jeff answers` CLI.
 - The Answers page and the answer chips in the question editor.
-- Seeding `insufficient_context` and `uncertain` into existing configs.
+
+Not in jeff: stock answers. The library starts empty on every install, and jeff never adds answers by itself.
 
 Out of scope:
 
@@ -32,7 +33,7 @@ PR #30, the `insufficient_context` / `uncertain` checkbox, is closed in favour o
 
 ## Data
 
-`jeff.json` gets an `answers` field next to `questions`:
+`jeff.json` gets an `answers` field next to `questions`. An example library:
 
 ```json
 "answers": {
@@ -54,18 +55,17 @@ PR #30, the `insufficient_context` / `uncertain` checkbox, is closed in favour o
 - A bad entry in a hand-edited `jeff.json` stops `jeff serve`, as a bad saved question does.
 - `PUT /api/config` keeps `answers`, as it keeps questions and classifiers.
 
-### Seeding
+### Loading
 
-When `answers` is absent from `jeff.json`, jeff loads the two answers shown above. When it is present, even as
-`{}`, jeff loads it as written, so an owner who removes the seeded answers keeps them removed. The seeded answers
-reach the file with the next config write. No saved question changes.
+The field reads with `#[serde(default)]`: a config without `answers` loads an empty library, and no saved
+question changes. jeff adds no answers on its own, so nothing the owner removed comes back.
 
 A downgrade to a jeff without `answers` drops the field on its next config write, as it drops `classifiers`
-today. Upgrading again seeds the two stock answers anew. Questions keep their options either way, since they hold
-plain text. This is accepted.
+today. Questions keep their options, since they hold plain text. This is accepted.
 
-The stock `insufficient_context` and `uncertain` have `types: ["choice"]` only. On a `score` scale an answer is a
-level, and the expected level is an average over the scale; an "I don't know" level would shift that average.
+An "I don't know" answer belongs to `choice` only. On a `score` scale an answer is a level, and the expected level
+is an average over the scale; such a level would shift that average. The README says so where it shows the
+example library.
 
 ## Matching
 
@@ -74,8 +74,8 @@ A question uses an answer when it holds the answer word for word:
 - `choice`: `types` holds `choice`, and `criteria` has the answer's key with exactly the answer's text.
 - `score`: `types` holds `score`, and `criteria` has a level with exactly the answer's text.
 
-There is no stored link. A question whose matching option was edited by hand stops using the answer. The three
-questions saved today with these exact options use the seeded answers at once.
+There is no stored link. A question whose matching option was edited by hand stops using the answer. Adding an answer to
+the library makes every question that already holds it word for word use it at once.
 
 `uses(answer, questions) -> Vec<question key>` lives in core next to the questions code, so the API, the CLI and
 the UI count usage the same way.
@@ -154,15 +154,15 @@ The saved question is plain Jev, exactly as if the rows were typed.
 
 ## Docs
 
-README gets a Shared answers section: the library, matching, update rewriting questions, seeding and the CLI
-commands. The `answers` config field is listed with the other config fields.
+README gets a Shared answers section: the library, matching, update rewriting questions, the example library
+and the CLI commands. The `answers` config field is listed with the other config fields.
 
 ## Testing
 
 - Core unit tests: matching for `choice` and `score`, update rewriting only matching questions, `types` narrowing,
   remove leaving questions untouched, validation messages.
-- Seeding: a config without `answers` loads the two defaults; a config with `"answers": {}` loads none; a config
-  written by the previous version loads and keeps every question byte for byte.
+- Loading: a config written by the previous version loads with an empty library and keeps every question byte
+  for byte.
 - API tests for each endpoint and status.
 - CLI tests in the style of the existing `questions` CLI tests.
 - UI checked in a browser on a temporary jeff: chips on and off for `choice` and `score`, grey rows, a new
