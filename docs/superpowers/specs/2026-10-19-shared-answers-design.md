@@ -104,9 +104,9 @@ Admin key, admin port, like `/api/questions`.
 |---|---|---|---|
 | GET | `/api/answers` | | `200` map of key to answer, each with a computed `questions` array of the keys that use it |
 | GET | `/api/answers/{key}` | | `200` one answer with `questions`; `404` when missing |
-| POST | `/api/answers` | map of key to answer | `200` the whole library; `409` when a key exists; one bad entry saves nothing |
+| POST | `/api/answers` | map of key to answer | `201` the whole library; `409` when a key exists; one bad entry saves nothing |
 | PUT | `/api/answers/{key}` | one answer | `200` `{ "answer": {...}, "questions": ["k1", "k2"] }`, the rewritten questions; `404` when missing |
-| DELETE | `/api/answers/{key}` | | `204`; `404` when missing |
+| DELETE | `/api/answers/{key}` | | `200` the whole library, as classifiers do; `404` when missing |
 
 Errors follow the house rule, what happened then what to do: `Answer 'uncertain' does not exist. List the answers
 with jeff answers list.`
