@@ -20,6 +20,7 @@ jeff runs as one small binary. It serves:
 - [Quick start](#quick-start)
 - [Call the API](#call-the-api)
 - [Saved questions](#saved-questions)
+- [Shared answers](#shared-answers)
 - [Providers and models](#providers-and-models)
 - [Local CLM](#local-clm)
 - [Local H2O-Lightning](#local-h2o-lightning)
@@ -170,6 +171,45 @@ Windows PowerShell 5.1 strips the inner quotes from JSON passed to a program, so
 `jeff ask` calls `http://127.0.0.1:8080` unless `--url` or `JEFF_URL` says otherwise, and sends `JEFF_API_KEY` as its key. It waits 5 seconds to connect (`--connect-timeout`) and 60 seconds for the answer (`--max-time`). `--no-cache` asks the providers again instead of reusing a cached answer. A custom question is saved only by `jeff questions add`, the admin page or `POST /api/questions`.
 
 A question may name its own `model`. It goes to that model, and the others go to the request's `model` or the default model. jeff sends one call per model, at most 8 per request, and merges the answers into one response. `x-jeff-provider` then lists every provider that answered.
+
+## Shared answers
+
+A shared answer is an option many questions reuse, such as "Not sure about the answer." Save it once and add it to a question with one click in the question editor. The library starts empty. Manage it on the admin page under **Answers**, with `jeff answers`, or through the admin port with an admin key.
+
+```json
+{
+  "insufficient_context": { "text": "Not enough context to answer.", "types": ["choice"], "default": true },
+  "uncertain": { "text": "Not sure about the answer.", "types": ["choice"], "default": true }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `text` | The option text. It must not be empty. |
+| `types` | `choice`, `score` or both. |
+| `default` | Optional. A new question starts with every default answer whose `types` hold its type. |
+
+Keep an "I don't know" answer to `choice`. On a `score` scale an answer is a level, and the expected level is an average over the scale, so such a level shifts the average. No two answers that allow `score` may share a text.
+
+A saved question stays plain Jev with every option written out. It uses an answer when it holds it word for word: a `choice` question has the answer's key with exactly its text, and a `score` question has a level with exactly its text. Nothing else links them.
+
+Updating an answer rewrites the text in every question that used it, in the same save. A question the new `types` no longer cover keeps its option as written. If a `score` question already has another level with the new text, the update fails and saves nothing. Removing an answer leaves the options in the questions as plain text.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/answers` | Lists the answers, each with the `questions` that use it. |
+| `GET /api/answers/{key}` | Returns one answer with `questions`. |
+| `POST /api/answers` | Saves new answers from a map of key to answer. An existing key fails with `409`. |
+| `PUT /api/answers/{key}` | Replaces one answer. Returns `answer` and the rewritten `questions`. |
+| `DELETE /api/answers/{key}` | Deletes one answer. Returns the library. |
+
+```sh
+jeff answers add answers.json
+jeff answers list
+jeff answers update uncertain uncertain.json
+```
+
+`update` prints `Updated 3 questions: a, b, c.` or `Updated no questions.` The keys follow the question key rules.
 
 ## Providers and models
 
@@ -363,6 +403,14 @@ jeff questions get KEY [-o FILE]
 jeff questions add FILE  save new questions from a JSON map of key to question; `-` reads stdin
 jeff questions update KEY FILE
 jeff questions remove KEY
+jeff answers list [-o FILE]
+                         list shared answers: key, types, questions that use it, text
+jeff answers get KEY [-o FILE]
+                         print one shared answer as JSON, with the questions that use it
+jeff answers add FILE    save new answers from a JSON map of key to answer; `-` reads stdin
+jeff answers update KEY FILE
+                         replace one answer and print the questions it rewrote
+jeff answers remove KEY
 jeff classifiers list [-o FILE]
 jeff classifiers get KEY [-o FILE]
 jeff classifiers add KEY QUESTION... [--model MODEL] [--description TEXT]
@@ -372,7 +420,7 @@ jeff classifiers update KEY (QUESTION... [--model MODEL] [--description TEXT] | 
 jeff classifiers remove KEY
 ```
 
-`jeff questions` and `jeff classifiers` call a running jeff on `http://127.0.0.1:8081` unless `--url` or `JEFF_ADMIN_URL` says otherwise. They send `JEFF_API_KEY`, which must be an admin key once any key exists.
+`jeff questions`, `jeff answers` and `jeff classifiers` call a running jeff on `http://127.0.0.1:8081` unless `--url` or `JEFF_ADMIN_URL` says otherwise. They send `JEFF_API_KEY`, which must be an admin key once any key exists.
 
 An error exits with code 1 and prints the API error, for example:
 

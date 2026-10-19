@@ -1879,6 +1879,14 @@ enum Command {
         #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url, global = true)]
         url: String,
     },
+    /// Manage shared answers through a running jeff; JEFF_API_KEY must hold an admin key
+    Answers {
+        #[command(subcommand)]
+        action: AnswersAction,
+        /// The jeff admin page address, where answers are managed
+        #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url, global = true)]
+        url: String,
+    },
     /// Manage classifiers through a running jeff; JEFF_API_KEY must hold an admin key
     Classifiers {
         #[command(subcommand)]
@@ -1963,6 +1971,36 @@ enum QuestionsAction {
         file: String,
     },
     /// Delete one saved question
+    Remove { key: String },
+}
+
+#[derive(Subcommand)]
+enum AnswersAction {
+    /// List shared answers: key, types, questions that use it and text
+    List {
+        /// Write the answers as JSON to this file instead
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Print one shared answer as JSON, with the questions that use it
+    Get {
+        key: String,
+        /// Write the answer JSON to this file instead of printing it
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Save new answers from a JSON map of key to answer; an existing key fails and saves nothing
+    Add {
+        /// A JSON file, or `-` for stdin
+        file: String,
+    },
+    /// Replace one shared answer and rewrite the questions that use it
+    Update {
+        key: String,
+        /// A JSON file, or `-` for stdin
+        file: String,
+    },
+    /// Delete one shared answer; questions keep the option as plain text
     Remove { key: String },
 }
 
@@ -2125,6 +2163,7 @@ async fn main() {
         Some(Command::Keys { action, config }) => return run_keys(action, &config_file(config)),
         Some(Command::Ask(args)) => return run_ask(args).await,
         Some(Command::Questions { action, url }) => return run_questions(action, &url).await,
+        Some(Command::Answers { action, url }) => return run_answers(action, &url).await,
         Some(Command::Classifiers { action, url }) => {
             return run_classifiers(action, &url).await;
         }
@@ -2246,6 +2285,38 @@ fn questions_table(qs: &questions::Questions, boxed: bool) -> String {
         })
         .collect();
     table(["key", "type", "model", "instructions"], rows, boxed)
+}
+
+/// One line per answer: a boxed table for a terminal, tab-separated fields for a pipe.
+fn answers_table(a: &answers::Answers, boxed: bool) -> String {
+    let rows: Vec<[String; 4]> = a
+        .iter()
+        .map(|(key, v)| {
+            let types: Vec<&str> = v["types"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let used = v["questions"].as_array().map_or(0, Vec::len);
+            let text = v["text"].as_str().unwrap_or("-");
+            [
+                key.clone(),
+                types.join(","),
+                used.to_string(),
+                text.split_whitespace().collect::<Vec<_>>().join(" "),
+            ]
+        })
+        .collect();
+    table(["key", "types", "questions", "text"], rows, boxed)
+}
+
+fn updated_message(keys: &[String]) -> String {
+    match keys {
+        [] => "Updated no questions.".into(),
+        [_] => format!("Updated 1 question: {}.", keys.join(", ")),
+        _ => format!("Updated {} questions: {}.", keys.len(), keys.join(", ")),
+    }
 }
 
 /// One line per classifier; a question it cannot ask shows as `key (deleted)`.
@@ -2627,6 +2698,57 @@ async fn run_questions(action: QuestionsAction, url: &str) {
         }
         QuestionsAction::Remove { key } => {
             let path = format!("/api/questions/{}", segment(&key));
+            admin_call(url, Method::DELETE, &path, None).await;
+        }
+    }
+}
+
+async fn run_answers(action: AnswersAction, url: &str) {
+    use reqwest::Method;
+    match action {
+        AnswersAction::List { output } => {
+            let all = admin_call(url, Method::GET, "/api/answers", None)
+                .await
+                .unwrap_or_default();
+            if output.is_some() {
+                return print_json(&all, output);
+            }
+            let all = all.as_object().cloned().unwrap_or_default();
+            if all.is_empty() {
+                eprintln!("no answers");
+            }
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            print!("{}", answers_table(&all, terminal));
+        }
+        AnswersAction::Get { key, output } => {
+            let path = format!("/api/answers/{}", segment(&key));
+            let a = admin_call(url, Method::GET, &path, None)
+                .await
+                .unwrap_or_default();
+            print_json(&a, output);
+        }
+        AnswersAction::Add { file } => {
+            let input = read_json(&file);
+            let saved = admin_call(url, Method::POST, "/api/answers", Some(&input))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
+        }
+        AnswersAction::Update { key, file } => {
+            let path = format!("/api/answers/{}", segment(&key));
+            let done = admin_call(url, Method::PUT, &path, Some(&read_json(&file)))
+                .await
+                .unwrap_or_default();
+            let keys: Vec<String> = done["questions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|k| k.as_str().map(String::from))
+                .collect();
+            println!("{}", updated_message(&keys));
+        }
+        AnswersAction::Remove { key } => {
+            let path = format!("/api/answers/{}", segment(&key));
             admin_call(url, Method::DELETE, &path, None).await;
         }
     }
@@ -3952,6 +4074,41 @@ mod tests {
             classifiers_table(cs.as_object().unwrap(), saved.as_object().unwrap(), false),
             "plain\t-\ta\t-\ntriage\tp/m\ta, gone (deleted)\tRoutes tickets\n"
         );
+    }
+
+    #[test]
+    fn lists_answers_one_line_each() {
+        let a = json!({"uncertain": {"text": "Not
+ sure.", "types": ["choice"], "default": true, "questions": ["q1", "q2"]},
+                       "low": {"text": "Low", "types": ["score", "choice"], "questions": []}});
+        assert_eq!(
+            answers_table(a.as_object().unwrap(), false),
+            "low	score,choice	0	Low
+uncertain	choice	2	Not sure.
+"
+        );
+    }
+
+    #[test]
+    fn update_message_names_rewritten_questions() {
+        assert_eq!(
+            updated_message(&["a".into(), "b".into()]),
+            "Updated 2 questions: a, b."
+        );
+        assert_eq!(updated_message(&[]), "Updated no questions.");
+        assert_eq!(updated_message(&["a".into()]), "Updated 1 question: a.");
+    }
+
+    #[test]
+    fn answers_cli_parses() {
+        let parse = |a: &[&str]| Cli::try_parse_from(a).is_ok();
+        assert!(parse(&["jeff", "answers", "list"]));
+        assert!(parse(&["jeff", "answers", "list", "-o", "f.json"]));
+        assert!(parse(&["jeff", "answers", "get", "k"]));
+        assert!(parse(&["jeff", "answers", "add", "f.json"]));
+        assert!(parse(&["jeff", "answers", "update", "k", "f.json"]));
+        assert!(parse(&["jeff", "answers", "remove", "k"]));
+        assert!(!parse(&["jeff", "answers", "update", "k"]));
     }
 
     #[test]
