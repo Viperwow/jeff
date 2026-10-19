@@ -150,7 +150,7 @@ $("#config-recheck").onclick = (e) => busy(e.currentTarget, checkStatus);
 
 /* ---------- tabs ---------- */
 
-const PAGES = ["questions", "classifiers", "providers", "keys"];
+const PAGES = ["questions", "classifiers", "answers", "providers", "keys"];
 
 function showTab() {
   const id = PAGES.find((p) => location.hash === "#" + p) || "questions";
@@ -1589,6 +1589,7 @@ for (const b of $$("[data-discard]")) b.onclick = () => {
   const form = b.dataset.discard;
   if (form === "q") { drafts.drop(questionDraftId()); openForm(editing); }
   if (form === "c") { drafts.drop(classifierDraftId()); openClassifierForm(cEditing); }
+  if (form === "a") { drafts.drop(answerDraftId()); openAnswerForm(aEditing); }
   if (form === "p") { drafts.drop("providers"); renderProviders(); }
   if (form === "k") { drafts.drop("key:new"); fillKeyForm(JSON.parse(drafts.baseline["key:new"])); $("#k-draft").hidden = true; }
 };
@@ -1597,6 +1598,122 @@ $("#c-try").onclick = tryClassifier;
 $("#c-run").onclick = runClassifier;
 
 setInterval(() => !document.hidden && location.hash === "#providers" && modelList && loadModels().catch(() => {}), 15000);
+
+/* ---------- answers ---------- */
+
+/** Shared answers by key, as the server last sent them, each with the keys of the questions that use it. */
+let library = {};
+/** The answer key being edited; null while creating. */
+let aEditing = null;
+
+const countOf = (n) => `${n} question${n === 1 ? "" : "s"}`;
+
+function answerRow(key, a) {
+  const li = el("li", "flex items-start gap-3 p-3");
+  const main = el("div", "min-w-0 flex-1");
+  const head = el("div", "flex flex-wrap items-center gap-2");
+  head.append(el("span", "font-mono font-medium", key));
+  for (const t of a.types) head.append(el("span", "rounded border border-neutral-300 px-1.5 py-0.5 text-[11px] dark:border-neutral-700", t));
+  if (a.default) head.append(el("span", "rounded border border-neutral-300 bg-neutral-100 px-1.5 py-0.5 text-[11px] dark:border-neutral-700 dark:bg-neutral-800", "Default"));
+  main.append(head, el("p", "mt-0.5 line-clamp-2", a.text), el("p", "note mt-0.5", `Used in ${countOf(a.questions.length)}`));
+  const edit = el("button", "btn min-w-0", "Edit");
+  edit.type = "button";
+  edit.onclick = () => openAnswerForm(key);
+  li.append(main, edit);
+  return li;
+}
+
+function renderAnswers() {
+  const keys = Object.keys(library);
+  $("#a-items").replaceChildren(...keys.map((k) => answerRow(k, library[k])));
+  $("#a-items").hidden = !keys.length;
+  $("#a-empty").hidden = keys.length > 0;
+}
+
+async function loadAnswers() {
+  library = (await api("/api/answers")).body;
+  drafts.prune("answer", library);
+  renderAnswers();
+}
+
+const showAnswerForm = (open) => {
+  $("#a-list-view").hidden = open;
+  $("#a-form-view").hidden = !open;
+};
+
+const answerDraftId = () => `answer:${aEditing ?? "new"}`;
+const answerSnapshot = () => ({ key: $("#a-key").value, text: $("#a-text").value, choice: $("#a-choice").checked, score: $("#a-score").checked, default: $("#a-default").checked });
+const trackAnswer = () => { if (!$("#a-form-view").hidden) drafts.track(answerDraftId(), answerSnapshot()); };
+
+function fillAnswerForm(f) {
+  $("#a-key").value = f.key;
+  $("#a-text").value = f.text;
+  $("#a-choice").checked = f.choice;
+  $("#a-score").checked = f.score;
+  $("#a-default").checked = f.default;
+}
+
+function openAnswerForm(key = null) {
+  aEditing = key;
+  const a = key ? library[key] : { types: [] };
+  $("#a-form-title").textContent = key ? "Edit answer" : "New answer";
+  $("#a-key").readOnly = !!key;
+  fillAnswerForm({ key: key || "", text: a.text || "", choice: a.types.includes("choice"), score: a.types.includes("score"), default: !!a.default });
+  say($("#a-form-status"), "");
+  const d = drafts.open(answerDraftId(), answerSnapshot(), $("#a-form-status"));
+  $("#a-draft").hidden = !d;
+  if (d) fillAnswerForm({ ...d, key: key || d.key });
+  $("#a-delete").hidden = !key;
+  showAnswerForm(true);
+  (key ? $("#a-text") : $("#a-key")).focus();
+}
+
+async function saveAnswer() {
+  const status = $("#a-form-status");
+  try {
+    const key = aEditing || $("#a-key").value.trim();
+    if (!key) throw new Error("The answer has no key. Give it a key.");
+    const a = { text: $("#a-text").value.trim(), types: ["choice", "score"].filter((t) => $("#a-" + t).checked) };
+    if ($("#a-default").checked) a.default = true;
+    const json = { "content-type": "application/json" };
+    let note = "";
+    if (aEditing) {
+      const { body } = await api(`/api/answers/${encodeURIComponent(key)}`, { method: "PUT", headers: json, body: JSON.stringify(a) });
+      note = body.questions.length ? `Updated ${countOf(body.questions.length)}.` : "Updated no questions.";
+    } else {
+      await api("/api/answers", { method: "POST", headers: json, body: JSON.stringify({ [key]: a }) });
+    }
+    drafts.drop(answerDraftId());
+    await Promise.all([loadQuestions(), loadAnswers()]);
+    if (aEditing) say(status, note, "ok");
+    else showAnswerForm(false);
+  } catch (err) {
+    say(status, err.message, "err");
+  }
+}
+
+async function deleteAnswer(key) {
+  const n = library[key].questions.length;
+  if (!confirm(`Delete '${key}'? ${countOf(n)} ${n === 1 ? "keeps" : "keep"} this option as plain text.`)) return;
+  try {
+    library = (await api(`/api/answers/${encodeURIComponent(key)}`, { method: "DELETE" })).body;
+    drafts.drop(answerDraftId());
+    renderAnswers();
+    await loadQuestions();
+    showAnswerForm(false);
+  } catch (err) {
+    say($("#a-form-status"), err.message, "err");
+  }
+}
+
+$("#a-new").onclick = () => openAnswerForm();
+$("#a-empty-new").onclick = () => openAnswerForm();
+const closeAnswerForm = () => { drafts.drop(answerDraftId()); showAnswerForm(false); };
+$("#a-back").onclick = closeAnswerForm;
+$("#a-cancel").onclick = closeAnswerForm;
+$("#a-save").onclick = (e) => busy(e.currentTarget, saveAnswer);
+$("#a-delete").onclick = (e) => busy(e.currentTarget, () => deleteAnswer(aEditing));
+for (const id of ["key", "text", "choice", "score", "default"]) $("#a-" + id).addEventListener("input", trackAnswer);
 
 /* ---------- sign-in ---------- */
 
@@ -1658,6 +1775,7 @@ addEventListener("hashchange", async () => {
   setView(view);
   loadQuestions().catch((e) => say($("#pg-status"), e.message, "err"));
   loadClassifiers().catch((e) => say($("#c-status"), e.message, "err"));
+  loadAnswers().catch((e) => say($("#a-status"), e.message, "err"));
   loadConfig().catch((e) => say($("#pg-status"), e.message, "err"));
   checkStatus();
   if (linkError) showSignIn(linkError);

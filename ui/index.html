@@ -12,7 +12,8 @@
     <div class="px-2 pb-4 text-base font-semibold tracking-tight max-md:pr-4 max-md:pb-0">jeff</div>
     <a class="tab" href="#questions" title="Questions"><svg aria-hidden="true" viewBox="0 0 24 24" class="size-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5a2.5 2.5 0 1 1 3.4 2.3c-.6.3-.9.8-.9 1.4v.3M12 17h.01"/></svg><span class="max-md:sr-only">Questions</span></a>
     <a class="tab" href="#classifiers" title="Classifiers"><svg aria-hidden="true" viewBox="0 0 24 24" class="size-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4 3 8.5l9 4.5 9-4.5zM3 13l9 4.5 9-4.5"/></svg><span class="max-md:sr-only">Classifiers</span></a>
-    <a class="tab" href="#providers" title="Providers"><svg aria-hidden="true" viewBox="0 0 24 24" class="size-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v6H4zM4 13h16v6H4zM8 8h.01M8 16h.01"/></svg><span class="max-md:sr-only">Providers</span></a>
+    <a class="tab" href="#answers" title="Answers"><svg aria-hidden="true" viewBox="0 0 24 24" class="size-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/><path d="m9 10.5 2 2 4-4"/></svg><span class="max-md:sr-only">Answers</span></a>
+    <a class="tab" href="#providers"title="Providers"><svg aria-hidden="true" viewBox="0 0 24 24" class="size-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v6H4zM4 13h16v6H4zM8 8h.01M8 16h.01"/></svg><span class="max-md:sr-only">Providers</span></a>
     <a class="tab" href="#keys" title="Access keys"><svg aria-hidden="true" viewBox="0 0 24 24" class="size-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 13a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12.2 11.8 4 20M6.5 17.5l2 2M9 15l2 2"/></svg><span class="max-md:sr-only">Access keys</span></a>
     <button id="sign-out" type="button" class="tab mt-auto max-md:mt-0 max-md:ml-auto" title="Sign out" hidden><svg aria-hidden="true" viewBox="0 0 24 24" class="size-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/></svg><span class="max-md:sr-only">Sign out</span></button>
     <div class="px-2 pt-2 text-xs text-neutral-500 tabular-nums max-md:pt-0">jeff {{version}}</div>
@@ -214,6 +215,53 @@
           </label>
           <div id="c-try-answer" class="space-y-3"></div>
         </section>
+      </div>
+    </div>
+
+    <!-- Answers -->
+    <div id="page-answers" class="lg:min-h-0 lg:flex-1 lg:overflow-y-auto" hidden>
+      <div id="a-list-view" class="mx-auto max-w-4xl space-y-5 p-8 max-sm:p-4">
+        <header class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 class="text-2xl font-semibold tracking-tight">Answers</h1>
+            <p class="mt-1 text-neutral-600 dark:text-neutral-400">Options shared by many questions. Change one here and every question that uses it follows.</p>
+          </div>
+          <button id="a-new" type="button" class="btn">New answer</button>
+        </header>
+        <ul id="a-items" class="divide-y divide-neutral-200 rounded-lg border border-neutral-200 bg-white dark:divide-neutral-800 dark:border-neutral-800 dark:bg-neutral-900/40" hidden></ul>
+        <div id="a-empty" class="flex flex-col items-center gap-3 rounded-lg border border-dashed border-neutral-300 p-8 text-center dark:border-neutral-700" hidden>
+          <p class="font-medium">No shared answers yet.</p>
+          <button id="a-empty-new" type="button" class="btn btn-primary">New answer</button>
+        </div>
+        <p id="a-status" class="note" aria-live="polite"></p>
+      </div>
+
+      <div id="a-form-view" class="mx-auto max-w-2xl space-y-5 p-8 max-sm:p-4" hidden>
+        <header>
+          <button id="a-back" type="button" class="note cursor-pointer hover:underline">&larr; Answers</button>
+          <h1 id="a-form-title" class="mt-1 text-2xl font-semibold tracking-tight">New answer</h1>
+        </header>
+        <p id="a-draft" class="note flex items-center gap-3" hidden>Draft restored <button type="button" class="btn" data-discard="a">Discard</button></p>
+        <label class="block space-y-1">
+          <span class="block font-medium">Key</span>
+          <input id="a-key" class="control font-mono" placeholder="uncertain" spellcheck="false">
+        </label>
+        <label class="block space-y-1">
+          <span class="block font-medium">Text</span>
+          <textarea id="a-text" class="control" rows="3" placeholder="The option as the model reads it"></textarea>
+        </label>
+        <fieldset class="space-y-2">
+          <legend class="font-medium">Question types</legend>
+          <label class="flex items-center gap-2"><input id="a-choice" type="checkbox" class="size-4"> choice</label>
+          <label class="flex items-center gap-2"><input id="a-score" type="checkbox" class="size-4"> score</label>
+        </fieldset>
+        <label class="flex items-center gap-2"><input id="a-default" type="checkbox" class="size-4"> Add to new questions</label>
+        <div class="flex items-center gap-3 border-t border-neutral-200 pt-4 dark:border-neutral-800">
+          <button id="a-save" type="button" class="btn btn-primary">Save</button>
+          <button id="a-cancel" type="button" class="btn">Cancel</button>
+          <span id="a-form-status" class="note ml-auto text-right" aria-live="polite"></span>
+          <button id="a-delete" type="button" class="btn btn-danger">Delete</button>
+        </div>
       </div>
     </div>
 
