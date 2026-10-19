@@ -254,7 +254,7 @@ function fillModelSelects() {
     const card = $(`[data-provider="${p.id}"]`);
     if (!card) continue;
     const s = $(".status", card);
-    if (p.warning) say(s, `Starting: ${p.warning}`);
+    if (p.warning) say(s, "Starting");
     else if (!p.ok) say(s, `Offline: ${p.error}`, "err");
     else say(s, "Online", "ok");
   }
