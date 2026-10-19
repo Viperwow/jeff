@@ -89,12 +89,18 @@ fn levels(q: &Value) -> impl Iterator<Item = &str> {
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
+        .map(str::trim)
 }
 
 fn uses_one(key: &str, a: &Value, q: &Value) -> bool {
     match q["type"].as_str() {
         Some("choice") => {
-            has_type(a, "choice") && q["criteria"].get(key).and_then(Value::as_str) == Some(text(a))
+            has_type(a, "choice")
+                && q["criteria"]
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    == Some(text(a))
         }
         Some("score") => has_type(a, "score") && levels(q).any(|l| l == text(a)),
         _ => false,
@@ -195,7 +201,10 @@ pub fn update(
         if q["type"] == "choice" {
             q["criteria"][key] = json!(new_text);
         } else if let Some(ls) = q["criteria"].as_array_mut() {
-            for l in ls.iter_mut().filter(|l| l.as_str() == Some(old_text)) {
+            for l in ls
+                .iter_mut()
+                .filter(|l| l.as_str().map(str::trim) == Some(old_text))
+            {
                 *l = json!(new_text);
             }
         }
@@ -219,6 +228,23 @@ mod tests {
 
     fn lib() -> Answers {
         map(json!({"unsure": {"text": "Not sure.", "types": ["choice", "score"]}}))
+    }
+
+    #[test]
+    fn matching_ignores_surrounding_spaces() {
+        let mut qs = map(json!({
+            "c": {"type": "choice", "criteria": {"unsure": " Not sure. ", "a": "A"}},
+            "s": {"type": "score", "criteria": ["Low", "Not sure.\n", "High"]}
+        }));
+        assert_eq!(uses("unsure", &lib()["unsure"], &qs), ["c", "s"]);
+        let mut saved = lib();
+        let new = json!({"text": "Unsure.", "types": ["choice", "score"]});
+        assert_eq!(
+            update(&mut saved, &mut qs, "unsure", new).unwrap(),
+            ["c", "s"]
+        );
+        assert_eq!(qs["c"]["criteria"]["unsure"], "Unsure.");
+        assert_eq!(qs["s"]["criteria"], json!(["Low", "Unsure.", "High"]));
     }
 
     #[test]

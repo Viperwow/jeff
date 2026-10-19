@@ -157,6 +157,7 @@ function showTab() {
   for (const t of PAGES) $("#page-" + t).hidden = t !== id;
   for (const n of $$(".unsaved-providers")) n.hidden = !store.get("draft:providers");
   if (id === "keys" && config) loadKeys().catch((e) => say($("#key-status"), e.message, "err"));
+  if (id === "answers" && config) loadAnswers().catch((e) => say($("#a-status"), e.message, "err"));
   // A ready note has done its job once it was on screen and the page is left; one that arrived while away waits.
   for (const n of $$(".p-task[data-tone=ok]")) {
     if (id === "providers") n.dataset.seen = "1";

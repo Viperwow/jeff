@@ -69,7 +69,7 @@ example library.
 
 ## Matching
 
-A question uses an answer when it holds the answer word for word:
+A question uses an answer when it holds the answer word for word, ignoring spaces around the text:
 
 - `choice`: `types` holds `choice`, and `criteria` has the answer's key with exactly the answer's text.
 - `score`: `types` holds `score`, and `criteria` has a level with exactly the answer's text.

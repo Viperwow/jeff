@@ -191,7 +191,7 @@ A shared answer is an option many questions reuse, such as "Not sure about the a
 
 Keep an "I don't know" answer to `choice`. On a `score` scale an answer is a level, and the expected level is an average over the scale, so such a level shifts the average. No two answers that allow `score` may share a text.
 
-A saved question stays plain Jev with every option written out. It uses an answer when it holds it word for word: a `choice` question has the answer's key with exactly its text, and a `score` question has a level with exactly its text. Nothing else links them.
+A saved question stays plain Jev with every option written out. It uses an answer when it holds it word for word: a `choice` question has the answer's key with exactly its text, and a `score` question has a level with exactly its text. Spaces around a text do not count. Nothing else links them.
 
 Updating an answer rewrites the text in every question that used it, in the same save. A question the new `types` no longer cover keeps its option as written. If a `score` question already has another level with the new text, the update fails and saves nothing. Removing an answer leaves the options in the questions as plain text.
 
