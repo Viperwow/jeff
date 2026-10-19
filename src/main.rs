@@ -1,3 +1,4 @@
+mod answers;
 mod classifiers;
 mod install;
 mod keys;
@@ -76,6 +77,8 @@ struct Config {
     #[serde(default)]
     classifiers: classifiers::Classifiers,
     #[serde(default)]
+    answers: answers::Answers,
+    #[serde(default)]
     cache: CacheConfig,
 }
 
@@ -144,6 +147,7 @@ impl Default for Config {
             keys: Vec::new(),
             questions: questions::Questions::new(),
             classifiers: classifiers::Classifiers::new(),
+            answers: answers::Answers::new(),
             cache: CacheConfig::default(),
         }
     }
@@ -163,6 +167,7 @@ fn load_config(path: &str) -> Result<Config, Vec<String>> {
                 .iter()
                 .filter_map(|(k, c)| classifiers::validate(k, c).err()),
         )
+        .chain(answers::validate_all(&config.answers).err())
         .collect();
     if problems.is_empty() {
         Ok(config)
@@ -1540,6 +1545,72 @@ async fn delete_classifier(State(app): State<Arc<App>>, Path(key): Path<String>)
     }
 }
 
+async fn list_answers(State(app): State<Arc<App>>) -> Json<answers::Answers> {
+    let config = app.config.read().await;
+    Json(answers::with_uses(&config.answers, &config.questions))
+}
+
+async fn get_answer(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    let config = app.config.read().await;
+    match answers::with_uses(&config.answers, &config.questions).remove(&key) {
+        Some(a) => Json(a).into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("No answer '{key}'. Check the key or create the answer first."),
+        ),
+    }
+}
+
+async fn create_answers(
+    State(app): State<Arc<App>>,
+    Json(input): Json<answers::Answers>,
+) -> Response {
+    match change_config(&app, |c| answers::create(&mut c.answers, input)).await {
+        Ok(c) => (
+            StatusCode::CREATED,
+            Json(answers::with_uses(&c.answers, &c.questions)),
+        )
+            .into_response(),
+        Err(r) => *r,
+    }
+}
+
+async fn update_answer(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+    Json(answer): Json<Value>,
+) -> Response {
+    let mut rewritten = Vec::new();
+    match change_config(&app, |c| {
+        rewritten = answers::update(&mut c.answers, &mut c.questions, &key, answer)?;
+        Ok(())
+    })
+    .await
+    {
+        Ok(c) => {
+            let answer = answers::with_uses(&c.answers, &c.questions).remove(&key);
+            Json(json!({"answer": answer, "questions": rewritten})).into_response()
+        }
+        Err(r) => *r,
+    }
+}
+
+async fn delete_answer(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    match change_config(&app, |c| answers::remove(&mut c.answers, &key)).await {
+        Ok(c) => Json(answers::with_uses(&c.answers, &c.questions)).into_response(),
+        Err(r) => *r,
+    }
+}
+
+fn answer_routes() -> Router<Arc<App>> {
+    Router::new()
+        .route("/api/answers", get(list_answers).post(create_answers))
+        .route(
+            "/api/answers/{key}",
+            get(get_answer).put(update_answer).delete(delete_answer),
+        )
+}
+
 async fn get_config(State(app): State<Arc<App>>) -> Json<Value> {
     Json(public(&*app.config.read().await))
 }
@@ -1653,6 +1724,7 @@ fn build_config(
         keys: current.keys.clone(),
         questions: current.questions.clone(),
         classifiers: current.classifiers.clone(),
+        answers: current.answers.clone(),
         cache: current.cache,
     })
 }
@@ -1807,6 +1879,14 @@ enum Command {
         #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url, global = true)]
         url: String,
     },
+    /// Manage shared answers through a running jeff; JEFF_API_KEY must hold an admin key
+    Answers {
+        #[command(subcommand)]
+        action: AnswersAction,
+        /// The jeff admin page address, where answers are managed
+        #[arg(long, env = "JEFF_ADMIN_URL", default_value = "http://127.0.0.1:8081", value_parser = parse_url, global = true)]
+        url: String,
+    },
     /// Manage classifiers through a running jeff; JEFF_API_KEY must hold an admin key
     Classifiers {
         #[command(subcommand)]
@@ -1891,6 +1971,36 @@ enum QuestionsAction {
         file: String,
     },
     /// Delete one saved question
+    Remove { key: String },
+}
+
+#[derive(Subcommand)]
+enum AnswersAction {
+    /// List shared answers: key, types, questions that use it and text
+    List {
+        /// Write the answers as JSON to this file instead
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Print one shared answer as JSON, with the questions that use it
+    Get {
+        key: String,
+        /// Write the answer JSON to this file instead of printing it
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Save new answers from a JSON map of key to answer; an existing key fails and saves nothing
+    Add {
+        /// A JSON file, or `-` for stdin
+        file: String,
+    },
+    /// Replace one shared answer and rewrite the questions that use it
+    Update {
+        key: String,
+        /// A JSON file, or `-` for stdin
+        file: String,
+    },
+    /// Delete one shared answer; questions keep the option as plain text
     Remove { key: String },
 }
 
@@ -2053,6 +2163,7 @@ async fn main() {
         Some(Command::Keys { action, config }) => return run_keys(action, &config_file(config)),
         Some(Command::Ask(args)) => return run_ask(args).await,
         Some(Command::Questions { action, url }) => return run_questions(action, &url).await,
+        Some(Command::Answers { action, url }) => return run_answers(action, &url).await,
         Some(Command::Classifiers { action, url }) => {
             return run_classifiers(action, &url).await;
         }
@@ -2174,6 +2285,38 @@ fn questions_table(qs: &questions::Questions, boxed: bool) -> String {
         })
         .collect();
     table(["key", "type", "model", "instructions"], rows, boxed)
+}
+
+/// One line per answer: a boxed table for a terminal, tab-separated fields for a pipe.
+fn answers_table(a: &answers::Answers, boxed: bool) -> String {
+    let rows: Vec<[String; 4]> = a
+        .iter()
+        .map(|(key, v)| {
+            let types: Vec<&str> = v["types"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let used = v["questions"].as_array().map_or(0, Vec::len);
+            let text = v["text"].as_str().unwrap_or("-");
+            [
+                key.clone(),
+                types.join(","),
+                used.to_string(),
+                text.split_whitespace().collect::<Vec<_>>().join(" "),
+            ]
+        })
+        .collect();
+    table(["key", "types", "questions", "text"], rows, boxed)
+}
+
+fn updated_message(keys: &[String]) -> String {
+    match keys {
+        [] => "Updated no questions.".into(),
+        [_] => format!("Updated 1 question: {}.", keys.join(", ")),
+        _ => format!("Updated {} questions: {}.", keys.len(), keys.join(", ")),
+    }
 }
 
 /// One line per classifier; a question it cannot ask shows as `key (deleted)`.
@@ -2560,6 +2703,57 @@ async fn run_questions(action: QuestionsAction, url: &str) {
     }
 }
 
+async fn run_answers(action: AnswersAction, url: &str) {
+    use reqwest::Method;
+    match action {
+        AnswersAction::List { output } => {
+            let all = admin_call(url, Method::GET, "/api/answers", None)
+                .await
+                .unwrap_or_default();
+            if output.is_some() {
+                return print_json(&all, output);
+            }
+            let all = all.as_object().cloned().unwrap_or_default();
+            if all.is_empty() {
+                eprintln!("no answers");
+            }
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            print!("{}", answers_table(&all, terminal));
+        }
+        AnswersAction::Get { key, output } => {
+            let path = format!("/api/answers/{}", segment(&key));
+            let a = admin_call(url, Method::GET, &path, None)
+                .await
+                .unwrap_or_default();
+            print_json(&a, output);
+        }
+        AnswersAction::Add { file } => {
+            let input = read_json(&file);
+            let saved = admin_call(url, Method::POST, "/api/answers", Some(&input))
+                .await
+                .unwrap_or_default();
+            print_json(&saved, None);
+        }
+        AnswersAction::Update { key, file } => {
+            let path = format!("/api/answers/{}", segment(&key));
+            let done = admin_call(url, Method::PUT, &path, Some(&read_json(&file)))
+                .await
+                .unwrap_or_default();
+            let keys: Vec<String> = done["questions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|k| k.as_str().map(String::from))
+                .collect();
+            println!("{}", updated_message(&keys));
+        }
+        AnswersAction::Remove { key } => {
+            let path = format!("/api/answers/{}", segment(&key));
+            admin_call(url, Method::DELETE, &path, None).await;
+        }
+    }
+}
+
 fn run_keys(action: KeysAction, path: &str) {
     let fail = |e: String| -> ! {
         eprintln!("{e}");
@@ -2773,7 +2967,8 @@ async fn serve(args: ServeArgs) {
         .route(
             "/api/classifiers/{key}",
             axum::routing::put(update_classifier).delete(delete_classifier),
-        );
+        )
+        .merge(answer_routes());
     for stack in install::Stack::ALL {
         manage = manage
             .route(
@@ -3752,6 +3947,126 @@ mod tests {
     }
 
     #[test]
+    fn config_without_answers_loads_empty_and_keeps_questions() {
+        let questions = json!({
+            "q1": {"type": "choice", "instructions": "x", "criteria": {"a": "Yes.", "b": "No."}},
+            "q2": {"type": "score", "instructions": "y", "criteria": ["Low", "High"]}
+        });
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config.as_object_mut().unwrap().remove("answers");
+        config["questions"] = questions.clone();
+        let path = temp_config("noanswers", &config.to_string());
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        let loaded = loaded.unwrap();
+        assert!(loaded.answers.is_empty());
+        let back = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(back["questions"], questions);
+    }
+
+    #[test]
+    fn load_config_rejects_invalid_answers() {
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["answers"] = json!({"a": {"text": "", "types": ["choice"]}});
+        let path = temp_config("badanswers", &config.to_string());
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        let e = loaded.err().expect("an invalid answer must be refused");
+        assert!(e[0].contains("Answer 'a'"), "{e:?}");
+    }
+
+    #[test]
+    fn build_config_keeps_answers() {
+        let mut current = Config::default();
+        current.answers.insert(
+            "unsure".into(),
+            json!({"text": "Not sure.", "types": ["choice"]}),
+        );
+        let input = ConfigInput {
+            default_model: "clm/clm-latest".into(),
+            providers: vec![ProviderInput {
+                id: "clm".into(),
+                name: "CLM".into(),
+                url: "http://127.0.0.1:8700".into(),
+                key: None,
+                models: vec![],
+                installer: None,
+                connect_timeout: None,
+                max_time: None,
+                description: None,
+            }],
+        };
+        let next = build_config(&current, input, false).unwrap();
+        assert_eq!(next.answers, current.answers);
+    }
+
+    #[tokio::test]
+    async fn answers_api_round_trip() {
+        let path = temp_config("answersapi", "{}");
+        let app = Arc::new(test_app(&path));
+        app.config.write().await.questions.insert(
+            "q1".into(),
+            json!({"type": "choice", "instructions": "x", "criteria": {"uncertain": "Not sure."}}),
+        );
+        let router = Router::new()
+            .merge(answer_routes())
+            .route("/v1/questions/{key}", get(get_question))
+            .with_state(app.clone());
+        let call = |method: Method, uri: &'static str, body: Option<Value>| {
+            let router = router.clone();
+            async move {
+                let mut req = Request::builder().method(method).uri(uri);
+                let body = match body {
+                    Some(b) => {
+                        req = req.header(header::CONTENT_TYPE, "application/json");
+                        axum::body::Body::from(b.to_string())
+                    }
+                    None => axum::body::Body::empty(),
+                };
+                let r = tower::ServiceExt::oneshot(router, req.body(body).unwrap())
+                    .await
+                    .unwrap();
+                (r.status(), body_of(r).await)
+            }
+        };
+        let (s, b) = call(
+            Method::POST,
+            "/api/answers",
+            Some(json!({"uncertain": {"text": "Not sure.", "types": ["choice"]}})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{b}");
+        assert_eq!(b["uncertain"]["text"], "Not sure.");
+        let (s, b) = call(Method::GET, "/api/answers", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["uncertain"]["questions"], json!(["q1"]));
+        let (s, b) = call(Method::GET, "/api/answers/uncertain", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["questions"], json!(["q1"]));
+        let (s, b) = call(
+            Method::PUT,
+            "/api/answers/uncertain",
+            Some(json!({"text": "New.", "types": ["choice"]})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["answer"]["text"], "New.");
+        assert_eq!(b["questions"], json!(["q1"]));
+        let (_, b) = call(Method::GET, "/v1/questions/q1", None).await;
+        assert_eq!(b["criteria"]["uncertain"], "New.");
+        let (s, b) = call(Method::DELETE, "/api/answers/uncertain", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(b.get("uncertain").is_none());
+        let (_, b) = call(Method::GET, "/v1/questions/q1", None).await;
+        assert_eq!(b["criteria"]["uncertain"], "New.");
+        let (s, _) = call(Method::DELETE, "/api/answers/uncertain", None).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let (s, _) = call(Method::GET, "/api/answers/uncertain", None).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn lists_classifiers_one_line_each() {
         let cs = json!({"triage": {"questions": ["a", "gone"], "model": "p/m", "description": "Routes\n tickets"}, "plain": {"questions": ["a"]}});
         let saved = json!({"a": {"type": "noul", "instructions": "x"}});
@@ -3759,6 +4074,41 @@ mod tests {
             classifiers_table(cs.as_object().unwrap(), saved.as_object().unwrap(), false),
             "plain\t-\ta\t-\ntriage\tp/m\ta, gone (deleted)\tRoutes tickets\n"
         );
+    }
+
+    #[test]
+    fn lists_answers_one_line_each() {
+        let a = json!({"uncertain": {"text": "Not
+ sure.", "types": ["choice"], "default": true, "questions": ["q1", "q2"]},
+                       "low": {"text": "Low", "types": ["score", "choice"], "questions": []}});
+        assert_eq!(
+            answers_table(a.as_object().unwrap(), false),
+            "low	score,choice	0	Low
+uncertain	choice	2	Not sure.
+"
+        );
+    }
+
+    #[test]
+    fn update_message_names_rewritten_questions() {
+        assert_eq!(
+            updated_message(&["a".into(), "b".into()]),
+            "Updated 2 questions: a, b."
+        );
+        assert_eq!(updated_message(&[]), "Updated no questions.");
+        assert_eq!(updated_message(&["a".into()]), "Updated 1 question: a.");
+    }
+
+    #[test]
+    fn answers_cli_parses() {
+        let parse = |a: &[&str]| Cli::try_parse_from(a).is_ok();
+        assert!(parse(&["jeff", "answers", "list"]));
+        assert!(parse(&["jeff", "answers", "list", "-o", "f.json"]));
+        assert!(parse(&["jeff", "answers", "get", "k"]));
+        assert!(parse(&["jeff", "answers", "add", "f.json"]));
+        assert!(parse(&["jeff", "answers", "update", "k", "f.json"]));
+        assert!(parse(&["jeff", "answers", "remove", "k"]));
+        assert!(!parse(&["jeff", "answers", "update", "k"]));
     }
 
     #[test]

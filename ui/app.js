@@ -150,13 +150,14 @@ $("#config-recheck").onclick = (e) => busy(e.currentTarget, checkStatus);
 
 /* ---------- tabs ---------- */
 
-const PAGES = ["questions", "classifiers", "providers", "keys"];
+const PAGES = ["questions", "classifiers", "answers", "providers", "keys"];
 
 function showTab() {
   const id = PAGES.find((p) => location.hash === "#" + p) || "questions";
   for (const t of PAGES) $("#page-" + t).hidden = t !== id;
   for (const n of $$(".unsaved-providers")) n.hidden = !store.get("draft:providers");
   if (id === "keys" && config) loadKeys().catch((e) => say($("#key-status"), e.message, "err"));
+  if (id === "answers" && config) loadAnswers().catch((e) => say($("#a-status"), e.message, "err"));
   // A ready note has done its job once it was on screen and the page is left; one that arrived while away waits.
   for (const n of $$(".p-task[data-tone=ok]")) {
     if (id === "providers") n.dataset.seen = "1";
@@ -796,12 +797,57 @@ function addRow(card, type, a = "", b = "") {
     const n = $(".q-rows", card).children.length;
     row.append(el("span", "q-level-n note w-6 shrink-0 text-right font-mono tabular-nums", String(n)), rowInput("q-level", a, "level description", "Level description"));
   }
-  row.append(removeButton(() => { row.remove(); renumber(card); }, type === "choice" ? "Remove option" : "Remove level"));
+  row.append(el("span", "q-tag note shrink-0", "shared"), removeButton(() => { row.remove(); renumber(card); renderShared(card); }, type === "choice" ? "Remove option" : "Remove level"));
+  // Only rows that arrive matching become shared; a row typed into a match stays editable.
+  const shared = sharedKeyOf(row, type);
+  if (shared) row.dataset.shared = shared;
   $(".q-rows", card).append(row);
+  renderShared(card);
 }
 
 function renumber(card) {
   $$(".q-level-n", card).forEach((n, i) => (n.textContent = String(i)));
+}
+
+function sharedKeyOf(row, type) {
+  if (type === "choice") {
+    const k = $(".q-opt-key", row).value.trim();
+    const t = $(".q-opt-desc", row).value.trim() || k;
+    return library[k] && library[k].types.includes(type) && library[k].text === t ? k : null;
+  }
+  const t = $(".q-level", row).value.trim();
+  return Object.keys(library).find((k) => library[k].types.includes(type) && library[k].text === t) ?? null;
+}
+
+function renderShared(card) {
+  const type = card.dataset.type;
+  const rows = $$(".q-row", card);
+  const matched = rows.map((row) => [row, row.dataset.shared ?? null]);
+  for (const [row, k] of matched) {
+    for (const i of $$("input", row)) {
+      i.readOnly = !!k;
+      i.classList.toggle("opacity-60", !!k);
+    }
+    $(".q-tag", row).hidden = !k;
+  }
+  const keys = Object.keys(library).filter((k) => library[k].types.includes(type));
+  $(".q-shared", card).hidden = type === "noul" || !keys.length;
+  $(".q-shared", card).replaceChildren(...keys.map((k) => {
+    const on = matched.some(([, m]) => m === k);
+    const clash = !on && rows.some((r) => type === "choice" ? $(".q-opt-key", r).value.trim() === k : $(".q-level", r).value.trim() === library[k].text);
+    const chip = el("button", `rounded border px-2 py-0.5 text-xs disabled:opacity-50 ${on ? "border-neutral-900 bg-neutral-900 text-white dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900" : "border-neutral-300 dark:border-neutral-700"}`, k);
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", String(on));
+    chip.disabled = clash;
+    chip.title = clash ? `Option '${k}' is already used. Rename it to add the shared answer.` : library[k].text;
+    chip.onclick = () => {
+      if (!on) { addRow(card, type, ...(type === "choice" ? [k, library[k].text] : [library[k].text])); return; }
+      matched.filter(([, m]) => m === k).forEach(([row]) => row.remove());
+      renumber(card);
+      renderShared(card);
+    };
+    return chip;
+  }));
 }
 
 function setType(card, type, rows) {
@@ -815,7 +861,14 @@ function setType(card, type, rows) {
   $(".q-add", card).textContent = info.add;
   $(".q-help", card).textContent = info.help;
   for (const r of rows || []) addRow(card, type, ...r);
-  if (!rows && type !== "noul") { addRow(card, type); addRow(card, type); }
+  if (!rows && type !== "noul") {
+    addRow(card, type);
+    addRow(card, type);
+    for (const [k, a] of Object.entries(library)) {
+      if (a.default && a.types.includes(type)) addRow(card, type, ...(type === "choice" ? [k, a.text] : [a.text]));
+    }
+  }
+  renderShared(card);
 }
 
 function addQuestion(q) {
@@ -824,6 +877,7 @@ function addQuestion(q) {
   $(".q-instr", card).value = q.instructions || "";
   $(".q-type", card).onchange = (e) => setType(card, e.target.value);
   $(".q-add", card).onclick = () => addRow(card, card.dataset.type);
+  card.addEventListener("input", () => renderShared(card));
   setType(card, q.type || "noul", q.rows);
   $("#q-form-card").replaceChildren(card);
   return card;
@@ -1589,6 +1643,7 @@ for (const b of $$("[data-discard]")) b.onclick = () => {
   const form = b.dataset.discard;
   if (form === "q") { drafts.drop(questionDraftId()); openForm(editing); }
   if (form === "c") { drafts.drop(classifierDraftId()); openClassifierForm(cEditing); }
+  if (form === "a") { drafts.drop(answerDraftId()); openAnswerForm(aEditing); }
   if (form === "p") { drafts.drop("providers"); renderProviders(); }
   if (form === "k") { drafts.drop("key:new"); fillKeyForm(JSON.parse(drafts.baseline["key:new"])); $("#k-draft").hidden = true; }
 };
@@ -1597,6 +1652,122 @@ $("#c-try").onclick = tryClassifier;
 $("#c-run").onclick = runClassifier;
 
 setInterval(() => !document.hidden && location.hash === "#providers" && modelList && loadModels().catch(() => {}), 15000);
+
+/* ---------- answers ---------- */
+
+/** Shared answers by key, as the server last sent them, each with the keys of the questions that use it. */
+let library = {};
+/** The answer key being edited; null while creating. */
+let aEditing = null;
+
+const countOf = (n) => `${n} question${n === 1 ? "" : "s"}`;
+
+function answerRow(key, a) {
+  const li = el("li", "flex items-start gap-3 p-3");
+  const main = el("div", "min-w-0 flex-1");
+  const head = el("div", "flex flex-wrap items-center gap-2");
+  head.append(el("span", "font-mono font-medium", key));
+  for (const t of a.types) head.append(el("span", "rounded border border-neutral-300 px-1.5 py-0.5 text-[11px] dark:border-neutral-700", t));
+  if (a.default) head.append(el("span", "rounded border border-neutral-300 bg-neutral-100 px-1.5 py-0.5 text-[11px] dark:border-neutral-700 dark:bg-neutral-800", "Default"));
+  main.append(head, el("p", "mt-0.5 line-clamp-2", a.text), el("p", "note mt-0.5", `Used in ${countOf(a.questions.length)}`));
+  const edit = el("button", "btn min-w-0", "Edit");
+  edit.type = "button";
+  edit.onclick = () => openAnswerForm(key);
+  li.append(main, edit);
+  return li;
+}
+
+function renderAnswers() {
+  const keys = Object.keys(library);
+  $("#a-items").replaceChildren(...keys.map((k) => answerRow(k, library[k])));
+  $("#a-items").hidden = !keys.length;
+  $("#a-empty").hidden = keys.length > 0;
+}
+
+async function loadAnswers() {
+  library = (await api("/api/answers")).body;
+  drafts.prune("answer", library);
+  renderAnswers();
+}
+
+const showAnswerForm = (open) => {
+  $("#a-list-view").hidden = open;
+  $("#a-form-view").hidden = !open;
+};
+
+const answerDraftId = () => `answer:${aEditing ?? "new"}`;
+const answerSnapshot = () => ({ key: $("#a-key").value, text: $("#a-text").value, choice: $("#a-choice").checked, score: $("#a-score").checked, default: $("#a-default").checked });
+const trackAnswer = () => { if (!$("#a-form-view").hidden) drafts.track(answerDraftId(), answerSnapshot()); };
+
+function fillAnswerForm(f) {
+  $("#a-key").value = f.key;
+  $("#a-text").value = f.text;
+  $("#a-choice").checked = f.choice;
+  $("#a-score").checked = f.score;
+  $("#a-default").checked = f.default;
+}
+
+function openAnswerForm(key = null) {
+  aEditing = key;
+  const a = key ? library[key] : { types: [] };
+  $("#a-form-title").textContent = key ? "Edit answer" : "New answer";
+  $("#a-key").readOnly = !!key;
+  fillAnswerForm({ key: key || "", text: a.text || "", choice: a.types.includes("choice"), score: a.types.includes("score"), default: !!a.default });
+  say($("#a-form-status"), "");
+  const d = drafts.open(answerDraftId(), answerSnapshot(), $("#a-form-status"));
+  $("#a-draft").hidden = !d;
+  if (d) fillAnswerForm({ ...d, key: key || d.key });
+  $("#a-delete").hidden = !key;
+  const n = key ? library[key].questions.length : 0;
+  $("#a-delete").title = n ? `${countOf(n)} ${n === 1 ? "keeps" : "keep"} this option as plain text.` : "";
+  showAnswerForm(true);
+  (key ? $("#a-text") : $("#a-key")).focus();
+}
+
+async function saveAnswer() {
+  const status = $("#a-form-status");
+  try {
+    const key = aEditing || $("#a-key").value.trim();
+    if (!key) throw new Error("The answer has no key. Give it a key.");
+    const a = { text: $("#a-text").value.trim(), types: ["choice", "score"].filter((t) => $("#a-" + t).checked) };
+    if ($("#a-default").checked) a.default = true;
+    const json = { "content-type": "application/json" };
+    let note = "";
+    if (aEditing) {
+      const { body } = await api(`/api/answers/${encodeURIComponent(key)}`, { method: "PUT", headers: json, body: JSON.stringify(a) });
+      note = body.questions.length ? `Updated ${countOf(body.questions.length)}.` : "Updated no questions.";
+    } else {
+      await api("/api/answers", { method: "POST", headers: json, body: JSON.stringify({ [key]: a }) });
+    }
+    drafts.drop(answerDraftId());
+    await Promise.all([loadQuestions(), loadAnswers()]);
+    if (aEditing) say(status, note, "ok");
+    else showAnswerForm(false);
+  } catch (err) {
+    say(status, err.message, "err");
+  }
+}
+
+confirmClick($("#a-delete"), "Confirm delete", async () => {
+  const key = aEditing;
+  try {
+    library = (await api(`/api/answers/${encodeURIComponent(key)}`, { method: "DELETE" })).body;
+    drafts.drop(answerDraftId());
+    renderAnswers();
+    await loadQuestions();
+    showAnswerForm(false);
+  } catch (err) {
+    say($("#a-form-status"), err.message, "err");
+  }
+});
+
+$("#a-new").onclick = () => openAnswerForm();
+$("#a-empty-new").onclick = () => openAnswerForm();
+const closeAnswerForm = () => { drafts.drop(answerDraftId()); showAnswerForm(false); };
+$("#a-back").onclick = closeAnswerForm;
+$("#a-cancel").onclick = closeAnswerForm;
+$("#a-save").onclick = (e) => busy(e.currentTarget, saveAnswer);
+for (const id of ["key", "text", "choice", "score", "default"]) $("#a-" + id).addEventListener("input", trackAnswer);
 
 /* ---------- sign-in ---------- */
 
@@ -1658,6 +1829,7 @@ addEventListener("hashchange", async () => {
   setView(view);
   loadQuestions().catch((e) => say($("#pg-status"), e.message, "err"));
   loadClassifiers().catch((e) => say($("#c-status"), e.message, "err"));
+  loadAnswers().catch((e) => say($("#a-status"), e.message, "err"));
   loadConfig().catch((e) => say($("#pg-status"), e.message, "err"));
   checkStatus();
   if (linkError) showSignIn(linkError);
