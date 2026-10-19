@@ -77,6 +77,8 @@ struct Config {
     #[serde(default)]
     classifiers: classifiers::Classifiers,
     #[serde(default)]
+    answers: answers::Answers,
+    #[serde(default)]
     cache: CacheConfig,
 }
 
@@ -145,6 +147,7 @@ impl Default for Config {
             keys: Vec::new(),
             questions: questions::Questions::new(),
             classifiers: classifiers::Classifiers::new(),
+            answers: answers::Answers::new(),
             cache: CacheConfig::default(),
         }
     }
@@ -164,6 +167,7 @@ fn load_config(path: &str) -> Result<Config, Vec<String>> {
                 .iter()
                 .filter_map(|(k, c)| classifiers::validate(k, c).err()),
         )
+        .chain(answers::validate_all(&config.answers).err())
         .collect();
     if problems.is_empty() {
         Ok(config)
@@ -1541,6 +1545,72 @@ async fn delete_classifier(State(app): State<Arc<App>>, Path(key): Path<String>)
     }
 }
 
+async fn list_answers(State(app): State<Arc<App>>) -> Json<answers::Answers> {
+    let config = app.config.read().await;
+    Json(answers::with_uses(&config.answers, &config.questions))
+}
+
+async fn get_answer(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    let config = app.config.read().await;
+    match answers::with_uses(&config.answers, &config.questions).remove(&key) {
+        Some(a) => Json(a).into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("No answer '{key}'. Check the key or create the answer first."),
+        ),
+    }
+}
+
+async fn create_answers(
+    State(app): State<Arc<App>>,
+    Json(input): Json<answers::Answers>,
+) -> Response {
+    match change_config(&app, |c| answers::create(&mut c.answers, input)).await {
+        Ok(c) => (
+            StatusCode::CREATED,
+            Json(answers::with_uses(&c.answers, &c.questions)),
+        )
+            .into_response(),
+        Err(r) => *r,
+    }
+}
+
+async fn update_answer(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+    Json(answer): Json<Value>,
+) -> Response {
+    let mut rewritten = Vec::new();
+    match change_config(&app, |c| {
+        rewritten = answers::update(&mut c.answers, &mut c.questions, &key, answer)?;
+        Ok(())
+    })
+    .await
+    {
+        Ok(c) => {
+            let answer = answers::with_uses(&c.answers, &c.questions).remove(&key);
+            Json(json!({"answer": answer, "questions": rewritten})).into_response()
+        }
+        Err(r) => *r,
+    }
+}
+
+async fn delete_answer(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    match change_config(&app, |c| answers::remove(&mut c.answers, &key)).await {
+        Ok(c) => Json(answers::with_uses(&c.answers, &c.questions)).into_response(),
+        Err(r) => *r,
+    }
+}
+
+fn answer_routes() -> Router<Arc<App>> {
+    Router::new()
+        .route("/api/answers", get(list_answers).post(create_answers))
+        .route(
+            "/api/answers/{key}",
+            get(get_answer).put(update_answer).delete(delete_answer),
+        )
+}
+
 async fn get_config(State(app): State<Arc<App>>) -> Json<Value> {
     Json(public(&*app.config.read().await))
 }
@@ -1654,6 +1724,7 @@ fn build_config(
         keys: current.keys.clone(),
         questions: current.questions.clone(),
         classifiers: current.classifiers.clone(),
+        answers: current.answers.clone(),
         cache: current.cache,
     })
 }
@@ -2774,7 +2845,8 @@ async fn serve(args: ServeArgs) {
         .route(
             "/api/classifiers/{key}",
             axum::routing::put(update_classifier).delete(delete_classifier),
-        );
+        )
+        .merge(answer_routes());
     for stack in install::Stack::ALL {
         manage = manage
             .route(
@@ -3750,6 +3822,126 @@ mod tests {
         };
         let next = build_config(&current, input, false).unwrap();
         assert_eq!(next.classifiers, current.classifiers);
+    }
+
+    #[test]
+    fn config_without_answers_loads_empty_and_keeps_questions() {
+        let questions = json!({
+            "q1": {"type": "choice", "instructions": "x", "criteria": {"a": "Yes.", "b": "No."}},
+            "q2": {"type": "score", "instructions": "y", "criteria": ["Low", "High"]}
+        });
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config.as_object_mut().unwrap().remove("answers");
+        config["questions"] = questions.clone();
+        let path = temp_config("noanswers", &config.to_string());
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        let loaded = loaded.unwrap();
+        assert!(loaded.answers.is_empty());
+        let back = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(back["questions"], questions);
+    }
+
+    #[test]
+    fn load_config_rejects_invalid_answers() {
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config["answers"] = json!({"a": {"text": "", "types": ["choice"]}});
+        let path = temp_config("badanswers", &config.to_string());
+        let loaded = load_config(&path);
+        let _ = fs::remove_file(&path);
+        let e = loaded.err().expect("an invalid answer must be refused");
+        assert!(e[0].contains("Answer 'a'"), "{e:?}");
+    }
+
+    #[test]
+    fn build_config_keeps_answers() {
+        let mut current = Config::default();
+        current.answers.insert(
+            "unsure".into(),
+            json!({"text": "Not sure.", "types": ["choice"]}),
+        );
+        let input = ConfigInput {
+            default_model: "clm/clm-latest".into(),
+            providers: vec![ProviderInput {
+                id: "clm".into(),
+                name: "CLM".into(),
+                url: "http://127.0.0.1:8700".into(),
+                key: None,
+                models: vec![],
+                installer: None,
+                connect_timeout: None,
+                max_time: None,
+                description: None,
+            }],
+        };
+        let next = build_config(&current, input, false).unwrap();
+        assert_eq!(next.answers, current.answers);
+    }
+
+    #[tokio::test]
+    async fn answers_api_round_trip() {
+        let path = temp_config("answersapi", "{}");
+        let app = Arc::new(test_app(&path));
+        app.config.write().await.questions.insert(
+            "q1".into(),
+            json!({"type": "choice", "instructions": "x", "criteria": {"uncertain": "Not sure."}}),
+        );
+        let router = Router::new()
+            .merge(answer_routes())
+            .route("/v1/questions/{key}", get(get_question))
+            .with_state(app.clone());
+        let call = |method: Method, uri: &'static str, body: Option<Value>| {
+            let router = router.clone();
+            async move {
+                let mut req = Request::builder().method(method).uri(uri);
+                let body = match body {
+                    Some(b) => {
+                        req = req.header(header::CONTENT_TYPE, "application/json");
+                        axum::body::Body::from(b.to_string())
+                    }
+                    None => axum::body::Body::empty(),
+                };
+                let r = tower::ServiceExt::oneshot(router, req.body(body).unwrap())
+                    .await
+                    .unwrap();
+                (r.status(), body_of(r).await)
+            }
+        };
+        let (s, b) = call(
+            Method::POST,
+            "/api/answers",
+            Some(json!({"uncertain": {"text": "Not sure.", "types": ["choice"]}})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{b}");
+        assert_eq!(b["uncertain"]["text"], "Not sure.");
+        let (s, b) = call(Method::GET, "/api/answers", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["uncertain"]["questions"], json!(["q1"]));
+        let (s, b) = call(Method::GET, "/api/answers/uncertain", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["questions"], json!(["q1"]));
+        let (s, b) = call(
+            Method::PUT,
+            "/api/answers/uncertain",
+            Some(json!({"text": "New.", "types": ["choice"]})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["answer"]["text"], "New.");
+        assert_eq!(b["questions"], json!(["q1"]));
+        let (_, b) = call(Method::GET, "/v1/questions/q1", None).await;
+        assert_eq!(b["criteria"]["uncertain"], "New.");
+        let (s, b) = call(Method::DELETE, "/api/answers/uncertain", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(b.get("uncertain").is_none());
+        let (_, b) = call(Method::GET, "/v1/questions/q1", None).await;
+        assert_eq!(b["criteria"]["uncertain"], "New.");
+        let (s, _) = call(Method::DELETE, "/api/answers/uncertain", None).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let (s, _) = call(Method::GET, "/api/answers/uncertain", None).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
