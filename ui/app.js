@@ -796,12 +796,54 @@ function addRow(card, type, a = "", b = "") {
     const n = $(".q-rows", card).children.length;
     row.append(el("span", "q-level-n note w-6 shrink-0 text-right font-mono tabular-nums", String(n)), rowInput("q-level", a, "level description", "Level description"));
   }
-  row.append(removeButton(() => { row.remove(); renumber(card); }, type === "choice" ? "Remove option" : "Remove level"));
+  row.append(el("span", "q-tag note shrink-0", "shared"), removeButton(() => { row.remove(); renumber(card); renderShared(card); }, type === "choice" ? "Remove option" : "Remove level"));
   $(".q-rows", card).append(row);
+  renderShared(card);
 }
 
 function renumber(card) {
   $$(".q-level-n", card).forEach((n, i) => (n.textContent = String(i)));
+}
+
+function sharedKeyOf(row, type) {
+  if (type === "choice") {
+    const k = $(".q-opt-key", row).value.trim();
+    const t = $(".q-opt-desc", row).value.trim() || k;
+    return library[k] && library[k].types.includes(type) && library[k].text === t ? k : null;
+  }
+  const t = $(".q-level", row).value.trim();
+  return Object.keys(library).find((k) => library[k].types.includes(type) && library[k].text === t) ?? null;
+}
+
+function renderShared(card) {
+  const type = card.dataset.type;
+  const rows = $$(".q-row", card);
+  const matched = rows.map((row) => [row, sharedKeyOf(row, type)]);
+  for (const [row, k] of matched) {
+    for (const i of $$("input", row)) {
+      i.readOnly = !!k;
+      i.classList.toggle("opacity-60", !!k);
+    }
+    $(".q-tag", row).hidden = !k;
+  }
+  const keys = Object.keys(library).filter((k) => library[k].types.includes(type));
+  $(".q-shared", card).hidden = type === "noul" || !keys.length;
+  $(".q-shared", card).replaceChildren(...keys.map((k) => {
+    const on = matched.some(([, m]) => m === k);
+    const clash = type === "choice" && !on && rows.some((r) => $(".q-opt-key", r).value.trim() === k);
+    const chip = el("button", `rounded border px-2 py-0.5 text-xs disabled:opacity-50 ${on ? "border-neutral-900 bg-neutral-900 text-white dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900" : "border-neutral-300 dark:border-neutral-700"}`, k);
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", String(on));
+    chip.disabled = clash;
+    chip.title = clash ? `Option '${k}' is already used. Rename it to add the shared answer.` : library[k].text;
+    chip.onclick = () => {
+      if (!on) { addRow(card, type, ...(type === "choice" ? [k, library[k].text] : [library[k].text])); return; }
+      matched.filter(([, m]) => m === k).forEach(([row]) => row.remove());
+      renumber(card);
+      renderShared(card);
+    };
+    return chip;
+  }));
 }
 
 function setType(card, type, rows) {
@@ -815,7 +857,14 @@ function setType(card, type, rows) {
   $(".q-add", card).textContent = info.add;
   $(".q-help", card).textContent = info.help;
   for (const r of rows || []) addRow(card, type, ...r);
-  if (!rows && type !== "noul") { addRow(card, type); addRow(card, type); }
+  if (!rows && type !== "noul") {
+    addRow(card, type);
+    addRow(card, type);
+    for (const [k, a] of Object.entries(library)) {
+      if (a.default && a.types.includes(type)) addRow(card, type, ...(type === "choice" ? [k, a.text] : [a.text]));
+    }
+  }
+  renderShared(card);
 }
 
 function addQuestion(q) {
@@ -824,6 +873,7 @@ function addQuestion(q) {
   $(".q-instr", card).value = q.instructions || "";
   $(".q-type", card).onchange = (e) => setType(card, e.target.value);
   $(".q-add", card).onclick = () => addRow(card, card.dataset.type);
+  card.addEventListener("input", () => renderShared(card));
   setType(card, q.type || "noul", q.rows);
   $("#q-form-card").replaceChildren(card);
   return card;
