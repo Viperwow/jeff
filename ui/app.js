@@ -797,6 +797,9 @@ function addRow(card, type, a = "", b = "") {
     row.append(el("span", "q-level-n note w-6 shrink-0 text-right font-mono tabular-nums", String(n)), rowInput("q-level", a, "level description", "Level description"));
   }
   row.append(el("span", "q-tag note shrink-0", "shared"), removeButton(() => { row.remove(); renumber(card); renderShared(card); }, type === "choice" ? "Remove option" : "Remove level"));
+  // Only rows that arrive matching become shared; a row typed into a match stays editable.
+  const shared = sharedKeyOf(row, type);
+  if (shared) row.dataset.shared = shared;
   $(".q-rows", card).append(row);
   renderShared(card);
 }
@@ -818,7 +821,7 @@ function sharedKeyOf(row, type) {
 function renderShared(card) {
   const type = card.dataset.type;
   const rows = $$(".q-row", card);
-  const matched = rows.map((row) => [row, sharedKeyOf(row, type)]);
+  const matched = rows.map((row) => [row, row.dataset.shared ?? null]);
   for (const [row, k] of matched) {
     for (const i of $$("input", row)) {
       i.readOnly = !!k;
@@ -830,7 +833,7 @@ function renderShared(card) {
   $(".q-shared", card).hidden = type === "noul" || !keys.length;
   $(".q-shared", card).replaceChildren(...keys.map((k) => {
     const on = matched.some(([, m]) => m === k);
-    const clash = type === "choice" && !on && rows.some((r) => $(".q-opt-key", r).value.trim() === k);
+    const clash = !on && rows.some((r) => type === "choice" ? $(".q-opt-key", r).value.trim() === k : $(".q-level", r).value.trim() === library[k].text);
     const chip = el("button", `rounded border px-2 py-0.5 text-xs disabled:opacity-50 ${on ? "border-neutral-900 bg-neutral-900 text-white dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900" : "border-neutral-300 dark:border-neutral-700"}`, k);
     chip.type = "button";
     chip.setAttribute("aria-pressed", String(on));
@@ -1714,6 +1717,8 @@ function openAnswerForm(key = null) {
   $("#a-draft").hidden = !d;
   if (d) fillAnswerForm({ ...d, key: key || d.key });
   $("#a-delete").hidden = !key;
+  const n = key ? library[key].questions.length : 0;
+  $("#a-delete").title = n ? `${countOf(n)} ${n === 1 ? "keeps" : "keep"} this option as plain text.` : "";
   showAnswerForm(true);
   (key ? $("#a-text") : $("#a-key")).focus();
 }
@@ -1742,9 +1747,8 @@ async function saveAnswer() {
   }
 }
 
-async function deleteAnswer(key) {
-  const n = library[key].questions.length;
-  if (!confirm(`Delete '${key}'? ${countOf(n)} ${n === 1 ? "keeps" : "keep"} this option as plain text.`)) return;
+confirmClick($("#a-delete"), "Confirm delete", async () => {
+  const key = aEditing;
   try {
     library = (await api(`/api/answers/${encodeURIComponent(key)}`, { method: "DELETE" })).body;
     drafts.drop(answerDraftId());
@@ -1754,7 +1758,7 @@ async function deleteAnswer(key) {
   } catch (err) {
     say($("#a-form-status"), err.message, "err");
   }
-}
+});
 
 $("#a-new").onclick = () => openAnswerForm();
 $("#a-empty-new").onclick = () => openAnswerForm();
@@ -1762,7 +1766,6 @@ const closeAnswerForm = () => { drafts.drop(answerDraftId()); showAnswerForm(fal
 $("#a-back").onclick = closeAnswerForm;
 $("#a-cancel").onclick = closeAnswerForm;
 $("#a-save").onclick = (e) => busy(e.currentTarget, saveAnswer);
-$("#a-delete").onclick = (e) => busy(e.currentTarget, () => deleteAnswer(aEditing));
 for (const id of ["key", "text", "choice", "score", "default"]) $("#a-" + id).addEventListener("input", trackAnswer);
 
 /* ---------- sign-in ---------- */
