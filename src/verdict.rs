@@ -4,13 +4,13 @@ use serde_json::{Value, json};
 /// How sure the model is of its answer, from 0 to 1, and which source gave the number. `jeff` counts a sure yes and
 /// a sure no alike for `noul`, and uses the normalized entropy of `probabilities` otherwise.
 pub fn confidence(answer: &Value, source: &str) -> Option<(f64, &'static str)> {
+    if let Some(p) = answer.get("noul").and_then(Value::as_f64) {
+        return Some(((2.0 * p - 1.0).abs().min(1.0), "jeff"));
+    }
     if source == "provider"
         && let Some(c) = answer.get("confidence").and_then(Value::as_f64)
     {
-        return Some((c, "provider"));
-    }
-    if let Some(p) = answer.get("noul").and_then(Value::as_f64) {
-        return Some(((2.0 * p - 1.0).abs().min(1.0), "jeff"));
+        return Some((c.clamp(0.0, 1.0), "provider"));
     }
     let probs: Vec<f64> = answer
         .get("probabilities")?
@@ -115,6 +115,20 @@ mod tests {
             confidence(&json!({"noul": 0.9}), "provider").unwrap().1,
             "jeff"
         );
+    }
+
+    #[test]
+    fn noul_always_uses_jeff() {
+        let a = json!({"type": "noul", "noul": 0.03, "confidence": 0.2});
+        let (c, s) = confidence(&a, "provider").unwrap();
+        assert!((c - 0.94).abs() < 1e-12 && s == "jeff");
+    }
+
+    #[test]
+    fn provider_confidence_is_clamped() {
+        let a = |c: f64| json!({"probabilities": {"a": 0.5, "b": 0.5}, "confidence": c});
+        assert_eq!(confidence(&a(1.7), "provider"), Some((1.0, "provider")));
+        assert_eq!(confidence(&a(-0.2), "provider"), Some((0.0, "provider")));
     }
 
     #[test]

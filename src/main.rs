@@ -2366,8 +2366,10 @@ fn classifiers_table(
     table(["key", "model", "questions", "description"], rows, boxed)
 }
 
-/// A boxed table for a terminal, tab-separated fields for a pipe. The last column is cut to fit a terminal.
-fn table<const N: usize>(header: [&str; N], rows: Vec<[String; N]>, boxed: bool) -> String {
+/// A boxed table for a terminal, tab-separated fields for a pipe, sorted by the first column. The last column is cut to
+/// fit a terminal.
+fn table<const N: usize>(header: [&str; N], mut rows: Vec<[String; N]>, boxed: bool) -> String {
+    rows.sort();
     if !boxed {
         return rows.iter().map(|r| r.join("\t") + "\n").collect();
     }
@@ -4040,6 +4042,33 @@ mod tests {
             judged(up(br#"{"answers":{}}"#), None).bytes,
             br#"{"answers":{}}"#
         );
+    }
+
+    #[test]
+    fn judged_keeps_the_providers_level_order() {
+        let levels: Vec<String> = (0..12).map(|i| i.to_string()).collect();
+        let probs = levels
+            .iter()
+            .map(|l| format!("\"{l}\":0.0833"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let body =
+            format!(r#"{{"answers":{{"s":{{"type":"score","probabilities":{{{probs}}}}}}}}}"#);
+        let up = Upstream {
+            provider: "p".into(),
+            ms: 1,
+            status: StatusCode::OK,
+            bytes: body.into_bytes(),
+            cached: false,
+        };
+        let rules = json!({"s": {}}).as_object().unwrap().clone();
+        let v: Value = serde_json::from_slice(&judged(up, Some(&rules)).bytes).unwrap();
+        let keys: Vec<&String> = v["answers"]["s"]["probabilities"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(keys, levels.iter().collect::<Vec<_>>());
     }
 
     #[tokio::test]

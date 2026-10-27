@@ -71,6 +71,10 @@ const CONFIDENCE_FIELDS: [&str; 3] = [
     "confidence_source",
 ];
 
+fn drop_null_caps(q: &mut serde_json::Map<String, Value>) {
+    q.retain(|k, v| !(v.is_null() && CONFIDENCE_FIELDS.contains(&k.as_str())));
+}
+
 pub fn check_caps(q: &serde_json::Map<String, Value>) -> Result<(), &'static str> {
     let cap = |field| match q.get(field) {
         None => Ok(None),
@@ -133,6 +137,7 @@ pub fn create(saved: &mut Questions, input: Questions) -> Result<(), Change> {
         )));
     }
     saved.extend(input);
+    saved.sort_keys();
     Ok(())
 }
 
@@ -172,16 +177,16 @@ pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
                             .unwrap_or_default();
                         base.extend(fields.clone());
                         // A null drops the saved field for this request only.
-                        base.retain(|k, v| {
-                            !(v.is_null() && CONFIDENCE_FIELDS.contains(&k.as_str()))
-                        });
+                        drop_null_caps(&mut base);
                         let q = Value::Object(base);
                         validate(key, &q)?;
                         q
                     }
                     Some(fields) => {
-                        check_caps(fields).map_err(|e| format!("Question '{key}': {e}"))?;
-                        q.clone()
+                        let mut fields = fields.clone();
+                        drop_null_caps(&mut fields);
+                        check_caps(&fields).map_err(|e| format!("Question '{key}': {e}"))?;
+                        Value::Object(fields)
                     }
                     None => q.clone(),
                 };
@@ -609,6 +614,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.starts_with("Question 'i': "), "{e}");
+    }
+
+    #[test]
+    fn an_inline_null_cap_means_no_cap() {
+        let out = expand(
+            &json!({"i": {"type": "noul", "instructions": "y", "confidence_hard_cap": null}}),
+            &Questions::new(),
+        )
+        .unwrap();
+        assert!(out["i"].get("confidence_hard_cap").is_none());
+    }
+
+    #[test]
+    fn create_keeps_saved_questions_sorted_by_key() {
+        let mut saved = Questions::new();
+        let q = json!({"type": "noul", "instructions": "x"});
+        create(&mut saved, map(json!({"b": q}))).unwrap();
+        create(&mut saved, map(json!({"a": q}))).unwrap();
+        assert_eq!(saved.keys().collect::<Vec<_>>(), ["a", "b"]);
     }
 
     #[test]
