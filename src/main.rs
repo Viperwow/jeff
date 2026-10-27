@@ -1,10 +1,12 @@
 mod answers;
 mod classifiers;
 mod install;
+mod jev;
 mod keys;
 mod log;
 mod questions;
 mod sessions;
+mod verdict;
 
 use axum::{
     Extension, Json, Router,
@@ -677,7 +679,7 @@ async fn forward(
     let resp = upstream.send().await.map_err(|e| {
         // A connect timeout is a timeout too, but it means the provider is unreachable.
         let timed_out = e.is_timeout() && !e.is_connect();
-        eprintln!("provider {}: {}", p.id, e.without_url());
+        log_provider(app, &p.id, &e.without_url().to_string());
         if timed_out {
             late()
         } else {
@@ -697,11 +699,15 @@ async fn forward(
             ),
         ),
         ReadError::Failed(e) if e.is_timeout() => late(),
-        ReadError::Failed(e) => {
-            eprintln!("provider {}: {}", p.id, e.without_url());
-            unreadable(&p.id)
-        }
+        ReadError::Failed(e) => provider_failed(app, &p.id, &e.without_url().to_string()),
     })?;
+    // A success must match the Jev reference, so nothing off it reaches the cache, the verdict or the client.
+    if status.is_success()
+        && let Err(e) = jev::parse(&bytes)
+    {
+        let cause = format!("the answer does not match the Jev reference: {e}");
+        return Err(provider_failed(app, &p.id, &cause));
+    }
     if cache.entries > 0 && status.is_success() {
         let mut answers = app.answers.lock().unwrap();
         if answers.len() >= cache.entries {
@@ -762,10 +768,25 @@ fn batch(resolved: Vec<Batch>) -> Vec<Batch> {
     out
 }
 
-fn unreadable(provider: &str) -> (StatusCode, String) {
+/// Writes a provider's failure to jeff.log and the console; says whether jeff.log got it.
+fn log_provider(app: &App, provider: &str, cause: &str) -> bool {
+    let line = format!("provider {provider}: {cause}");
+    eprintln!("{line}");
+    log::write(&app.config_path, "provider_error", &line, &[])
+}
+
+/// Logs why a provider's response could not be read and answers with where to find that cause.
+fn provider_failed(app: &App, provider: &str, cause: &str) -> (StatusCode, String) {
+    let logged = log_provider(app, provider, cause);
+    unreadable(provider, log::cause_in(logged))
+}
+
+fn unreadable(provider: &str, cause_in: &str) -> (StatusCode, String) {
     (
         StatusCode::BAD_GATEWAY,
-        format!("Provider '{provider}' sent an unreadable response. Check jeff.log for the cause."),
+        format!(
+            "Provider '{provider}' sent an unreadable response. Check {cause_in} for the cause."
+        ),
     )
 }
 
@@ -814,12 +835,14 @@ async fn answer(
         .and_then(Value::as_str)
         .unwrap_or(&config.default_model)
         .to_owned();
+    let mut rules = None;
     let groups = match obj.get("questions") {
         // The provider reports a missing `questions` itself.
         None => vec![(model, None)],
-        Some(input) => match questions::expand(input, &config.questions)
-            .and_then(|qs| questions::group(qs, &model))
-        {
+        Some(input) => match questions::expand(input, &config.questions).and_then(|qs| {
+            rules = Some(qs.clone());
+            questions::group(qs, &model)
+        }) {
             Ok(groups) => groups.into_iter().map(|(m, qs)| (m, Some(qs))).collect(),
             Err(e) => return Err(error(StatusCode::BAD_REQUEST, e).into()),
         },
@@ -851,26 +874,40 @@ async fn answer(
     // The first failure answers the request and drops the calls still running.
     let mut parts = try_join_all(calls).await.map_err(Box::new)?;
     if parts.len() == 1 {
-        return Ok(parts.pop().unwrap());
+        return Ok(judged(parts.pop().unwrap(), rules.as_ref()));
     }
     let mut answers = Vec::new();
     for u in &parts {
         match serde_json::from_slice(&u.bytes) {
             Ok(v) => answers.push(v),
-            Err(_) => {
-                let (status, msg) = unreadable(&u.provider);
+            Err(e) => {
+                let (status, msg) = provider_failed(app, &u.provider, &e.to_string());
                 return Err(error(status, msg).into());
             }
         }
     }
     let providers: Vec<_> = parts.iter().map(|u| u.provider.as_str()).collect();
-    Ok(Upstream {
+    let merged = Upstream {
         provider: providers.join(", "),
         ms: parts.iter().map(|u| u.ms).max().unwrap_or(0),
         status: StatusCode::OK,
         bytes: serde_json::to_vec(&questions::merge(answers)).unwrap(),
         cached: parts.iter().all(|u| u.cached),
-    })
+    };
+    Ok(judged(merged, rules.as_ref()))
+}
+
+/// Adds a `verdict` to each answer asked by `rules`; a body jeff cannot read goes out as the provider sent it.
+fn judged(mut u: Upstream, rules: Option<&questions::Questions>) -> Upstream {
+    if let Some(rules) = rules
+        && u.status.is_success()
+        && let Ok(typed) = jev::parse(&u.bytes)
+        && let Ok(mut v) = serde_json::from_slice::<Value>(&u.bytes)
+    {
+        verdict::apply(&mut v, &typed, rules);
+        u.bytes = serde_json::to_vec(&v).unwrap();
+    }
+    u
 }
 
 /// The classifier's questions replace any `questions` the client sent.
@@ -3998,6 +4035,78 @@ mod tests {
         };
         let next = build_config(&current, input, false).unwrap();
         assert_eq!(next.answers, current.answers);
+    }
+
+    #[test]
+    fn judged_adds_verdicts_and_leaves_other_bodies() {
+        let up = |bytes: &[u8]| Upstream {
+            provider: "p".into(),
+            ms: 1,
+            status: StatusCode::OK,
+            bytes: bytes.to_vec(),
+            cached: true,
+        };
+        let rules = Some(
+            json!({"a": {"type": "noul", "instructions": "x", "confidence_soft_cap": 0.9}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let out = judged(
+            up(br#"{"model":"m","answers":{"a":{"noul":0.75}},"usage":{"input_tokens":1,"output_tokens":0}}"#),
+            rules.as_ref(),
+        );
+        let v: Value = serde_json::from_slice(&out.bytes).unwrap();
+        assert_eq!(v["answers"]["a"]["verdict"]["result"], "warn");
+        assert!(out.cached && out.provider == "p");
+        assert_eq!(judged(up(b"not json"), rules.as_ref()).bytes, b"not json");
+        assert_eq!(
+            judged(up(br#"{"answers":{}}"#), None).bytes,
+            br#"{"answers":{}}"#
+        );
+    }
+
+    #[test]
+    fn a_provider_failure_reaches_jeff_log() {
+        let path = temp_config("provider-log", "{}");
+        let log_file = log::path(&path);
+        let _ = fs::remove_file(&log_file);
+        let app = test_app(&path);
+        let (status, msg) = provider_failed(&app, "stub", "answer 'q': invalid type");
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            msg,
+            "Provider 'stub' sent an unreadable response. Check jeff.log for the cause."
+        );
+        assert!(
+            fs::read_to_string(&log_file)
+                .unwrap()
+                .contains("provider stub: answer 'q': invalid type")
+        );
+        let lost = test_app("/no/such/dir/config.json");
+        assert_eq!(
+            provider_failed(&lost, "stub", "x").1,
+            "Provider 'stub' sent an unreadable response. Check the server console for the cause."
+        );
+        let _ = fs::remove_file(&log_file);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// The cache key hashes the body jeff sends, so the same request with its fields in another order must hit it.
+    #[test]
+    fn field_order_does_not_change_the_body_sent_upstream() {
+        let a: Value = serde_json::from_str(
+            r#"{"state":"s","questions":{"q":{"type":"choice","instructions":"x","criteria":{"b":"B","a":"A"}}}}"#,
+        )
+        .unwrap();
+        let b: Value = serde_json::from_str(
+            r#"{"questions":{"q":{"criteria":{"a":"A","b":"B"},"instructions":"x","type":"choice"}},"state":"s"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&a).unwrap(),
+            serde_json::to_vec(&b).unwrap()
+        );
     }
 
     #[tokio::test]
