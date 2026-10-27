@@ -815,12 +815,14 @@ async fn answer(
         .and_then(Value::as_str)
         .unwrap_or(&config.default_model)
         .to_owned();
+    let mut rules = None;
     let groups = match obj.get("questions") {
         // The provider reports a missing `questions` itself.
         None => vec![(model, None)],
-        Some(input) => match questions::expand(input, &config.questions)
-            .and_then(|qs| questions::group(qs, &model))
-        {
+        Some(input) => match questions::expand(input, &config.questions).and_then(|qs| {
+            rules = Some(qs.clone());
+            questions::group(qs, &model)
+        }) {
             Ok(groups) => groups.into_iter().map(|(m, qs)| (m, Some(qs))).collect(),
             Err(e) => return Err(error(StatusCode::BAD_REQUEST, e).into()),
         },
@@ -852,7 +854,7 @@ async fn answer(
     // The first failure answers the request and drops the calls still running.
     let mut parts = try_join_all(calls).await.map_err(Box::new)?;
     if parts.len() == 1 {
-        return Ok(parts.pop().unwrap());
+        return Ok(judged(parts.pop().unwrap(), rules.as_ref()));
     }
     let mut answers = Vec::new();
     for u in &parts {
@@ -865,13 +867,26 @@ async fn answer(
         }
     }
     let providers: Vec<_> = parts.iter().map(|u| u.provider.as_str()).collect();
-    Ok(Upstream {
+    let merged = Upstream {
         provider: providers.join(", "),
         ms: parts.iter().map(|u| u.ms).max().unwrap_or(0),
         status: StatusCode::OK,
         bytes: serde_json::to_vec(&questions::merge(answers)).unwrap(),
         cached: parts.iter().all(|u| u.cached),
-    })
+    };
+    Ok(judged(merged, rules.as_ref()))
+}
+
+/// Adds a `verdict` to each answer asked by `rules`; a body jeff cannot read goes out as the provider sent it.
+fn judged(mut u: Upstream, rules: Option<&questions::Questions>) -> Upstream {
+    if let Some(rules) = rules
+        && u.status.is_success()
+        && let Ok(mut v) = serde_json::from_slice::<Value>(&u.bytes)
+    {
+        verdict::apply(&mut v, rules);
+        u.bytes = serde_json::to_vec(&v).unwrap();
+    }
+    u
 }
 
 /// The classifier's questions replace any `questions` the client sent.
@@ -3999,6 +4014,32 @@ mod tests {
         };
         let next = build_config(&current, input, false).unwrap();
         assert_eq!(next.answers, current.answers);
+    }
+
+    #[test]
+    fn judged_adds_verdicts_and_leaves_other_bodies() {
+        let up = |bytes: &[u8]| Upstream {
+            provider: "p".into(),
+            ms: 1,
+            status: StatusCode::OK,
+            bytes: bytes.to_vec(),
+            cached: true,
+        };
+        let rules = Some(
+            json!({"a": {"type": "noul", "instructions": "x", "confidence_soft_cap": 0.9}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let out = judged(up(br#"{"answers":{"a":{"noul":0.75}}}"#), rules.as_ref());
+        let v: Value = serde_json::from_slice(&out.bytes).unwrap();
+        assert_eq!(v["answers"]["a"]["verdict"]["result"], "warn");
+        assert!(out.cached && out.provider == "p");
+        assert_eq!(judged(up(b"not json"), rules.as_ref()).bytes, b"not json");
+        assert_eq!(
+            judged(up(br#"{"answers":{}}"#), None).bytes,
+            br#"{"answers":{}}"#
+        );
     }
 
     #[tokio::test]
