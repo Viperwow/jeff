@@ -1323,7 +1323,12 @@ function renderCaps() {
     const input = el("input", "control w-20 tabular-nums");
     Object.assign(input, { type: "number", min: "0", max: "1", step: "0.01" });
     input.dataset.capInput = k;
-    input.onchange = () => setCap(k, parseFloat(input.value) || 0);
+    // An emptied or unreadable field keeps the cap; the × button is how a cap goes away.
+    input.onchange = () => {
+      const v = parseFloat(input.value);
+      if (Number.isFinite(v)) setCap(k, v);
+      else input.value = fmt2(caps[k]);
+    };
     label.append(el("span", "w-16 font-medium", CAP_NAME[k]), input);
     row.append(label, removeButton(() => { caps[k] = null; renderCaps(); trackQuestion(); }, `Remove ${k} cap`));
     return row;
