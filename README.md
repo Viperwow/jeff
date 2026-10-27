@@ -113,6 +113,8 @@ The answer follows the Jev schema:
 - `choice` returns `choice`, `confidence` and `probabilities` for every option.
 - `score` returns `score` (the expected level), `confidence`, `legend` and `probabilities` for every level.
 
+jeff checks every successful provider answer against the Jev schema: `model`, `answers` and `usage` with `input_tokens` and `output_tokens` present, every probability, `noul` and `confidence` a number from 0 to 1, and `score` levels numbered. An answer that does not match fails the request with `502` and "Provider '<id>' sent an unreadable response. Check jeff.log for the cause."; jeff.log names the field. Such an answer is never cached. Fields a provider adds beyond the schema pass through.
+
 jeff adds a `verdict` to every answer of a request that has `questions`. The provider's own fields stay as they are. An answer jeff cannot read, with neither a `noul` number nor `probabilities`, gets no `verdict`, and an error response from the provider passes through unchanged. jeff writes the keys of every JSON object in alphabetical order, so read a level by its key: `"10"` comes before `"2"`.
 
 ```json

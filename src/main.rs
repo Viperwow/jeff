@@ -1,6 +1,7 @@
 mod answers;
 mod classifiers;
 mod install;
+mod jev;
 mod keys;
 mod log;
 mod questions;
@@ -703,6 +704,16 @@ async fn forward(
             unreadable(&p.id)
         }
     })?;
+    // A success must match the Jev reference, so nothing off it reaches the cache, the verdict or the client.
+    if status.is_success()
+        && let Err(e) = jev::parse(&bytes)
+    {
+        eprintln!(
+            "provider {}: the answer does not match the Jev reference: {e}",
+            p.id
+        );
+        return Err(unreadable(&p.id));
+    }
     if cache.entries > 0 && status.is_success() {
         let mut answers = app.answers.lock().unwrap();
         if answers.len() >= cache.entries {
@@ -881,9 +892,10 @@ async fn answer(
 fn judged(mut u: Upstream, rules: Option<&questions::Questions>) -> Upstream {
     if let Some(rules) = rules
         && u.status.is_success()
+        && let Ok(typed) = jev::parse(&u.bytes)
         && let Ok(mut v) = serde_json::from_slice::<Value>(&u.bytes)
     {
-        verdict::apply(&mut v, rules);
+        verdict::apply(&mut v, &typed, rules);
         u.bytes = serde_json::to_vec(&v).unwrap();
     }
     u
@@ -4031,7 +4043,10 @@ mod tests {
                 .unwrap()
                 .clone(),
         );
-        let out = judged(up(br#"{"answers":{"a":{"noul":0.75}}}"#), rules.as_ref());
+        let out = judged(
+            up(br#"{"model":"m","answers":{"a":{"noul":0.75}},"usage":{"input_tokens":1,"output_tokens":0}}"#),
+            rules.as_ref(),
+        );
         let v: Value = serde_json::from_slice(&out.bytes).unwrap();
         assert_eq!(v["answers"]["a"]["verdict"]["result"], "warn");
         assert!(out.cached && out.provider == "p");
