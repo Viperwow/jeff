@@ -113,7 +113,7 @@ The answer follows the Jev schema:
 - `choice` returns `choice`, `confidence` and `probabilities` for every option.
 - `score` returns `score` (the expected level), `confidence`, `legend` and `probabilities` for every level.
 
-jeff adds a `verdict` to every answer of a request that has `questions`. The provider's own fields stay as they are.
+jeff adds a `verdict` to every answer of a request that has `questions`. The provider's own fields stay as they are. An answer jeff cannot read, with neither a `noul` number nor `probabilities`, gets no `verdict`, and an error response from the provider passes through unchanged.
 
 ```json
 "department": {
@@ -143,6 +143,8 @@ How the confidence is computed:
 | `choice`, `score` | `1 − H / ln k`: 1 minus the entropy of `probabilities`, divided by its maximum for k options. 0 for an even spread, 1 when one option holds everything. | The provider's `confidence`. Providers compute it differently, so the same cap can mean different things for different providers. |
 
 jeff never sends these fields to the provider, so changing a cap needs no new model call: a cached answer gets the new verdict.
+
+Set the fields in the question JSON that `jeff questions add` and `jeff questions update` take, in the question editor under **Confidence** and **Caps**, or through `POST /api/questions` and `PUT /api/questions/{key}`.
 
 jeff adds two response headers:
 
