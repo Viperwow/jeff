@@ -113,6 +113,37 @@ The answer follows the Jev schema:
 - `choice` returns `choice`, `confidence` and `probabilities` for every option.
 - `score` returns `score` (the expected level), `confidence`, `legend` and `probabilities` for every level.
 
+jeff adds a `verdict` to every answer of a request that has `questions`. The provider's own fields stay as they are.
+
+```json
+"department": {
+  "type": "choice", "choice": "billing", "probabilities": { "billing": 0.91, "technical": 0.09 }, "confidence": 0.56,
+  "verdict": { "result": "warn", "confidence": 0.56, "source": "jeff", "confidence_soft_cap": 0.8, "confidence_hard_cap": 0.3 }
+}
+```
+
+- `result` is `fail` when the confidence is below `confidence_hard_cap`, `warn` when it is below `confidence_soft_cap`, and `pass` otherwise. A confidence equal to a cap passes it. A question without caps always gets `pass`.
+- `confidence` is how sure the model is of its answer, from 0 to 1. It is the number the caps were compared against.
+- `source` says who computed it: `jeff` or `provider`.
+- `confidence_soft_cap` and `confidence_hard_cap` repeat the caps that applied. A cap that is not set is left out.
+
+A question sets these optional fields:
+
+| Field | Values | What it does |
+|---|---|---|
+| `confidence_soft_cap` | 0 to 1 | Below it the verdict is `warn`: ask a person. |
+| `confidence_hard_cap` | 0 to 1, below the soft cap | Below it the verdict is `fail`: don't trust the answer. |
+| `confidence_source` | `jeff` (default) or `provider` | Which confidence the caps are compared against. |
+
+How the confidence is computed:
+
+| Type | `jeff` | `provider` |
+|---|---|---|
+| `noul` | `\|2P − 1\|`, where P is the probability of yes. A sure yes and a sure no both score high. | Providers send none, so jeff computes it and reports `source: "jeff"`. |
+| `choice`, `score` | `1 − H / ln k`: 1 minus the entropy of `probabilities`, divided by its maximum for k options. 0 for an even spread, 1 when one option holds everything. | The provider's `confidence`. Providers compute it differently, so the same cap can mean different things for different providers. |
+
+jeff never sends these fields to the provider, so changing a cap needs no new model call: a cached answer gets the new verdict.
+
 jeff adds two response headers:
 
 - `x-jeff-provider`: the provider that answered.
@@ -151,6 +182,8 @@ To change a saved question for one request, send it in the map without `type`. O
 ```json
 "questions": { "urgent": {}, "department": { "model": "typesafe/jev-latest" } }
 ```
+
+`null` removes a saved confidence field for that request, so `{ "urgent": { "confidence_hard_cap": null } }` asks without the hard cap.
 
 From the command line, `jeff ask` does the same through a running jeff:
 
