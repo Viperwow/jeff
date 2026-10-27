@@ -8,12 +8,13 @@ use serde_json::{Value, json};
 /// a sure no alike for `noul`, and uses the normalized entropy of `probabilities` otherwise.
 pub fn confidence(answer: &Answer, source: &str) -> (f64, &'static str) {
     let (probs, provided): (Vec<f64>, f64) = match answer {
-        Answer::Noul(a) => return ((2.0 * a.noul - 1.0).abs(), "jeff"),
+        // The reference check lets rounding noise a hair past 0 or 1 through; the verdict never shows it.
+        Answer::Noul(a) => return ((2.0 * a.noul - 1.0).abs().min(1.0), "jeff"),
         Answer::Choice(a) => (a.probabilities.values().copied().collect(), a.confidence),
         Answer::Score(a) => (a.probabilities.values().copied().collect(), a.confidence),
     };
     if source == "provider" {
-        return (provided, "provider");
+        return (provided.clamp(0.0, 1.0), "provider");
     }
     let k = probs.len();
     if k < 2 {
@@ -115,6 +116,18 @@ mod tests {
     fn provider_source_uses_the_providers_confidence() {
         let a = choice(json!({"a": 0.9, "b": 0.1}), 0.42);
         assert_eq!(confidence(&a, "provider"), (0.42, "provider"));
+    }
+
+    #[test]
+    fn rounding_noise_stays_inside_0_to_1() {
+        assert_eq!(
+            confidence(&choice(json!({"a": 0.5, "b": 0.5}), -2.2e-16), "provider").0,
+            0.0
+        );
+        assert_eq!(
+            confidence(&read(json!({"noul": 1.0000000000000002})), "jeff").0,
+            1.0
+        );
     }
 
     #[test]

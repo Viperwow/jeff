@@ -80,8 +80,11 @@ pub fn parse(bytes: &[u8]) -> Result<Response, String> {
     })
 }
 
+/// Providers compute these numbers in floating point, so a value a hair past 0 or 1 is rounding, not a broken answer.
+const NOISE: f64 = 1e-9;
+
 fn unit(name: &str, v: f64) -> Result<(), String> {
-    match (0.0..=1.0).contains(&v) {
+    match (-NOISE..=1.0 + NOISE).contains(&v) {
         true => Ok(()),
         false => Err(format!("{name} {v} is outside 0 to 1")),
     }
@@ -139,6 +142,17 @@ mod tests {
             s.probabilities.keys().copied().collect::<Vec<_>>(),
             [0, 1, 2]
         );
+    }
+
+    #[test]
+    fn rounding_noise_at_the_ends_is_not_off_the_reference() {
+        let r = parsed(
+            json!({"model": "m", "usage": {"input_tokens": 1, "output_tokens": 0},
+            "answers": {"q": {"choice": "a", "confidence": -2.220446049250313e-16,
+                "probabilities": {"a": 0.2, "b": 0.2, "c": 0.2, "d": 0.2, "e": 0.2}},
+                "n": {"noul": 1.0000000000000002}}}),
+        );
+        assert!(r.is_ok(), "{r:?}");
     }
 
     #[test]
