@@ -109,11 +109,12 @@
               <div class="flex-1">
                 <div id="q-caps-track" class="relative h-20 select-none">
                   <div id="q-caps-bar" class="absolute inset-x-0 top-1/2 flex h-1 -translate-y-1/2 gap-0.5"></div>
-                  <button type="button" data-cap="soft" role="slider" aria-label="Soft cap" aria-valuemin="0" aria-valuemax="1" class="group absolute top-1 bottom-1/2 -translate-x-1/2 cursor-ew-resize px-2 focus-visible:outline-none">
+                  <div id="q-caps-dot" class="absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-neutral-900 ring-2 ring-white dark:bg-neutral-100 dark:ring-neutral-950" hidden></div>
+                  <button type="button" data-cap="soft" role="slider" aria-label="Soft cap" aria-valuemin="0" aria-valuemax="1" class="group absolute top-1 bottom-1/2 -translate-x-1/2 cursor-ew-resize touch-none px-2 focus-visible:outline-none">
                     <span class="cap-label absolute top-1 left-1/2 -translate-x-1/2 text-[11px] font-semibold tabular-nums text-neutral-700 dark:text-neutral-300"></span>
                     <svg class="absolute bottom-0.5 left-1/2 -translate-x-1/2 text-neutral-900 group-focus-visible:text-sky-500 dark:text-neutral-100" width="10" height="7" viewBox="0 0 10 7" aria-hidden="true"><path d="M0 0h10L5 7z" fill="currentColor"/></svg>
                   </button>
-                  <button type="button" data-cap="hard" role="slider" aria-label="Hard cap" aria-valuemin="0" aria-valuemax="1" class="group absolute top-1/2 bottom-1 -translate-x-1/2 cursor-ew-resize px-2 focus-visible:outline-none">
+                  <button type="button" data-cap="hard" role="slider" aria-label="Hard cap" aria-valuemin="0" aria-valuemax="1" class="group absolute top-1/2 bottom-1 -translate-x-1/2 cursor-ew-resize touch-none px-2 focus-visible:outline-none">
                     <svg class="absolute top-0.5 left-1/2 -translate-x-1/2 text-neutral-900 group-focus-visible:text-sky-500 dark:text-neutral-100" width="10" height="7" viewBox="0 0 10 7" aria-hidden="true"><path d="M5 0l5 7H0z" fill="currentColor"/></svg>
                     <span class="cap-label absolute bottom-1 left-1/2 -translate-x-1/2 text-[11px] font-semibold tabular-nums text-neutral-700 dark:text-neutral-300"></span>
                   </button>

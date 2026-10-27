@@ -1220,7 +1220,11 @@ function questionSnapshot() {
   const type = card.dataset.type;
   const rows = type === "choice" ? $$(".q-row", card).map((r) => [$(".q-opt-key", r).value, $(".q-opt-desc", r).value])
     : type === "score" ? $$(".q-level", card).map((i) => [i.value]) : undefined;
-  return { q: { key: $(".q-key", card).value, type, instructions: $(".q-instr", card).value, rows }, model: $("#q-form-model").value, caps: capsValue() };
+  const snap = { q: { key: $(".q-key", card).value, type, instructions: $(".q-instr", card).value, rows }, model: $("#q-form-model").value };
+  // Drafts written before caps existed have no `caps`; leaving it out when empty keeps them restorable.
+  const c = capsValue();
+  if (Object.keys(c).length) snap.caps = c;
+  return snap;
 }
 
 /* ---------- confidence caps ---------- */
@@ -1229,7 +1233,9 @@ const CAP_FIELD = { soft: "confidence_soft_cap", hard: "confidence_hard_cap" };
 const CAP_NAME = { soft: "Soft cap", hard: "Hard cap" };
 /** The caps being edited; null means the cap is not set. */
 const caps = { soft: null, hard: null };
-const fmt2 = (v) => v.toFixed(2);
+/** Two decimals, or every decimal a cap set through the API carries, so 0.755 never reads as 0.76. */
+const fmt2 = (v) => (Math.abs(v * 100 - Math.round(v * 100)) < 1e-9 ? v.toFixed(2) : String(v));
+const tidy = (v) => Math.round(v * 1e6) / 1e6;
 
 /** The question's confidence fields as the form shows them; only set fields appear. */
 function capsValue() {
@@ -1247,9 +1253,9 @@ function fillCaps(q = {}) {
 
 /** Moves one cap, keeping hard at least 0.01 below soft. */
 function setCap(which, v) {
-  v = Math.round(Math.min(1, Math.max(0, v)) * 100) / 100;
-  if (which === "soft" && caps.hard != null) v = Math.max(v, Math.round((caps.hard + 0.01) * 100) / 100);
-  if (which === "hard" && caps.soft != null) v = Math.min(v, Math.round((caps.soft - 0.01) * 100) / 100);
+  v = tidy(Math.min(1, Math.max(0, v)));
+  if (which === "soft" && caps.hard != null) v = Math.max(v, tidy(caps.hard + 0.01));
+  if (which === "hard" && caps.soft != null) v = Math.min(v, tidy(caps.soft - 0.01));
   caps[which] = Math.min(1, Math.max(0, v));
   paintCaps();
   trackQuestion();
@@ -1277,9 +1283,17 @@ function capTip(target, text) {
   };
   target.addEventListener("pointermove", show);
   target.addEventListener("pointerleave", () => { tip.hidden = true; });
+  // Keyboard users get the same tooltip, centred on the handle.
+  target.addEventListener("focus", () => {
+    const b = target.getBoundingClientRect();
+    show({ clientX: b.left + b.width / 2 });
+  });
+  target.addEventListener("blur", () => { tip.hidden = true; });
 }
 
 function paintCaps() {
+  // The segments are rebuilt below, so a tooltip shown by an old one would never get its pointerleave.
+  if (!$("#q-caps-track [data-cap]:focus")) $("#q-caps-tip").hidden = true;
   const lo = caps.hard ?? 0;
   const hi = caps.soft ?? lo;
   const parts = [["fail", lo], ["warn", hi - lo], ["pass", 1 - hi]].filter(([, w]) => w > 0.0001);
@@ -1312,8 +1326,14 @@ function renderCaps() {
         // A new cap starts 0.1 away from the other one so the order stays valid.
         const other = caps[k === "soft" ? "hard" : "soft"];
         const start = other == null ? (k === "soft" ? 0.7 : 0.5) : other + (k === "soft" ? 0.1 : -0.1);
-        caps[k] = Math.round(Math.min(1, Math.max(0, start)) * 100) / 100;
+        caps[k] = tidy(Math.min(1, Math.max(0, start)));
+        // At the ends of the bar there is no room, so the other cap steps aside.
+        if (caps.soft != null && caps.hard != null && caps.hard >= caps.soft) {
+          if (k === "soft") caps.hard = tidy(caps.soft - 0.01);
+          else caps.soft = tidy(caps.hard + 0.01);
+        }
         renderCaps();
+        $(`#q-caps-track [data-cap=${k}]`).focus();
         trackQuestion();
       };
       return add;
@@ -1330,7 +1350,13 @@ function renderCaps() {
       else input.value = fmt2(caps[k]);
     };
     label.append(el("span", "w-16 font-medium", CAP_NAME[k]), input);
-    row.append(label, removeButton(() => { caps[k] = null; renderCaps(); trackQuestion(); }, `Remove ${k} cap`));
+    row.append(label, removeButton(() => {
+      caps[k] = null;
+      renderCaps();
+      trackQuestion();
+      // The removed button is gone; its "+" replacement keeps the keyboard where it was.
+      $$("#q-caps-fields button").find((b) => b.textContent === `+ ${CAP_NAME[k]}`)?.focus();
+    }, `Remove ${k} cap`));
     return row;
   }));
   paintCaps();
@@ -1338,21 +1364,35 @@ function renderCaps() {
 
 for (const b of $$("#q-caps-track [data-cap]")) {
   const k = b.dataset.cap;
-  capTip(b, () => `${CAP_NAME[k]} ${fmt2(caps[k])}. Drag, or use the arrow keys.`);
+  capTip(b, () => CAP_NAME[k]);
   b.addEventListener("pointerdown", (e) => {
     b.setPointerCapture(e.pointerId);
     b.onpointermove = (ev) => {
       const r = $("#q-caps-track").getBoundingClientRect();
-      setCap(k, (ev.clientX - r.left) / r.width);
+      setCap(k, Math.round(((ev.clientX - r.left) / r.width) * 100) / 100);
     };
-    b.onpointerup = () => { b.onpointermove = null; };
   });
+  // Capture ends on release and on a cancel, such as a touch the browser takes over for scrolling.
+  b.addEventListener("lostpointercapture", () => { b.onpointermove = null; });
   b.addEventListener("keydown", (e) => {
-    const d = { ArrowLeft: -0.01, ArrowDown: -0.01, ArrowRight: 0.01, ArrowUp: 0.01 }[e.key];
-    if (d) { e.preventDefault(); setCap(k, caps[k] + d); }
+    const step = { ArrowLeft: -0.01, ArrowDown: -0.01, ArrowRight: 0.01, ArrowUp: 0.01, PageDown: -0.1, PageUp: 0.1 }[e.key];
+    const to = { Home: 0, End: 1 }[e.key];
+    if (step == null && to == null) return;
+    e.preventDefault();
+    setCap(k, to ?? caps[k] + step);
   });
 }
 $("#q-form-card").addEventListener("change", (e) => { if (e.target.closest(".q-type")) paintCaps(); });
+
+let tryConfidence = null;
+/** Marks the last Try's confidence on the bar, so the caps can be set against a real answer. */
+function showTryDot(c) {
+  tryConfidence = typeof c === "number" ? c : null;
+  const dot = $("#q-caps-dot");
+  dot.hidden = tryConfidence == null;
+  if (tryConfidence != null) dot.style.left = `${tryConfidence * 100}%`;
+}
+capTip($("#q-caps-dot"), () => `Last Try: confidence ${tryConfidence.toFixed(2)}.`);
 
 const trackQuestion = () => { if (!$("#q-form-view").hidden) drafts.track(questionDraftId(), questionSnapshot()); };
 
@@ -1369,6 +1409,7 @@ function openForm(key = null) {
   $(".q-key", card).readOnly = !!key;
   fillFormModel(q.model || "");
   fillCaps(q);
+  showTryDot(null);
   say($("#q-form-status"), "");
   const d = drafts.open(questionDraftId(), questionSnapshot(), $("#q-form-status"));
   $("#q-draft").hidden = !d;
@@ -1419,6 +1460,7 @@ async function tryDraft() {
   try {
     const { out } = await ask(body, status, $("#q-try"));
     $("#q-try-answer").replaceChildren(...answerCards(body.questions, out.answers || {}, body.model));
+    showTryDot(out.answers?.[key]?.verdict?.confidence);
   } catch (err) {
     say(status, err.message, "err");
   }
