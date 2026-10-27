@@ -1347,7 +1347,8 @@ function renderCaps() {
     input.onchange = () => {
       const v = parseFloat(input.value);
       if (Number.isFinite(v)) setCap(k, v);
-      else input.value = fmt2(caps[k]);
+      // The field shows what will be saved, after clamping, even while it keeps focus.
+      input.value = fmt2(caps[k]);
     };
     label.append(el("span", "w-16 font-medium", CAP_NAME[k]), input);
     row.append(label, removeButton(() => {
