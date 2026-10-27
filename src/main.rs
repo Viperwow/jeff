@@ -5,6 +5,7 @@ mod keys;
 mod log;
 mod questions;
 mod sessions;
+mod verdict;
 
 use axum::{
     Extension, Json, Router,
