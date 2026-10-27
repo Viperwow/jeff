@@ -1283,8 +1283,9 @@ function capTip(target, text) {
   };
   target.addEventListener("pointermove", show);
   target.addEventListener("pointerleave", () => { tip.hidden = true; });
-  // Keyboard users get the same tooltip, centred on the handle.
+  // Keyboard users get the same tooltip, centred on the handle; focus moved by a click or by code shows none.
   target.addEventListener("focus", () => {
+    if (!target.matches(":focus-visible")) return;
     const b = target.getBoundingClientRect();
     show({ clientX: b.left + b.width / 2 });
   });
@@ -1383,7 +1384,11 @@ for (const b of $$("#q-caps-track [data-cap]")) {
     setCap(k, to ?? caps[k] + step);
   });
 }
-$("#q-form-card").addEventListener("change", (e) => { if (e.target.closest(".q-type")) paintCaps(); });
+$("#q-form-view").addEventListener("change", (e) => {
+  // The last Try answered another type or source, so its confidence no longer fits this form.
+  if (e.target.closest(".q-type, #q-form-source")) showTryDot(null);
+  if (e.target.closest(".q-type")) paintCaps();
+});
 
 let tryConfidence = null;
 /** Marks the last Try's confidence on the bar, so the caps can be set against a real answer. */
