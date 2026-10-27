@@ -61,6 +61,45 @@ fn check(key: &str, q: &Value) -> Result<(), &'static str> {
     {
         return Err("The model is empty. Name a model or remove the field.");
     }
+    check_caps(q)
+}
+
+/// Fields jeff reads to judge an answer; providers never see them.
+const CONFIDENCE_FIELDS: [&str; 3] = [
+    "confidence_soft_cap",
+    "confidence_hard_cap",
+    "confidence_source",
+];
+
+pub fn check_caps(q: &serde_json::Map<String, Value>) -> Result<(), &'static str> {
+    let cap = |field| match q.get(field) {
+        None => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .filter(|c| (0.0..=1.0).contains(c))
+            .map(Some)
+            .ok_or(()),
+    };
+    let soft = cap("confidence_soft_cap").map_err(|_| {
+        "The confidence_soft_cap is not a number from 0 to 1. Set a number from 0 to 1 or remove the field."
+    })?;
+    let hard = cap("confidence_hard_cap").map_err(|_| {
+        "The confidence_hard_cap is not a number from 0 to 1. Set a number from 0 to 1 or remove the field."
+    })?;
+    if let (Some(s), Some(h)) = (soft, hard)
+        && h >= s
+    {
+        return Err(
+            "The confidence_hard_cap is not below the confidence_soft_cap. Lower the hard cap or raise the soft cap.",
+        );
+    }
+    if q.get("confidence_source")
+        .is_some_and(|s| !matches!(s.as_str(), Some("jeff" | "provider")))
+    {
+        return Err(
+            "The confidence_source is not jeff or provider. Pick one of them or remove the field.",
+        );
+    }
     Ok(())
 }
 
@@ -132,11 +171,19 @@ pub fn expand(input: &Value, saved: &Questions) -> Result<Questions, String> {
                             .cloned()
                             .unwrap_or_default();
                         base.extend(fields.clone());
+                        // A null drops the saved field for this request only.
+                        base.retain(|k, v| {
+                            !(v.is_null() && CONFIDENCE_FIELDS.contains(&k.as_str()))
+                        });
                         let q = Value::Object(base);
                         validate(key, &q)?;
                         q
                     }
-                    _ => q.clone(),
+                    Some(fields) => {
+                        check_caps(fields).map_err(|e| format!("Question '{key}': {e}"))?;
+                        q.clone()
+                    }
+                    None => q.clone(),
                 };
                 out.insert(key.clone(), q);
             }
@@ -176,6 +223,11 @@ pub fn group(
 ) -> Result<Vec<(String, Questions)>, String> {
     let mut groups: Vec<(String, Questions)> = Vec::new();
     for (key, mut q) in questions {
+        if let Some(o) = q.as_object_mut() {
+            for f in CONFIDENCE_FIELDS {
+                o.remove(f);
+            }
+        }
         let model = match q.as_object_mut().and_then(|o| o.remove("model")) {
             None => request_model.to_owned(),
             Some(Value::String(m)) if !m.trim().is_empty() => m,
@@ -502,6 +554,74 @@ mod tests {
         assert_eq!(remove(&mut saved, "nope").unwrap_err(), missing);
         remove(&mut saved, "u").unwrap();
         assert!(saved.is_empty());
+    }
+
+    #[test]
+    fn checks_confidence_fields() {
+        let ok = json!({"type": "noul", "instructions": "x", "confidence_soft_cap": 0.8,
+            "confidence_hard_cap": 0.5, "confidence_source": "provider"});
+        assert!(validate("k", &ok).is_ok());
+        for (field, v, msg) in [
+            (
+                "confidence_soft_cap",
+                json!(1.5),
+                "Question 'k': The confidence_soft_cap is not a number from 0 to 1. Set a number from 0 to 1 or remove the field.",
+            ),
+            (
+                "confidence_hard_cap",
+                json!("0.5"),
+                "Question 'k': The confidence_hard_cap is not a number from 0 to 1. Set a number from 0 to 1 or remove the field.",
+            ),
+            (
+                "confidence_source",
+                json!("model"),
+                "Question 'k': The confidence_source is not jeff or provider. Pick one of them or remove the field.",
+            ),
+        ] {
+            let mut q = json!({"type": "noul", "instructions": "x"});
+            q[field] = v;
+            assert_eq!(validate("k", &q).unwrap_err(), msg);
+        }
+        let equal = json!({"type": "noul", "instructions": "x",
+            "confidence_soft_cap": 0.5, "confidence_hard_cap": 0.5});
+        assert_eq!(
+            validate("k", &equal).unwrap_err(),
+            "Question 'k': The confidence_hard_cap is not below the confidence_soft_cap. Lower the hard cap or raise the soft cap."
+        );
+    }
+
+    #[test]
+    fn a_null_override_drops_a_saved_cap() {
+        let saved = map(json!({"u": {"type": "noul", "instructions": "x",
+            "confidence_soft_cap": 0.9, "confidence_hard_cap": 0.5}}));
+        let out = expand(&json!({"u": {"confidence_hard_cap": null}}), &saved).unwrap();
+        assert!(out["u"].get("confidence_hard_cap").is_none());
+        assert_eq!(out["u"]["confidence_soft_cap"], 0.9);
+        let bad = expand(&json!({"u": {"confidence_soft_cap": 0.4}}), &saved).unwrap_err();
+        assert!(bad.contains("is not below"), "{bad}");
+    }
+
+    #[test]
+    fn inline_questions_get_the_cap_checks() {
+        let e = expand(
+            &json!({"i": {"type": "noul", "instructions": "y", "confidence_soft_cap": 2}}),
+            &Questions::new(),
+        )
+        .unwrap_err();
+        assert!(e.starts_with("Question 'i': "), "{e}");
+    }
+
+    #[test]
+    fn group_strips_confidence_fields() {
+        let qs = map(
+            json!({"a": {"type": "noul", "instructions": "x", "confidence_soft_cap": 0.8,
+            "confidence_hard_cap": 0.5, "confidence_source": "jeff"}}),
+        );
+        let groups = group(qs, "p/m").unwrap();
+        assert_eq!(
+            groups[0].1["a"],
+            json!({"type": "noul", "instructions": "x"})
+        );
     }
 
     #[test]
