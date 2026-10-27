@@ -84,7 +84,6 @@ pub fn create(saved: &mut Classifiers, input: Classifiers) -> Result<(), Change>
         )));
     }
     saved.extend(input);
-    saved.sort_keys();
     Ok(())
 }
 

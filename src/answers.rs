@@ -162,7 +162,6 @@ pub fn create(saved: &mut Answers, input: Answers) -> Result<(), Change> {
         }
         next.insert(k, a);
     }
-    next.sort_keys();
     validate_all(&next).map_err(Change::Invalid)?;
     *saved = next;
     Ok(())

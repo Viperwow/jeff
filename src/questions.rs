@@ -137,7 +137,6 @@ pub fn create(saved: &mut Questions, input: Questions) -> Result<(), Change> {
         )));
     }
     saved.extend(input);
-    saved.sort_keys();
     Ok(())
 }
 
