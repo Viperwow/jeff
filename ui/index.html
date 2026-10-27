@@ -95,6 +95,36 @@
             <span class="block font-medium">Model</span>
             <select id="q-form-model" class="control"></select>
           </label>
+          <label class="block space-y-1">
+            <span class="block font-medium">Confidence</span>
+            <select id="q-form-source" class="control">
+              <option value="jeff">Jeff: from the probabilities, the same for every provider</option>
+              <option value="provider">Provider: the confidence the model returns</option>
+            </select>
+            <span id="q-source-note" class="note block">Confidence counts both ways: a sure yes and a sure no both score high.</span>
+          </label>
+          <div class="space-y-1">
+            <span class="block font-medium">Caps</span>
+            <div class="flex items-center gap-6 max-sm:flex-col max-sm:items-stretch">
+              <div class="flex-1">
+                <div id="q-caps-track" class="relative h-20 select-none">
+                  <div id="q-caps-bar" class="absolute inset-x-0 top-1/2 flex h-1 -translate-y-1/2 gap-0.5"></div>
+                  <button type="button" data-cap="soft" role="slider" aria-label="Soft cap" aria-valuemin="0" aria-valuemax="1" class="group absolute top-1 bottom-1/2 -translate-x-1/2 cursor-ew-resize px-2 focus-visible:outline-none">
+                    <span class="cap-label absolute top-1 left-1/2 -translate-x-1/2 text-[11px] font-semibold tabular-nums text-neutral-700 dark:text-neutral-300"></span>
+                    <svg class="absolute bottom-0.5 left-1/2 -translate-x-1/2 text-neutral-900 group-focus-visible:text-sky-500 dark:text-neutral-100" width="10" height="7" viewBox="0 0 10 7" aria-hidden="true"><path d="M0 0h10L5 7z" fill="currentColor"/></svg>
+                  </button>
+                  <button type="button" data-cap="hard" role="slider" aria-label="Hard cap" aria-valuemin="0" aria-valuemax="1" class="group absolute top-1/2 bottom-1 -translate-x-1/2 cursor-ew-resize px-2 focus-visible:outline-none">
+                    <svg class="absolute top-0.5 left-1/2 -translate-x-1/2 text-neutral-900 group-focus-visible:text-sky-500 dark:text-neutral-100" width="10" height="7" viewBox="0 0 10 7" aria-hidden="true"><path d="M5 0l5 7H0z" fill="currentColor"/></svg>
+                    <span class="cap-label absolute bottom-1 left-1/2 -translate-x-1/2 text-[11px] font-semibold tabular-nums text-neutral-700 dark:text-neutral-300"></span>
+                  </button>
+                  <div id="q-caps-tip" class="pointer-events-none absolute z-10 -translate-x-1/2 rounded-md bg-neutral-900 px-2 py-1 text-xs whitespace-nowrap text-white shadow dark:bg-neutral-100 dark:text-neutral-900" hidden></div>
+                </div>
+                <div class="note flex justify-between tabular-nums"><span>0</span><span>0.25</span><span>0.5</span><span>0.75</span><span>1</span></div>
+              </div>
+              <div id="q-caps-fields" class="flex h-20 flex-col justify-between max-sm:h-auto max-sm:gap-2"></div>
+            </div>
+            <p class="note">Below soft: <b>warn</b>, ask a person. Below hard: <b>fail</b>, don't trust the answer. No caps: always <b>pass</b>.</p>
+          </div>
           <div class="sticky bottom-0 -mx-6 mt-auto flex items-center gap-3 border-t border-neutral-200 bg-neutral-50 px-6 py-4 max-sm:-mx-4 max-sm:px-4 dark:border-neutral-800 dark:bg-neutral-950">
             <button id="q-save" type="button" class="btn btn-primary">Save</button>
             <button id="q-cancel" type="button" class="btn">Cancel</button>

@@ -974,6 +974,21 @@ function bar(label, note, p, chosen) {
   return row;
 }
 
+const VERDICT_TONE = {
+  pass: "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-200",
+  warn: "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
+  fail: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
+};
+
+/** The verdict as a badge plus the confidence it came from and the caps it was held against. */
+function verdictBadge(v) {
+  const badge = el("span", `shrink-0 rounded px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase ${VERDICT_TONE[v.result] || ""}`, v.result);
+  const parts = [`confidence ${Number(v.confidence).toFixed(2)} (${v.source})`];
+  if (v.confidence_soft_cap != null) parts.push(`soft ${Number(v.confidence_soft_cap).toFixed(2)}`);
+  if (v.confidence_hard_cap != null) parts.push(`hard ${Number(v.confidence_hard_cap).toFixed(2)}`);
+  return [badge, el("span", "note tabular-nums", parts.join(" · "))];
+}
+
 function answerCard(key, q, a, model) {
   const card = el("div", "card space-y-3");
   const head = el("div", "flex flex-wrap items-center gap-2");
@@ -982,6 +997,7 @@ function answerCard(key, q, a, model) {
   badge.dataset.type = a.type;
   head.append(badge);
   if (model) head.append(modelChip(model));
+  if (a.verdict) head.append(...verdictBadge(a.verdict));
   card.append(head);
   if (q?.instructions) card.append(el("p", "text-neutral-600 dark:text-neutral-400", q.instructions));
 
@@ -1198,14 +1214,140 @@ function fillFormModel(want = $("#q-form-model").value) {
 
 const questionDraftId = () => `question:${editing ?? "new"}`;
 
-/** The form as typed, unchecked: what `addQuestion` takes, plus the model. */
+/** The form as typed, unchecked: what `addQuestion` takes, plus the model and the confidence caps. */
 function questionSnapshot() {
   const card = $("#q-form-card .q");
   const type = card.dataset.type;
   const rows = type === "choice" ? $$(".q-row", card).map((r) => [$(".q-opt-key", r).value, $(".q-opt-desc", r).value])
     : type === "score" ? $$(".q-level", card).map((i) => [i.value]) : undefined;
-  return { q: { key: $(".q-key", card).value, type, instructions: $(".q-instr", card).value, rows }, model: $("#q-form-model").value };
+  return { q: { key: $(".q-key", card).value, type, instructions: $(".q-instr", card).value, rows }, model: $("#q-form-model").value, caps: capsValue() };
 }
+
+/* ---------- confidence caps ---------- */
+
+const CAP_FIELD = { soft: "confidence_soft_cap", hard: "confidence_hard_cap" };
+const CAP_NAME = { soft: "Soft cap", hard: "Hard cap" };
+/** The caps being edited; null means the cap is not set. */
+const caps = { soft: null, hard: null };
+const fmt2 = (v) => v.toFixed(2);
+
+/** The question's confidence fields as the form shows them; only set fields appear. */
+function capsValue() {
+  const out = {};
+  for (const k of ["soft", "hard"]) if (caps[k] != null) out[CAP_FIELD[k]] = caps[k];
+  if ($("#q-form-source").value === "provider") out.confidence_source = "provider";
+  return out;
+}
+
+function fillCaps(q = {}) {
+  for (const k of ["soft", "hard"]) caps[k] = typeof q[CAP_FIELD[k]] === "number" ? q[CAP_FIELD[k]] : null;
+  $("#q-form-source").value = q.confidence_source === "provider" ? "provider" : "jeff";
+  renderCaps();
+}
+
+/** Moves one cap, keeping hard at least 0.01 below soft. */
+function setCap(which, v) {
+  v = Math.round(Math.min(1, Math.max(0, v)) * 100) / 100;
+  if (which === "soft" && caps.hard != null) v = Math.max(v, Math.round((caps.hard + 0.01) * 100) / 100);
+  if (which === "hard" && caps.soft != null) v = Math.min(v, Math.round((caps.soft - 0.01) * 100) / 100);
+  caps[which] = Math.min(1, Math.max(0, v));
+  paintCaps();
+  trackQuestion();
+}
+
+const ZONE = {
+  fail: ["bg-red-500 dark:bg-red-400", () => `Fail below ${fmt2(caps.hard)}: don't trust the answer.`],
+  warn: ["bg-amber-400 dark:bg-amber-300", () => `Warn from ${fmt2(caps.hard ?? 0)} to ${fmt2(caps.soft)}: ask a person to check.`],
+  pass: ["bg-green-600 dark:bg-green-400", () => {
+    const from = caps.soft ?? caps.hard;
+    return from == null ? "Pass: no caps set, every answer passes." : `Pass from ${fmt2(from)}: use the answer.`;
+  }],
+};
+
+/** Shows `text` above the bar, or below it for the hard cap, at the pointer. */
+function capTip(target, text) {
+  const tip = $("#q-caps-tip");
+  const track = $("#q-caps-track");
+  const show = (e) => {
+    const r = track.getBoundingClientRect();
+    tip.textContent = text();
+    tip.hidden = false;
+    tip.style.left = `${Math.min(r.width - 8, Math.max(8, e.clientX - r.left))}px`;
+    tip.style.top = target.dataset.cap === "hard" ? "100%" : "-1.75rem";
+  };
+  target.addEventListener("pointermove", show);
+  target.addEventListener("pointerleave", () => { tip.hidden = true; });
+}
+
+function paintCaps() {
+  const lo = caps.hard ?? 0;
+  const hi = caps.soft ?? lo;
+  const parts = [["fail", lo], ["warn", hi - lo], ["pass", 1 - hi]].filter(([, w]) => w > 0.0001);
+  $("#q-caps-bar").replaceChildren(...parts.map(([zone, w]) => {
+    const seg = el("div", `h-full rounded-full ${ZONE[zone][0]}`);
+    seg.style.flex = `${w} 1 0`;
+    seg.dataset.zone = zone;
+    capTip(seg, ZONE[zone][1]);
+    return seg;
+  }));
+  for (const k of ["soft", "hard"]) {
+    const b = $(`#q-caps-track [data-cap=${k}]`);
+    b.hidden = caps[k] == null;
+    if (caps[k] == null) continue;
+    b.style.left = `${caps[k] * 100}%`;
+    $(".cap-label", b).textContent = fmt2(caps[k]);
+    b.setAttribute("aria-valuenow", fmt2(caps[k]));
+    const input = $(`#q-caps-fields [data-cap-input=${k}]`);
+    if (input && document.activeElement !== input) input.value = fmt2(caps[k]);
+  }
+  $("#q-source-note").hidden = $("#q-form-card .q")?.dataset.type !== "noul";
+}
+
+function renderCaps() {
+  $("#q-caps-fields").replaceChildren(...["soft", "hard"].map((k) => {
+    if (caps[k] == null) {
+      const add = el("button", "btn", `+ ${CAP_NAME[k]}`);
+      add.type = "button";
+      add.onclick = () => {
+        // A new cap starts 0.1 away from the other one so the order stays valid.
+        const other = caps[k === "soft" ? "hard" : "soft"];
+        const start = other == null ? (k === "soft" ? 0.7 : 0.5) : other + (k === "soft" ? 0.1 : -0.1);
+        caps[k] = Math.round(Math.min(1, Math.max(0, start)) * 100) / 100;
+        renderCaps();
+        trackQuestion();
+      };
+      return add;
+    }
+    const row = el("div", "flex items-center gap-1");
+    const label = el("label", "flex items-center gap-2");
+    const input = el("input", "control w-20 tabular-nums");
+    Object.assign(input, { type: "number", min: "0", max: "1", step: "0.01" });
+    input.dataset.capInput = k;
+    input.onchange = () => setCap(k, parseFloat(input.value) || 0);
+    label.append(el("span", "w-16 font-medium", CAP_NAME[k]), input);
+    row.append(label, removeButton(() => { caps[k] = null; renderCaps(); trackQuestion(); }, `Remove ${k} cap`));
+    return row;
+  }));
+  paintCaps();
+}
+
+for (const b of $$("#q-caps-track [data-cap]")) {
+  const k = b.dataset.cap;
+  capTip(b, () => `${CAP_NAME[k]} ${fmt2(caps[k])}. Drag, or use the arrow keys.`);
+  b.addEventListener("pointerdown", (e) => {
+    b.setPointerCapture(e.pointerId);
+    b.onpointermove = (ev) => {
+      const r = $("#q-caps-track").getBoundingClientRect();
+      setCap(k, (ev.clientX - r.left) / r.width);
+    };
+    b.onpointerup = () => { b.onpointermove = null; };
+  });
+  b.addEventListener("keydown", (e) => {
+    const d = { ArrowLeft: -0.01, ArrowDown: -0.01, ArrowRight: 0.01, ArrowUp: 0.01 }[e.key];
+    if (d) { e.preventDefault(); setCap(k, caps[k] + d); }
+  });
+}
+$("#q-form-card").addEventListener("change", (e) => { if (e.target.closest(".q-type")) paintCaps(); });
 
 const trackQuestion = () => { if (!$("#q-form-view").hidden) drafts.track(questionDraftId(), questionSnapshot()); };
 
@@ -1221,12 +1363,14 @@ function openForm(key = null) {
   const card = addQuestion(key ? builderOf(key, q) : { type: "noul", key: "" });
   $(".q-key", card).readOnly = !!key;
   fillFormModel(q.model || "");
+  fillCaps(q);
   say($("#q-form-status"), "");
   const d = drafts.open(questionDraftId(), questionSnapshot(), $("#q-form-status"));
   $("#q-draft").hidden = !d;
   if (d) {
     $(".q-key", addQuestion(d.q)).readOnly = !!key;
     fillFormModel(d.model);
+    fillCaps(d.caps);
   }
   $("#q-try-state").value = $("#pg-state").value;
   $("#q-try-answer").replaceChildren(el("p", "note py-12 text-center", "Try runs the draft against this state. Nothing is saved."));
@@ -1238,8 +1382,9 @@ function openForm(key = null) {
 function draft() {
   const [[key, form]] = Object.entries(readQuestions());
   // Fields the form does not show, such as newer Jev fields saved through the API, survive an edit.
-  const { type, instructions, criteria, model, ...rest } = editing ? saved[editing] : {};
-  const q = { ...rest, ...form };
+  // The form owns the confidence fields, so a cap removed here must not come back from the saved question.
+  const { type, instructions, criteria, model, confidence_soft_cap, confidence_hard_cap, confidence_source, ...rest } = editing ? saved[editing] : {};
+  const q = { ...rest, ...form, ...capsValue() };
   if ($("#q-form-model").value) q.model = $("#q-form-model").value;
   return [key, q];
 }
