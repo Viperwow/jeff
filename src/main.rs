@@ -249,6 +249,8 @@ struct App {
     /// Providers may sit in private networks such as 10.0.0.0/8.
     allow_private: bool,
     answers: Mutex<AnswerCache>,
+    /// Ids of answers off the Jev reference already in jeff.log in full; a restart logs each one in full again.
+    logged_answers: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Failed key checks one address may make per window before it gets 429 until the window ends.
@@ -679,14 +681,12 @@ async fn forward(
     let resp = upstream.send().await.map_err(|e| {
         // A connect timeout is a timeout too, but it means the provider is unreachable.
         let timed_out = e.is_timeout() && !e.is_connect();
-        log_provider(app, &p.id, &e.without_url().to_string());
+        let cause = e.without_url().to_string();
         if timed_out {
+            log_provider(app, &p.id, &cause);
             late()
         } else {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("provider '{}' is unreachable", p.id),
-            )
+            provider_unreachable(app, &p.id, &cause)
         }
     })?;
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -705,8 +705,7 @@ async fn forward(
     if status.is_success()
         && let Err(e) = jev::parse(&bytes)
     {
-        let cause = format!("the answer does not match the Jev reference: {e}");
-        return Err(provider_failed(app, &p.id, &cause));
+        return Err(off_reference(app, &p.id, &e, &bytes));
     }
     if cache.entries > 0 && status.is_success() {
         let mut answers = app.answers.lock().unwrap();
@@ -773,6 +772,49 @@ fn log_provider(app: &App, provider: &str, cause: &str) -> bool {
     let line = format!("provider {provider}: {cause}");
     eprintln!("{line}");
     log::write(&app.config_path, "provider_error", &line, &[])
+}
+
+fn provider_unreachable(app: &App, provider: &str, cause: &str) -> (StatusCode, String) {
+    let logged = log_provider(app, provider, cause);
+    (
+        StatusCode::BAD_GATEWAY,
+        format!(
+            "Provider '{provider}' is unreachable. Check {} for the cause.",
+            log::cause_in(logged)
+        ),
+    )
+}
+
+/// Names an answer by its content: the SHA-256 of its JSON with keys in order, so reordered fields keep the name.
+fn answer_id(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = serde_json::from_slice::<Value>(bytes)
+        .map_or_else(|_| bytes.to_vec(), |v| serde_json::to_vec(&v).unwrap());
+    Sha256::digest(canonical)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Logs an answer off the Jev reference in full the first time, and by its id on every repeat.
+fn off_reference(app: &App, provider: &str, cause: &str, bytes: &[u8]) -> (StatusCode, String) {
+    let id = answer_id(bytes);
+    let line = format!(
+        "provider {provider}: the answer does not match the Jev reference: {cause} (answer {id})"
+    );
+    eprintln!("{line}");
+    let seen = app.logged_answers.lock().unwrap().contains(&id);
+    let detail = if seen {
+        "the same answer is logged in full above".into()
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let logged = log::write(&app.config_path, "provider_error", &line, &[detail]);
+    // Only an answer that reached jeff.log in full can be pointed to later.
+    if logged && !seen {
+        app.logged_answers.lock().unwrap().insert(id);
+    }
+    unreadable(provider, log::cause_in(logged))
 }
 
 /// Logs why a provider's response could not be read and answers with where to find that cause.
@@ -2957,6 +2999,7 @@ async fn serve(args: ServeArgs) {
         exposed,
         allow_private,
         answers: Mutex::new(HashMap::new()),
+        logged_answers: Default::default(),
     });
     if exposed && app.static_keys.is_empty() && app.config.read().await.keys.is_empty() {
         let addr = if loopback(&args.api) {
@@ -3403,6 +3446,7 @@ mod tests {
             exposed: false,
             allow_private: false,
             answers: Mutex::new(HashMap::new()),
+            logged_answers: Default::default(),
         }
     }
 
@@ -4088,6 +4132,57 @@ mod tests {
             provider_failed(&lost, "stub", "x").1,
             "Provider 'stub' sent an unreadable response. Check the server console for the cause."
         );
+        let _ = fs::remove_file(&log_file);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unreachable_provider_names_where_the_cause_went() {
+        let path = temp_config("unreachable-log", "{}");
+        let log_file = log::path(&path);
+        let _ = fs::remove_file(&log_file);
+        let (status, msg) = provider_unreachable(&test_app(&path), "h2o", "connection refused");
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            msg,
+            "Provider 'h2o' is unreachable. Check jeff.log for the cause."
+        );
+        assert!(
+            fs::read_to_string(&log_file)
+                .unwrap()
+                .contains("provider h2o: connection refused")
+        );
+        assert_eq!(
+            provider_unreachable(&test_app("/no/such/dir/config.json"), "h2o", "x").1,
+            "Provider 'h2o' is unreachable. Check the server console for the cause."
+        );
+        let _ = fs::remove_file(&log_file);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_off_reference_answer_is_logged_in_full_once() {
+        let path = temp_config("off-reference-log", "{}");
+        let log_file = log::path(&path);
+        let _ = fs::remove_file(&log_file);
+        let app = test_app(&path);
+        let bad = br#"{"model":"m","answers":{"q":{"noul":"0.5"}}}"#;
+        let reordered = br#"{"answers":{"q":{"noul":"0.5"}},"model":"m"}"#;
+        let other = br#"{"model":"m","answers":{"q":{"noul":"0.6"}}}"#;
+        for body in [&bad[..], reordered, other] {
+            let msg = off_reference(&app, "stub", "answer 'q': invalid type", body).1;
+            assert_eq!(
+                msg,
+                "Provider 'stub' sent an unreadable response. Check jeff.log for the cause."
+            );
+        }
+        let log = fs::read_to_string(&log_file).unwrap();
+        assert_eq!(log.matches(r#""noul":"0.5""#).count(), 1, "{log}");
+        assert_eq!(log.matches(r#""noul":"0.6""#).count(), 1, "{log}");
+        assert_eq!(log.matches("logged in full above").count(), 1, "{log}");
+        let id = answer_id(bad);
+        assert_eq!(id, answer_id(reordered));
+        assert_eq!(log.matches(&id).count(), 2, "{log}");
         let _ = fs::remove_file(&log_file);
         let _ = fs::remove_file(&path);
     }
