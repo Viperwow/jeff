@@ -49,6 +49,23 @@ pub fn write(config_path: &str, event: &str, summary: &str, problems: &[String])
         .is_ok()
 }
 
+/// Saves `bytes` as `logs/<name>` next to jeff.log, once: an existing file with that name is the same content, since
+/// names come from a hash of it. Returns the path as jeff.log writes it.
+pub fn save_item(config_path: &str, name: &str, bytes: &[u8]) -> std::io::Result<String> {
+    let dir = path(config_path).with_file_name("logs");
+    fs::create_dir_all(&dir)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    match options.open(dir.join(name)) {
+        Ok(mut f) => f.write_all(bytes)?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    Ok(format!("logs/{name}"))
+}
+
 /// Where an error message should send the reader for a cause that `write` reported as `logged` or not.
 pub fn cause_in(logged: bool) -> &'static str {
     if logged {

@@ -249,8 +249,6 @@ struct App {
     /// Providers may sit in private networks such as 10.0.0.0/8.
     allow_private: bool,
     answers: Mutex<AnswerCache>,
-    /// Ids of answers off the Jev reference already in jeff.log in full; a restart logs each one in full again.
-    logged_answers: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Failed key checks one address may make per window before it gets 429 until the window ends.
@@ -785,35 +783,27 @@ fn provider_unreachable(app: &App, provider: &str, cause: &str) -> (StatusCode, 
     )
 }
 
-/// Names an answer by its content: the SHA-256 of its JSON with keys in order, so reordered fields keep the name.
+/// Names an answer by the SHA-256 of its exact text, so one text is saved once.
 fn answer_id(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    let canonical = serde_json::from_slice::<Value>(bytes)
-        .map_or_else(|_| bytes.to_vec(), |v| serde_json::to_vec(&v).unwrap());
-    Sha256::digest(canonical)
+    Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
 }
 
-/// Logs an answer off the Jev reference in full the first time, and by its id on every repeat.
+/// Saves the answer as the provider sent it under `logs/` and writes one jeff.log line that points to that file.
 fn off_reference(app: &App, provider: &str, cause: &str, bytes: &[u8]) -> (StatusCode, String) {
-    let id = answer_id(bytes);
+    let name = format!("{}.json", answer_id(bytes));
+    let full = match log::save_item(&app.config_path, &name, bytes) {
+        Ok(file) => format!("full answer: {file}"),
+        Err(e) => format!("full answer not saved: {e}"),
+    };
     let line = format!(
-        "provider {provider}: the answer does not match the Jev reference: {cause} (answer {id})"
+        "provider {provider}: the answer does not match the Jev reference: {cause}; {full}"
     );
     eprintln!("{line}");
-    let seen = app.logged_answers.lock().unwrap().contains(&id);
-    let detail = if seen {
-        "the same answer is logged in full above".into()
-    } else {
-        String::from_utf8_lossy(bytes).into_owned()
-    };
-    let logged = log::write(&app.config_path, "provider_error", &line, &[detail]);
-    // Only an answer that reached jeff.log in full can be pointed to later.
-    if logged && !seen {
-        app.logged_answers.lock().unwrap().insert(id);
-    }
+    let logged = log::write(&app.config_path, "provider_error", &line, &[]);
     unreadable(provider, log::cause_in(logged))
 }
 
@@ -2999,7 +2989,6 @@ async fn serve(args: ServeArgs) {
         exposed,
         allow_private,
         answers: Mutex::new(HashMap::new()),
-        logged_answers: Default::default(),
     });
     if exposed && app.static_keys.is_empty() && app.config.read().await.keys.is_empty() {
         let addr = if loopback(&args.api) {
@@ -3446,7 +3435,6 @@ mod tests {
             exposed: false,
             allow_private: false,
             answers: Mutex::new(HashMap::new()),
-            logged_answers: Default::default(),
         }
     }
 
@@ -4161,30 +4149,31 @@ mod tests {
     }
 
     #[test]
-    fn an_off_reference_answer_is_logged_in_full_once() {
-        let path = temp_config("off-reference-log", "{}");
-        let log_file = log::path(&path);
-        let _ = fs::remove_file(&log_file);
+    fn an_off_reference_answer_is_saved_once_and_logged_by_reference() {
+        let dir = env::temp_dir().join(format!("jeff-test-answers-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jeff.json").to_str().unwrap().to_owned();
         let app = test_app(&path);
         let bad = br#"{"model":"m","answers":{"q":{"noul":"0.5"}}}"#;
         let reordered = br#"{"answers":{"q":{"noul":"0.5"}},"model":"m"}"#;
-        let other = br#"{"model":"m","answers":{"q":{"noul":"0.6"}}}"#;
-        for body in [&bad[..], reordered, other] {
+        for body in [&bad[..], bad, reordered] {
             let msg = off_reference(&app, "stub", "answer 'q': invalid type", body).1;
             assert_eq!(
                 msg,
                 "Provider 'stub' sent an unreadable response. Check jeff.log for the cause."
             );
         }
-        let log = fs::read_to_string(&log_file).unwrap();
-        assert_eq!(log.matches(r#""noul":"0.5""#).count(), 1, "{log}");
-        assert_eq!(log.matches(r#""noul":"0.6""#).count(), 1, "{log}");
-        assert_eq!(log.matches("logged in full above").count(), 1, "{log}");
         let id = answer_id(bad);
-        assert_eq!(id, answer_id(reordered));
-        assert_eq!(log.matches(&id).count(), 2, "{log}");
-        let _ = fs::remove_file(&log_file);
-        let _ = fs::remove_file(&path);
+        assert_ne!(id, answer_id(reordered), "the id names the exact text");
+        let saved = fs::read(dir.join("logs").join(format!("{id}.json"))).unwrap();
+        assert_eq!(saved, bad, "the file holds the provider's bytes as sent");
+        assert_eq!(fs::read_dir(dir.join("logs")).unwrap().count(), 2);
+        let log = fs::read_to_string(dir.join("jeff.log")).unwrap();
+        assert_eq!(log.lines().count(), 3, "{log}");
+        assert_eq!(log.matches(&format!("logs/{id}.json")).count(), 2, "{log}");
+        assert!(!log.contains(r#""noul""#), "{log}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The cache key hashes the body jeff sends, so the same request with its fields in another order must hit it.
