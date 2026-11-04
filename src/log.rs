@@ -49,6 +49,47 @@ pub fn write(config_path: &str, event: &str, summary: &str, problems: &[String])
         .is_ok()
 }
 
+/// Saves `bytes` as `logs/<name>` next to jeff.log, once: an existing file with that name is the same content, since
+/// names come from a hash of it. Returns the path as jeff.log writes it.
+pub fn save_item(config_path: &str, name: &str, bytes: &[u8]) -> std::io::Result<String> {
+    let dir = path(config_path).with_file_name("logs");
+    fs::create_dir_all(&dir)?;
+    land(&dir, name, |f| f.write_all(bytes))?;
+    Ok(format!("logs/{name}"))
+}
+
+/// Writes `dir/name` through a temp file renamed into place, so the name only ever holds a whole file: a write that
+/// breaks off leaves nothing, and a reader racing a writer sees either no file or the full one.
+fn land(
+    dir: &Path,
+    name: &str,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    static TEMPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let target = dir.join(name);
+    if target.exists() {
+        return Ok(());
+    }
+    let n = TEMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = dir.join(format!("{name}.{}.{n}.tmp", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let landed = options
+        .open(&temp)
+        .and_then(|mut f| write(&mut f))
+        .and_then(|()| fs::rename(&temp, &target));
+    if landed.is_err() {
+        let _ = fs::remove_file(&temp);
+        // Another request may have landed the same content meanwhile; Windows refuses a rename onto an open file.
+        if target.exists() {
+            return Ok(());
+        }
+    }
+    landed
+}
+
 /// Where an error message should send the reader for a cause that `write` reported as `logged` or not.
 pub fn cause_in(logged: bool) -> &'static str {
     if logged {
@@ -101,5 +142,53 @@ mod tests {
             lines[3].ends_with("Z config_fixed jeff.json fixed"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn an_item_lands_whole_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("jeff-test-items-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("logs")).unwrap();
+        let config = dir.join("jeff.json").to_str().unwrap().to_owned();
+        // A temp file left by a write that broke off never counts as the saved item.
+        fs::write(dir.join("logs").join("a.json.0.tmp"), b"{\"half").unwrap();
+        assert_eq!(save_item(&config, "a.json", b"{}").unwrap(), "logs/a.json");
+        assert_eq!(save_item(&config, "a.json", b"{}").unwrap(), "logs/a.json");
+        assert_eq!(fs::read(dir.join("logs").join("a.json")).unwrap(), b"{}");
+        let names: Vec<_> = fs::read_dir(dir.join("logs"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_item_that_cannot_be_saved_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("jeff-test-noitems-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("logs"), b"a file where the folder should be").unwrap();
+        let config = dir.join("jeff.json").to_str().unwrap().to_owned();
+        assert!(save_item(&config, "a.json", b"{}").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_write_that_breaks_off_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("jeff-test-broken-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let broken = land(&dir, "a.json", |f| {
+            f.write_all(b"{\"half")?;
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(broken.is_err());
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            0,
+            "no file, whole or partial, is left"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
