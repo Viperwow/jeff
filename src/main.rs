@@ -4189,11 +4189,23 @@ mod tests {
             "Provider 'stub' sent an unreadable response. Check jeff.log for the cause."
         );
         let log = fs::read_to_string(dir.join("jeff.log")).unwrap();
-        assert!(
-            log.contains("provider stub: the answer does not match the Jev reference: answer 'q': invalid type; full answer not saved: "),
-            "{log}"
-        );
         let _ = fs::remove_dir_all(&dir);
+        assert_eq!(log.lines().count(), 1, "{log}");
+        let line = log.trim_end();
+        let (time, rest) = line.split_once(' ').unwrap();
+        let shape: String = time
+            .chars()
+            .map(|c| if c.is_ascii_digit() { '0' } else { c })
+            .collect();
+        assert_eq!(shape, "0000-00-00T00:00:00Z", "{line}");
+        let rest = rest.strip_prefix("provider_error provider ").expect(line);
+        let (provider, rest) = rest
+            .split_once(": the answer does not match the Jev reference: ")
+            .expect(line);
+        assert_eq!(provider, "stub");
+        let (cause, error) = rest.split_once("; full answer not saved: ").expect(line);
+        assert_eq!(cause, "answer 'q': invalid type");
+        assert!(!error.trim().is_empty(), "the OS gives the reason: {line}");
     }
 
     /// The cache key hashes the body jeff sends, so the same request with its fields in another order must hit it.
