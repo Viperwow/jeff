@@ -4176,6 +4176,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn an_answer_that_cannot_be_saved_is_still_logged() {
+        let dir = env::temp_dir().join(format!("jeff-test-unsaved-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("logs"), "a file where the folder should be").unwrap();
+        let path = dir.join("jeff.json").to_str().unwrap().to_owned();
+        let msg = off_reference(&test_app(&path), "stub", "answer 'q': invalid type", b"{}").1;
+        assert_eq!(
+            msg,
+            "Provider 'stub' sent an unreadable response. Check jeff.log for the cause."
+        );
+        let log = fs::read_to_string(dir.join("jeff.log")).unwrap();
+        assert!(
+            log.contains("provider stub: the answer does not match the Jev reference: answer 'q': invalid type; full answer not saved: "),
+            "{log}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// The cache key hashes the body jeff sends, so the same request with its fields in another order must hit it.
     #[test]
     fn field_order_does_not_change_the_body_sent_upstream() {
