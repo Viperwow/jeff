@@ -4176,6 +4176,61 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn an_answer_that_cannot_be_saved_is_still_logged() {
+        let dir = env::temp_dir().join(format!("jeff-test-unsaved-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("logs"), "a file where the folder should be").unwrap();
+        let path = dir.join("jeff.json").to_str().unwrap().to_owned();
+        let noise = |n: usize| {
+            for i in 0..n {
+                log::write(
+                    &path,
+                    "provider_error",
+                    &format!("provider h2o: cause {i}"),
+                    &[],
+                );
+                log::write(
+                    &path,
+                    "config_invalid",
+                    "jeff.json: 2 problems",
+                    &["a".into(), "b".into()],
+                );
+            }
+        };
+        noise(500);
+        let msg = off_reference(&test_app(&path), "stub", "answer 'q': invalid type", b"{}").1;
+        noise(500);
+        assert_eq!(
+            msg,
+            "Provider 'stub' sent an unreadable response. Check jeff.log for the cause."
+        );
+        let log = fs::read_to_string(dir.join("jeff.log")).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(log.lines().count(), 4_001, "every entry stays whole");
+        let ours: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains(" provider stub: "))
+            .collect();
+        assert_eq!(ours.len(), 1, "{ours:?}");
+        let line = ours[0];
+        let (time, rest) = line.split_once(' ').unwrap();
+        let shape: String = time
+            .chars()
+            .map(|c| if c.is_ascii_digit() { '0' } else { c })
+            .collect();
+        assert_eq!(shape, "0000-00-00T00:00:00Z", "{line}");
+        let rest = rest.strip_prefix("provider_error provider ").expect(line);
+        let (provider, rest) = rest
+            .split_once(": the answer does not match the Jev reference: ")
+            .expect(line);
+        assert_eq!(provider, "stub");
+        let (cause, error) = rest.split_once("; full answer not saved: ").expect(line);
+        assert_eq!(cause, "answer 'q': invalid type");
+        assert!(!error.trim().is_empty(), "the OS gives the reason: {line}");
+    }
+
     /// The cache key hashes the body jeff sends, so the same request with its fields in another order must hit it.
     #[test]
     fn field_order_does_not_change_the_body_sent_upstream() {
